@@ -1,0 +1,55 @@
+model:
+  name_or_path: /data/lz/hf_cache/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  torch_dtype: bfloat16
+  lora_rank: 8
+  lora_alpha: 16
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+memory:
+  num_memory_tokens: 8
+  encoder_heads: 8
+  reconstruction_weight: 1.0
+  qa_weight: 1.0
+  reconstruction_loss: mse_cosine
+  reconstruction_cosine_weight: 0.1
+  contrastive_weight: 0.0
+  contrastive_temperature: 0.07
+evaluation:
+  teacher_forced_every: 2000
+  autoregressive_every: 4000
+  max_new_tokens: 128
+data:
+  root: /data/lz/contexts/aggregated
+  train_datasets: [squad, coqa, drop]
+  validation_datasets: [squad]
+  test_datasets: [squad]
+  max_context_tokens: 2048
+  max_question_tokens: 128
+  max_answer_tokens: 128
+  train_max_samples: null
+  validation_max_samples: 1000
+  test_max_samples: 1000
+  filter_long_context: true
+  filter_no_qa: true
+  sortish_bucket_multiplier: 50
+  use_chat_template: false
+  chat_template_enable_thinking: false
+training:
+  batch_size: 2
+  epochs: 1
+  grad_accumulation: 1
+  max_grad_norm: 1.0
+  seed: 42
+optimizer:
+  name: adamw
+  lr: 1.0e-4
+  weight_decay: 0.01
+scheduler:
+  name: cosine
+  warmup_steps: 500
+checkpoint:
+  output_dir: outputs/qwen-metalora
+  save_every_steps: 1000
+logging:
+  wandb_project: MemoryQwen
+  wandb_mode: online
+  wandb_run_id: null

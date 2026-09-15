@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+outputs/
+output/
+wandb/
+*.pt
+*.pth
+*.safetensors
+.idea/
+.vscode/
