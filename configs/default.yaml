@@ -31,6 +31,7 @@ data:
   filter_long_context: true
   filter_no_qa: true
   sortish_bucket_multiplier: 50
+  cache_sortish_lengths: true
   use_chat_template: false
   chat_template_enable_thinking: false
 training:

@@ -58,6 +58,7 @@ class DataConfig:
     filter_long_context: bool = True
     filter_no_qa: bool = True
     sortish_bucket_multiplier: int = 50
+    cache_sortish_lengths: bool = True
     append_eos: bool = True
     use_chat_template: bool = False
     chat_template_enable_thinking: bool = False

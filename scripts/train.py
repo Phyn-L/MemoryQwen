@@ -67,6 +67,7 @@ def main() -> None:
         train_dataset, tokenizer, cfg.training.batch_size,
         cfg.data.sortish_bucket_multiplier, cfg.training.seed, cfg.data.use_chat_template,
         cfg.data.chat_template_enable_thinking,
+        cfg.checkpoint.output_dir if cfg.data.cache_sortish_lengths else None,
     )
     train_loader = DataLoader(
         train_dataset, batch_size=cfg.training.batch_size, sampler=sampler, collate_fn=collate,

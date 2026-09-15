@@ -1,7 +1,13 @@
 from __future__ import annotations
-import json, os, random
+import hashlib
+import json
+import os
+import random
 from pathlib import Path
 from dataclasses import dataclass
+from typing import Any
+
+import fcntl
 from torch.utils.data import Dataset, Sampler
 import torch
 from tqdm.auto import tqdm
@@ -35,6 +41,23 @@ class AggregatedQADataset(Dataset):
         names=[p.name for p in sorted(root.iterdir()) if p.is_dir()] if dataset=="all" else ([dataset] if isinstance(dataset,str) else list(dataset))
         files = [(name, root / name / f"{split}.jsonl") for name in names]
         files = [(name, path) for name, path in files if path.exists()]
+        self.cache_metadata = {
+            "root": str(root.resolve()),
+            "datasets": names,
+            "split": split,
+            "files": [
+                {
+                    "path": str(path.resolve()),
+                    "size": path.stat().st_size,
+                    "mtime_ns": path.stat().st_mtime_ns,
+                }
+                for _, path in files
+            ],
+            "max_context_tokens": max_context_tokens,
+            "max_samples": max_samples,
+            "filter_long_context": filter_long_context,
+            "filter_no_qa": filter_no_qa,
+        }
         with tqdm(files, total=len(files), desc=f"Loading {split} data", unit="file", disable=not _progress_enabled()) as file_bar:
           for name, path in file_bar:
             for line in path.open(encoding="utf-8"):
@@ -64,15 +87,92 @@ class AggregatedQADataset(Dataset):
     def __getitem__(self, i): return self.records[i]
 
 class SortishSampler(Sampler[int]):
-    def __init__(self, dataset, tokenizer, batch_size, bucket_multiplier=50, seed=42, use_chat_template=False, chat_template_enable_thinking=False):
+    CACHE_VERSION = 1
+
+    def __init__(self, dataset, tokenizer, batch_size, bucket_multiplier=50, seed=42, use_chat_template=False, chat_template_enable_thinking=False, cache_dir=None):
         self.dataset,self.batch_size,self.seed=dataset,batch_size,seed; self.epoch=0
+        metadata = self._cache_metadata(
+            tokenizer, use_chat_template, chat_template_enable_thinking,
+        )
+        self.lengths = self._load_or_build_lengths(
+            tokenizer, use_chat_template, chat_template_enable_thinking,
+            Path(cache_dir) if cache_dir else None, metadata,
+        )
+        self.bucket_multiplier=bucket_multiplier; self._rebuild()
+
+    def _cache_metadata(self, tokenizer, use_chat_template, enable_thinking):
+        chat_template = getattr(tokenizer, "chat_template", None)
+        tokenizer_name = getattr(tokenizer, "name_or_path", tokenizer.__class__.__name__)
+        payload = {
+            "version": self.CACHE_VERSION,
+            "dataset": getattr(self.dataset, "cache_metadata", {}),
+            "record_count": len(self.dataset.records),
+            "tokenizer": str(tokenizer_name),
+            "tokenizer_class": tokenizer.__class__.__name__,
+            "vocab_size": getattr(tokenizer, "vocab_size", None),
+            "use_chat_template": use_chat_template,
+            "chat_template_enable_thinking": enable_thinking,
+            "chat_template_hash": (
+                hashlib.sha256(str(chat_template).encode("utf-8")).hexdigest()
+                if chat_template is not None else None
+            ),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        payload["fingerprint"] = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        return payload
+
+    def _build_lengths(self, tokenizer, use_chat_template, enable_thinking):
         lengths=[]
-        with tqdm(total=len(dataset.records), desc="Preparing sortish lengths", unit="sample", disable=not _progress_enabled()) as length_bar:
-            for record in dataset.records:
-                question = render_question(tokenizer, record.question, use_chat_template, chat_template_enable_thinking)
+        with tqdm(total=len(self.dataset.records), desc="Preparing sortish lengths", unit="sample", disable=not _progress_enabled()) as length_bar:
+            for record in self.dataset.records:
+                question = render_question(tokenizer, record.question, use_chat_template, enable_thinking)
                 lengths.append(len(tokenizer(record.context,add_special_tokens=False).input_ids)+len(tokenizer(question,add_special_tokens=False).input_ids))
                 length_bar.update(1)
-        self.lengths=lengths; self.bucket_multiplier=bucket_multiplier; self._rebuild()
+        return lengths
+
+    def _load_or_build_lengths(self, tokenizer, use_chat_template, enable_thinking, cache_dir, metadata):
+        if cache_dir is None:
+            return self._build_lengths(tokenizer, use_chat_template, enable_thinking)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_path = cache_dir / "sortish_lengths.json"
+        lock_path = cache_dir / "sortish_lengths.lock"
+        with lock_path.open("w") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            cached = self._read_cache(cache_path, metadata)
+            if cached is not None:
+                if _progress_enabled():
+                    print(f"Reusing sortish lengths cache: {cache_path}")
+                return cached
+            lengths = self._build_lengths(tokenizer, use_chat_template, enable_thinking)
+            temporary = cache_path.with_name(
+                f"{cache_path.name}.{os.getpid()}.tmp"
+            )
+            temporary.write_text(
+                json.dumps({"metadata": metadata, "lengths": lengths}),
+                encoding="utf-8",
+            )
+            os.replace(temporary, cache_path)
+            if _progress_enabled():
+                print(f"Saved sortish lengths cache: {cache_path}")
+            return lengths
+
+    def _read_cache(self, cache_path: Path, metadata: dict[str, Any]):
+        if not cache_path.exists():
+            return None
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            lengths = cached.get("lengths")
+            if (
+                cached.get("metadata", {}).get("fingerprint")
+                != metadata["fingerprint"]
+                or not isinstance(lengths, list)
+                or len(lengths) != len(self.dataset.records)
+                or any(not isinstance(length, int) or length < 0 for length in lengths)
+            ):
+                return None
+            return lengths
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
     def _rebuild(self):
         self.buckets=[]; size=max(self.batch_size, self.batch_size*self.bucket_multiplier)
         order=sorted(range(len(self.lengths)), key=self.lengths.__getitem__)

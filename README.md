@@ -28,6 +28,10 @@ training entry point only loads train and validation data; test evaluation is ha
 by `scripts/test.py`. Training, optimizer, scheduler, evaluation, checkpoint, and
 logging settings live in their corresponding top-level config sections. Legacy flat
 training/checkpoint/logging fields remain readable for compatibility.
+With `data.cache_sortish_lengths: true` (the default), tokenized sample lengths are
+cached as `sortish_lengths.json` under the configured checkpoint output directory,
+for example `outputs/qwen-1.7b/`. The cache is rebuilt automatically when its data,
+tokenizer, filtering, or chat-template fingerprint changes.
 The local Qwen paths mirror `/data/lz/mkv/configs/qwen1.7b.yaml`, `qwen4b.yaml`, and
 `qwen8b.yaml`; use the corresponding JSON override with `--config` after merging it
 with `configs/default.json` if selecting another backbone.
