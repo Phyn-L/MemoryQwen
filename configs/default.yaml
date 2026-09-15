@@ -20,6 +20,7 @@ evaluation:
   teacher_forced_every: 2000
   autoregressive_every: 4000
   max_new_tokens: 128
+  qa_batch_size: 4
 data:
   root: /data/lz/contexts/aggregated
   train_datasets: [squad, coqa, drop]
@@ -38,6 +39,7 @@ data:
   cache_dataset: true
   use_chat_template: false
   chat_template_enable_thinking: false
+  qa_per_context: 4
 training:
   batch_size: 2
   epochs: 1

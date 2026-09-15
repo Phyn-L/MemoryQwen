@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from datasets import Dataset
 
-CACHE_VERSION = 2
+CACHE_VERSION = 3
 CACHE_DIR_NAME = "dataset_cache"
 DATASET_DIR_NAME = "hf_dataset"
 
@@ -34,20 +34,20 @@ def load_records(cache_dir: Path, metadata: dict[str, Any]) -> Dataset | None:
         if json.loads(meta_path.read_text(encoding="utf-8")).get("fingerprint") != metadata["fingerprint"]: return None
         ds = Dataset.load_from_disk(str(dataset_dir))
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        return ds if meta.get("count") == len(ds) else None
+        return ds if meta.get("contexts", meta.get("count")) == len(ds) and "qa_pairs" in ds.column_names else None
     except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError): return None
 
 def save_records(cache_dir: Path, metadata: dict[str, Any], records) -> None:
     cache_dir.mkdir(parents=True, exist_ok=True)
     temp_dir, dataset_dir = cache_dir / f"{DATASET_DIR_NAME}.{os.getpid()}.tmp", cache_dir / DATASET_DIR_NAME
-    cols = {k: [] for k in ("context", "question", "answer", "dataset", "context_id")}
-    for context, question, answer, dataset, context_id in records:
-        for key, value in zip(cols, (context, question, answer, dataset, context_id)): cols[key].append(value)
-    Dataset.from_dict(cols).save_to_disk(str(temp_dir))
+    dataset = records if isinstance(records, Dataset) else Dataset.from_list(records)
+    dataset.save_to_disk(str(temp_dir))
     if dataset_dir.exists():
         import shutil; shutil.rmtree(dataset_dir)
     os.replace(temp_dir, dataset_dir)
-    meta = dict(metadata); meta["count"] = len(records)
+    meta = dict(metadata)
+    meta["contexts"] = len(dataset)
+    meta["qa_pairs"] = sum(len(row["qa_pairs"]) for row in dataset)
     tmp = cache_dir / f"records.meta.json.{os.getpid()}.tmp"
     tmp.write_text(json.dumps(meta), encoding="utf-8"); os.replace(tmp, cache_dir / "records.meta.json")
 
@@ -56,9 +56,13 @@ def cached_load(cache_dir: Path, metadata: dict[str, Any], build, *, verbose=Tru
     with _lock(cache_dir / "records.lock"):
         ds = load_records(cache_dir, metadata)
         if ds is not None:
-            if verbose: print(f"Reusing Hugging Face dataset cache: {cache_dir / DATASET_DIR_NAME} ({len(ds)} records)")
+            if verbose:
+                qa_pairs = sum(len(row["qa_pairs"]) for row in ds)
+                print(f"Reusing Hugging Face dataset cache: {cache_dir / DATASET_DIR_NAME} (contexts={len(ds)}, qa_pairs={qa_pairs})")
             return ds
         records = build(); save_records(cache_dir, metadata, records); ds = load_records(cache_dir, metadata)
         if ds is None: raise RuntimeError(f"Failed to load dataset cache: {cache_dir}")
-        if verbose: print(f"Saved Hugging Face dataset cache: {cache_dir / DATASET_DIR_NAME} ({len(ds)} records)")
+        if verbose:
+            qa_pairs = sum(len(row["qa_pairs"]) for row in ds)
+            print(f"Saved Hugging Face dataset cache: {cache_dir / DATASET_DIR_NAME} (contexts={len(ds)}, qa_pairs={qa_pairs})")
         return ds

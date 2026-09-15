@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from utils.config import TrainConfig, dtype_from_name
-from src.data import AggregatedQADataset, SortishSampler, collate_fn
+from src.data import AggregatedContextDataset, SortishSampler, collate_fn
 from src.evaluator import Evaluator
 from src.losses import (
     combine_losses,
@@ -95,17 +95,17 @@ def main() -> None:
         limit = getattr(cfg.data, f"{split}_max_samples")
         if limit is None and split == "train":
             limit = cfg.data.max_samples
-        return AggregatedQADataset(
+        return AggregatedContextDataset(
             cfg.data.root, names, split_name, tokenizer,
             cfg.data.max_context_tokens, limit,
             cfg.data.filter_long_context, cfg.data.filter_no_qa, allow_empty=(split != "train"),
             cache_dir=model_cache_dir if cfg.data.cache_dataset else None,
         )
 
-    collate = lambda rows: collate_fn(
-        rows, tokenizer, cfg.data.max_context_tokens,
-        cfg.data.max_question_tokens, cfg.data.max_answer_tokens, cfg.data.append_eos,
-        cfg.data.use_chat_template, cfg.data.chat_template_enable_thinking,
+    train_collate = lambda rows: collate_fn(
+        rows, tokenizer, cfg.data.max_context_tokens, cfg.data.max_question_tokens,
+        cfg.data.max_answer_tokens, cfg.data.append_eos, cfg.data.use_chat_template,
+        cfg.data.chat_template_enable_thinking, cfg.data.qa_per_context, True,
     )
     train_dataset = make_dataset("train")
     sampler = SortishSampler(
@@ -115,19 +115,18 @@ def main() -> None:
         model_cache_dir if cfg.data.cache_sortish_lengths else None,
     )
     train_loader = DataLoader(
-        train_dataset, batch_size=cfg.training.batch_size, sampler=sampler, collate_fn=collate,
+        train_dataset, batch_size=cfg.training.batch_size, sampler=sampler, collate_fn=train_collate,
     )
     validation_dataset = make_dataset("validation")
     validation_loader = DataLoader(
         validation_dataset, batch_size=cfg.training.batch_size,
-        shuffle=False, collate_fn=collate,
+        shuffle=False, collate_fn=lambda rows: collate_fn(rows, tokenizer, cfg.data.max_context_tokens, cfg.data.max_question_tokens, cfg.data.max_answer_tokens, cfg.data.append_eos, cfg.data.use_chat_template, cfg.data.chat_template_enable_thinking, cfg.data.qa_per_context, False),
     )
     evaluator = Evaluator(tokenizer, cfg)
-    total_steps = max(
-        1,
-        (len(train_loader) * cfg.training.epochs + cfg.training.grad_accumulation - 1)
-        // cfg.training.grad_accumulation,
-    )
+    effective_loader_len = len(train_loader)
+    if accelerator is not None and accelerator.num_processes > 1:
+        effective_loader_len = (effective_loader_len + accelerator.num_processes - 1) // accelerator.num_processes
+    total_steps = max(1, (effective_loader_len * cfg.training.epochs + cfg.training.grad_accumulation - 1) // cfg.training.grad_accumulation)
     optimizer = build_optimizer(model, cfg.optimizer)
     scheduler = build_scheduler(optimizer, cfg.scheduler, total_steps)
     manager = CheckpointManager(
@@ -172,8 +171,11 @@ def main() -> None:
             ids = {k: v.to(device) for k, v in batch.items() if k != "records"}
             base_model = accelerator.unwrap_model(model) if accelerator is not None else model
             embedding = base_model.qwen.get_input_embeddings()
+            context_indices = ids["qa_context_indices"]
+            expanded_context_ids = ids["context_ids"].index_select(0, context_indices)
+            expanded_context_mask = ids["context_mask"].index_select(0, context_indices)
             output = model(
-                embedding(ids["context_ids"]), ids["context_mask"],
+                embedding(expanded_context_ids), expanded_context_mask,
                 embedding(ids["question_ids"]), ids["question_mask"],
                 embedding(ids["answer_ids"]), ids["answer_mask"], ids["labels"],
             )

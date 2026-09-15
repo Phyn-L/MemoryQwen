@@ -66,6 +66,7 @@ class DataConfig:
     append_eos: bool = True
     use_chat_template: bool = False
     chat_template_enable_thinking: bool = False
+    qa_per_context: int = 4
 
 
 @dataclass
@@ -88,6 +89,7 @@ class EvaluationConfig:
     teacher_forced_every: int = 2000
     autoregressive_every: int = 4000
     max_new_tokens: int = 128
+    qa_batch_size: int = 4
 
 
 @dataclass
@@ -175,6 +177,8 @@ class TrainConfig:
             raise ValueError("question/answer token limits must be positive")
         if d.sortish_bucket_multiplier <= 0:
             raise ValueError("sortish_bucket_multiplier must be positive")
+        if d.qa_per_context <= 0:
+            raise ValueError("data.qa_per_context must be positive")
         if self.model.lora_rank <= 0 or m.memory_length <= 0:
             raise ValueError("lora_rank and memory_length must be positive")
         if m.decoder_hidden_size <= 0 or m.decoder_ffn_ratio <= 0 or m.decoder_heads <= 0:
@@ -196,6 +200,8 @@ class TrainConfig:
             raise ValueError("checkpoint.save_every_steps must be positive")
         if self.evaluation.teacher_forced_every <= 0 or self.evaluation.autoregressive_every <= 0:
             raise ValueError("evaluation intervals must be positive")
+        if self.evaluation.qa_batch_size <= 0:
+            raise ValueError("evaluation.qa_batch_size must be positive")
 
 
 def dtype_from_name(name: str):

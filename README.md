@@ -9,8 +9,13 @@ Every Qwen layer has an independent decoder trained to reconstruct
 the original context input embeddings. The objective is
 `qa_weight * answer_only_causal_CE + reconstruction_weight * length_normalized_reconstruction`.
 
-The default data root is `/data/lz/contexts/aggregated`. Empty-QA records and contexts
+The default data root is `/data/lz/contexts/aggregated`. Each dataset item is one context; empty-QA records and contexts
 whose tokenized length exceeds 2048 are removed before a sortish length sampler is built.
+All valid QA pairs belonging to a context are retained. Training samples at most
+`data.qa_per_context` (4 by default) QA pairs randomly on every collate call, while
+validation and test expand every QA pair. A context batch of size C therefore has a
+separate QA batch of size Q (Q <= C*qa_per_context in training), with
+`qa_context_indices` mapping each QA row back to its context row.
 
 ```bash
 pip install -e '.[train]'
@@ -39,13 +44,20 @@ With `data.cache_sortish_lengths: true` (the default), tokenized sample lengths 
 cached as `sortish_lengths.json` under the model cache directory, for example
 `outputs/Qwen1.7B/`. The cache is rebuilt automatically when its data,
 tokenizer, filtering, or chat-template fingerprint changes.
-With `data.cache_dataset: true` (the default), the filtered records themselves are
+With `data.cache_dataset: true` (the default), the filtered context records themselves are
 cached as a Hugging Face Arrow dataset under
 `outputs/QwenXB/dataset_cache/<split>-<fingerprint>/hf_dataset/`.
 The first run converts the filtered records to Arrow with `Dataset.save_to_disk()`.
 Later runs use `Dataset.load_from_disk()` and avoid JSONL parsing; `sortish_lengths.json`
 still caches the cheaper length pass separately. Set `data.cache_dataset: false` to
 always rebuild from the source JSONL files.
+The dataset and sortish caches are context-level and use bumped format versions, so
+old flat-QA caches (including ~998k-row length caches) are ignored automatically.
+The current model API requires equal batch dimensions, so train/evaluation use
+`index_select` to expand context rows to Q before the joint Qwen forward. This
+preserves model and memory semantics but does not fully reuse Transformer computation
+for repeated contexts. Evaluation uses `evaluation.qa_batch_size` (4 by default)
+to micro-batch expanded QA rows while accumulating metrics by the actual QA count.
 Use the matching `train.yaml` with `--config` when selecting another backbone.
 
 The source layout is:
