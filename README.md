@@ -18,8 +18,10 @@ PYTHONPATH=. bash scripts/train.sh
 ```
 
 Each fresh run is named like `Qwen1.7B_20260915_173045`. This name is used for
-the W&B run, the checkpoint directory, and the dataset/sortish caches under
-`outputs/<run-name>/`. When resuming, the existing checkpoint directory is reused.
+the W&B run and checkpoint directory `outputs/<run-name>/`. Reusable dataset and
+sortish caches are stored separately by model under `outputs/Qwen1.7B/`, so new
+runs do not rebuild the same filtered dataset. When resuming, the existing
+checkpoint directory is reused.
 
 Configuration is YAML-only. Complete model-specific configurations are maintained as YAML files:
 `configs/qwen-1.7b/train.yaml`, `configs/qwen-4b/train.yaml`, and
@@ -34,11 +36,12 @@ training entry point only loads train and validation data; test evaluation is ha
 by `scripts/test.py`. Training, optimizer, scheduler, evaluation, checkpoint, and
 logging settings live in their corresponding top-level config sections.
 With `data.cache_sortish_lengths: true` (the default), tokenized sample lengths are
-cached as `sortish_lengths.json` under the configured checkpoint output directory,
-for example `outputs/qwen-1.7b/`. The cache is rebuilt automatically when its data,
+cached as `sortish_lengths.json` under the model cache directory, for example
+`outputs/Qwen1.7B/`. The cache is rebuilt automatically when its data,
 tokenizer, filtering, or chat-template fingerprint changes.
 With `data.cache_dataset: true` (the default), the filtered records themselves are
-cached as a Hugging Face Arrow dataset under `<checkpoint.output_dir>/dataset_cache/<split>-<fingerprint>/hf_dataset/`.
+cached as a Hugging Face Arrow dataset under
+`outputs/QwenXB/dataset_cache/<split>-<fingerprint>/hf_dataset/`.
 The first run converts the filtered records to Arrow with `Dataset.save_to_disk()`.
 Later runs use `Dataset.load_from_disk()` and avoid JSONL parsing; `sortish_lengths.json`
 still caches the cheaper length pass separately. Set `data.cache_dataset: false` to
