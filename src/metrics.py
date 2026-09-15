@@ -57,7 +57,6 @@ def qa_metrics(prediction, reference):
     return {
         "em": exact_match(prediction, reference),
         "f1": token_f1(prediction, reference),
-        "rouge": rouge,
         "rouge_l": rouge,
         "bleu": bleu(prediction, reference),
     }

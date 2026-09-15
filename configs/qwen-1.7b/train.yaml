@@ -41,7 +41,7 @@ evaluation:
   max_new_tokens: 128
   qa_batch_size: 4
 training:
-  batch_size: 1
+  batch_size: 4
   epochs: 1
   grad_accumulation: 1
   max_grad_norm: 1.0

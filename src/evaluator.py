@@ -43,7 +43,7 @@ class Evaluator:
     def teacher_forced(self, model, loader, device):
         model.eval()
         qa_sum = reconstruction_sum = 0.0
-        em = f1 = rouge = bleu = 0.0
+        em = f1 = rouge_l = bleu = 0.0
         samples = 0
         qa_weight = context_weight = 0
         enabled = os.environ.get("RANK", "0") in {"0", "-1"}
@@ -95,7 +95,7 @@ class Evaluator:
                     metrics = qa_metrics(text, record.answer)
                     em += metrics["em"]
                     f1 += metrics["f1"]
-                    rouge += metrics["rouge"]
+                    rouge_l += metrics["rouge_l"]
                     bleu += metrics["bleu"]
                     samples += 1
         model.train()
@@ -112,14 +112,14 @@ class Evaluator:
             "loss": total_value,
             "em": em / max(1, samples),
             "f1": f1 / max(1, samples),
-            "rouge": rouge / max(1, samples),
+            "rouge_l": rouge_l / max(1, samples),
             "bleu": bleu / max(1, samples),
         }
 
     @torch.no_grad()
     def autoregressive(self, model, loader, device):
         model.eval()
-        sums = {"em": 0.0, "f1": 0.0, "rouge": 0.0, "bleu": 0.0}
+        sums = {"em": 0.0, "f1": 0.0, "rouge_l": 0.0, "bleu": 0.0}
         samples = 0
         enabled = os.environ.get("RANK", "0") in {"0", "-1"}
         for batch in tqdm(
@@ -169,7 +169,6 @@ class Evaluator:
                 "ppl": teacher["ppl"],
                 "qa_loss": teacher["qa_loss"],
                 "reconstruction_loss": teacher["reconstruction_loss"],
-                "rouge_l": result["rouge"],
             }
         )
         return result
