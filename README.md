@@ -17,8 +17,11 @@ pip install -e '.[train]'
 PYTHONPATH=. bash scripts/train.sh
 ```
 
-`configs/default.json` is dependency-light; `configs/default.yaml` is provided for
-readability when PyYAML is installed. Set `data.train_datasets`,
+Complete model-specific configurations are maintained in both
+`configs/qwen-1.7b/train.json`, `configs/qwen-4b/train.json`, and
+`configs/qwen-8b/train.json` (JSON) and their corresponding `train.yaml` files.
+The JSON files do not act as partial overrides: each contains all sections needed
+for a reproducible run. Set `data.train_datasets`,
 `data.validation_datasets`, and `data.test_datasets` independently, with corresponding
 `*_max_samples` limits. Contexts longer than 2048 tokens and records without a usable
 QA pair are filtered before the sortish sampler is constructed. Set
@@ -26,15 +29,20 @@ QA pair are filtered before the sortish sampler is constructed. Set
 template; it is disabled by default. Empty evaluation JSONL files are accepted. The
 training entry point only loads train and validation data; test evaluation is handled
 by `scripts/test.py`. Training, optimizer, scheduler, evaluation, checkpoint, and
-logging settings live in their corresponding top-level config sections. Legacy flat
-training/checkpoint/logging fields remain readable for compatibility.
+logging settings live in their corresponding top-level config sections.
 With `data.cache_sortish_lengths: true` (the default), tokenized sample lengths are
 cached as `sortish_lengths.json` under the configured checkpoint output directory,
 for example `outputs/qwen-1.7b/`. The cache is rebuilt automatically when its data,
 tokenizer, filtering, or chat-template fingerprint changes.
-The local Qwen paths mirror `/data/lz/mkv/configs/qwen1.7b.yaml`, `qwen4b.yaml`, and
-`qwen8b.yaml`; use the corresponding JSON override with `--config` after merging it
-with `configs/default.json` if selecting another backbone.
+With `data.cache_dataset: true` (the default), the filtered records themselves are
+cached under `<checkpoint.output_dir>/dataset_cache/<split>-<fingerprint>/records.jsonl`.
+Reading the source JSONL files and tokenizing every context for the length filter is by
+far the most expensive part of startup, and it happens in every process of an
+`accelerate launch`; this cache skips it on later runs. `sortish_lengths.json` only
+caches the much cheaper length pass that runs after the dataset is already built, so it
+does not avoid that work. Set `data.cache_dataset: false` to always rebuild.
+Use the matching `train.json` or `train.yaml` with `--config` when selecting another
+backbone.
 
 The source layout is:
 
@@ -44,7 +52,7 @@ configs/qwen-4b/train.yaml
 configs/qwen-8b/train.yaml
 scripts/train.py  scripts/test.py  scripts/train.sh  scripts/test.sh
 src/model.py  src/losses.py  src/MemoryDecoder.py  src/data.py
-utils/optimizer.py  utils/scheduler.py  utils/checkpoint.py
+src/dataset_cache.py  utils/optimizer.py  utils/scheduler.py  utils/checkpoint.py
 utils/config.py  utils/ddp.py
 ```
 

@@ -10,7 +10,7 @@ if command -v accelerate >/dev/null 2>&1; then
     --num_machines 1 \
     --mixed_precision bf16 \
     --dynamo_backend no \
-    scripts/train.py --config configs/qwen-1.7b/train.yaml "$@"
+    scripts/train.py --config configs/qwen-1.7b/train.json "$@"
 else
-  python scripts/train.py --config configs/qwen-1.7b/train.yaml "$@"
+    python scripts/train.py --config configs/qwen-1.7b/train.json "$@"
 fi

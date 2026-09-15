@@ -12,6 +12,8 @@ from torch.utils.data import Dataset, Sampler
 import torch
 from tqdm.auto import tqdm
 
+from . import dataset_cache
+
 
 def _progress_enabled() -> bool:
     return os.environ.get("RANK", "0") in {"0", "-1"}
@@ -35,30 +37,45 @@ def _answer(qa):
     return next((str(x).strip() for x in a if x and str(x).strip()), None)
 
 class AggregatedQADataset(Dataset):
-    def __init__(self, root, dataset="all", split="train", tokenizer=None, max_context_tokens=2048, max_samples=None, filter_long_context=True, filter_no_qa=True, allow_empty=False):
+    def __init__(self, root, dataset="all", split="train", tokenizer=None, max_context_tokens=2048, max_samples=None, filter_long_context=True, filter_no_qa=True, allow_empty=False, cache_dir=None):
         self.records=[]; root=Path(root)
         if dataset is None: dataset="all"
         names=[p.name for p in sorted(root.iterdir()) if p.is_dir()] if dataset=="all" else ([dataset] if isinstance(dataset,str) else list(dataset))
         files = [(name, root / name / f"{split}.jsonl") for name in names]
         files = [(name, path) for name, path in files if path.exists()]
+        metadata = dataset_cache.build_metadata(
+            files,
+            split=split,
+            max_context_tokens=max_context_tokens,
+            filter_long_context=filter_long_context,
+            filter_no_qa=filter_no_qa,
+        )
+        # Only the filtered content is cached; ``max_samples`` bounds the result
+        # afterwards so capped and uncapped runs share a single cache entry.
         self.cache_metadata = {
             "root": str(root.resolve()),
             "datasets": names,
-            "split": split,
-            "files": [
-                {
-                    "path": str(path.resolve()),
-                    "size": path.stat().st_size,
-                    "mtime_ns": path.stat().st_mtime_ns,
-                }
-                for _, path in files
-            ],
-            "max_context_tokens": max_context_tokens,
             "max_samples": max_samples,
-            "filter_long_context": filter_long_context,
-            "filter_no_qa": filter_no_qa,
+            "filter": metadata,
         }
-        with tqdm(files, total=len(files), desc=f"Loading {split} data", unit="file", disable=not _progress_enabled()) as file_bar:
+        if cache_dir is not None:
+            split_dir = Path(cache_dir) / dataset_cache.CACHE_DIR_NAME / f"{split}-{metadata['fingerprint'][:16]}"
+            rows = dataset_cache.cached_load(
+                split_dir,
+                metadata,
+                lambda: self._build_records(files, tokenizer, max_context_tokens, filter_long_context, filter_no_qa),
+                verbose=_progress_enabled(),
+            )
+        else:
+            rows = self._build_records(files, tokenizer, max_context_tokens, filter_long_context, filter_no_qa)
+        if max_samples is not None:
+            rows = rows[:max_samples]
+        self.records = [Record(*row) for row in rows]
+        if not self.records and not allow_empty: raise RuntimeError(f"No usable records found under {root} split={split} datasets={names}")
+
+    def _build_records(self, files, tokenizer, max_context_tokens, filter_long_context, filter_no_qa):
+        rows=[]
+        with tqdm(files, total=len(files), desc="Loading data", unit="file", disable=not _progress_enabled()) as file_bar:
           for name, path in file_bar:
             for line in path.open(encoding="utf-8"):
                 if not line.strip():
@@ -77,17 +94,14 @@ class AggregatedQADataset(Dataset):
                     ans=_answer(qa)
                     if filter_no_qa and (not qa.get("question") or not ans): continue
                     question = str(qa["question"]).strip()
-                    if ans: self.records.append(Record(context, question, ans, name, str(row.get("context_id",""))))
-                    if max_samples is not None and len(self.records)>=max_samples: break
-                if max_samples is not None and len(self.records)>=max_samples: break
-                file_bar.set_postfix(records=len(self.records))
-            if max_samples is not None and len(self.records)>=max_samples: break
-        if not self.records and not allow_empty: raise RuntimeError(f"No usable records found under {root} split={split} datasets={names}")
+                    if ans: rows.append((context, question, ans, name, str(row.get("context_id",""))))
+                file_bar.set_postfix(records=len(rows))
+        return rows
     def __len__(self): return len(self.records)
     def __getitem__(self, i): return self.records[i]
 
 class SortishSampler(Sampler[int]):
-    CACHE_VERSION = 1
+    CACHE_VERSION = 2
 
     def __init__(self, dataset, tokenizer, batch_size, bucket_multiplier=50, seed=42, use_chat_template=False, chat_template_enable_thinking=False, cache_dir=None):
         self.dataset,self.batch_size,self.seed=dataset,batch_size,seed; self.epoch=0

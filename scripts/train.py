@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from utils.config import TrainConfig
+from utils.config import TrainConfig, dtype_from_name
 from src.data import AggregatedQADataset, SortishSampler, collate_fn
 from src.evaluator import Evaluator
 from src.losses import (
@@ -22,7 +22,7 @@ from utils import CheckpointManager, build_optimizer, build_scheduler
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/default.json")
+    parser.add_argument("--config", default="configs/qwen-1.7b/train.json")
     parser.add_argument("--resume")
     parser.add_argument("--wandb-run-id")
     args = parser.parse_args()
@@ -36,9 +36,15 @@ def main() -> None:
     accelerator = None
     try:
         from accelerate import Accelerator
+        configured_dtype = dtype_from_name(cfg.model.torch_dtype)
+        mixed_precision = {
+            torch.float32: "no",
+            torch.float16: "fp16",
+            torch.bfloat16: "bf16",
+        }[configured_dtype]
         accelerator = Accelerator(
             gradient_accumulation_steps=1,
-            mixed_precision="bf16" if torch.cuda.is_available() else "no",
+            mixed_precision=mixed_precision if torch.cuda.is_available() else "no",
         )
         device = accelerator.device
     except ImportError:
@@ -55,6 +61,7 @@ def main() -> None:
             cfg.data.root, names, split_name, tokenizer,
             cfg.data.max_context_tokens, limit,
             cfg.data.filter_long_context, cfg.data.filter_no_qa, allow_empty=(split != "train"),
+            cache_dir=cfg.checkpoint.output_dir if cfg.data.cache_dataset else None,
         )
 
     collate = lambda rows: collate_fn(

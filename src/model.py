@@ -21,13 +21,17 @@ class StaticLoRALinear(nn.Module):
     """PEFT-compatible static LoRA fallback used when ``peft`` is unavailable."""
     def __init__(self, base: nn.Linear, rank: int, alpha: float, dropout: float = 0.0):
         super().__init__(); self.base = base; self.rank = rank; self.scaling = alpha / rank
-        self.lora_A = nn.Parameter(torch.empty(rank, base.in_features))
-        self.lora_B = nn.Parameter(torch.zeros(base.out_features, rank))
+        self.lora_A = nn.Parameter(base.weight.new_empty(rank, base.in_features))
+        self.lora_B = nn.Parameter(base.weight.new_zeros(base.out_features, rank))
         self.dropout = nn.Dropout(dropout)
         nn.init.kaiming_uniform_(self.lora_A, a=5 ** 0.5)
         for p in base.parameters(): p.requires_grad = False
     def forward(self, x):
-        return self.base(x) + self.scaling * (self.dropout(x) @ self.lora_A.t() @ self.lora_B.t())
+        base_dtype = self.base.weight.dtype
+        base_out = self.base(x.to(base_dtype))
+        lora_x = self.dropout(x.to(base_dtype))
+        delta = self.scaling * (lora_x @ self.lora_A.t() @ self.lora_B.t())
+        return base_out + delta
 
 
 class LayerReconstructionDecoder(nn.Module):
@@ -104,10 +108,11 @@ class MetaLoRA(nn.Module):
         self.target_modules = tuple(target_modules or ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"))
         self.qwen = self._add_peft_lora(qwen, rank, alpha, dropout)
         self.qwen_hidden_size = self.qwen.config.hidden_size
+        qwen_dtype = self.qwen.get_input_embeddings().weight.dtype
         # Global learnable memory tokens are added to the pooled Qwen context
         # representation. They are trained together with LoRA and the decoders.
         self.memory_tokens = nn.Parameter(
-            torch.randn(memory_length, self.qwen_hidden_size) * 0.02
+            torch.randn(memory_length, self.qwen_hidden_size, dtype=qwen_dtype) * 0.02
         )
         layers = int(self.qwen.config.num_hidden_layers)
         self.decoders = nn.ModuleList([
@@ -117,6 +122,9 @@ class MetaLoRA(nn.Module):
             )
             for _ in range(layers)
         ])
+        # Qwen's embedding weight is the single source of truth for every
+        # floating-point parameter and buffer in this composite model.
+        self.to(dtype=qwen_dtype)
 
     def _add_peft_lora(self, qwen, rank, alpha, dropout):
         try:
@@ -140,13 +148,22 @@ class MetaLoRA(nn.Module):
     def base_model(self):
         return self.qwen
 
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.qwen.get_input_embeddings().weight.dtype
+
     def _encode_context(self, context_embeds, context_mask, question_embeds=None, question_mask=None, answer_embeds=None, answer_mask=None):
+        context_embeds = context_embeds.to(dtype=self.dtype)
         if question_embeds is None:
             question_embeds = context_embeds.new_empty(context_embeds.size(0), 0, context_embeds.size(-1))
             question_mask = context_mask.new_zeros(context_embeds.size(0), 0)
+        else:
+            question_embeds = question_embeds.to(dtype=self.dtype)
         if answer_embeds is None:
             answer_embeds = context_embeds.new_empty(context_embeds.size(0), 0, context_embeds.size(-1))
             answer_mask = context_mask.new_zeros(context_embeds.size(0), 0)
+        else:
+            answer_embeds = answer_embeds.to(dtype=self.dtype)
         memory_length = self.memory_tokens.size(0)
         memory_inputs = self.memory_tokens.unsqueeze(0).expand(context_embeds.size(0), -1, -1)
         sequence = torch.cat([context_embeds, memory_inputs, question_embeds, answer_embeds], dim=1)

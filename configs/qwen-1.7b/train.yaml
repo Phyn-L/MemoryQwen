@@ -31,6 +31,7 @@ data:
   filter_no_qa: true
   sortish_bucket_multiplier: 50
   cache_sortish_lengths: true
+  cache_dataset: true
   use_chat_template: false
   chat_template_enable_thinking: false
 evaluation:

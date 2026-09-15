@@ -13,7 +13,7 @@ from utils.checkpoint import CheckpointManager
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate a trained Qwen memory checkpoint")
-    parser.add_argument("--config", default="configs/qwen-1.7b/train.yaml")
+    parser.add_argument("--config", default="configs/qwen-1.7b/train.json")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--split", choices=("validation", "test"), default="test")
     parser.add_argument("--max-samples", type=int)
@@ -24,7 +24,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu"); model.to(device)
     names = getattr(cfg.data, f"{args.split}_datasets") or cfg.data.dataset
     split_name = getattr(cfg.data, f"{args.split}_split")
-    ds = AggregatedQADataset(cfg.data.root, names, split_name, tokenizer, cfg.data.max_context_tokens, args.max_samples, cfg.data.filter_long_context, cfg.data.filter_no_qa, allow_empty=True)
+    ds = AggregatedQADataset(cfg.data.root, names, split_name, tokenizer, cfg.data.max_context_tokens, args.max_samples, cfg.data.filter_long_context, cfg.data.filter_no_qa, allow_empty=True, cache_dir=cfg.checkpoint.output_dir if cfg.data.cache_dataset else None)
     collate = lambda rows: collate_fn(rows, tokenizer, cfg.data.max_context_tokens, cfg.data.max_question_tokens, cfg.data.max_answer_tokens, cfg.data.append_eos, cfg.data.use_chat_template, cfg.data.chat_template_enable_thinking)
     loader = DataLoader(
         ds, batch_size=cfg.training.batch_size, shuffle=False, collate_fn=collate,

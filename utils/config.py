@@ -61,6 +61,7 @@ class DataConfig:
     filter_no_qa: bool = True
     sortish_bucket_multiplier: int = 50
     cache_sortish_lengths: bool = True
+    cache_dataset: bool = True
     append_eos: bool = True
     use_chat_template: bool = False
     chat_template_enable_thinking: bool = False
@@ -146,42 +147,16 @@ class TrainConfig:
         model_values = dict(values.get("model", {}))
         if isinstance(model_values.get("target_modules"), list):
             model_values["target_modules"] = tuple(model_values["target_modules"])
-        section_names = {
-            "model", "memory", "data", "optimizer",
-            "scheduler", "evaluation", "training", "checkpoint", "logging",
-        }
-        top = {k: v for k, v in values.items() if k not in section_names}
-
-        # Accept legacy flat configs while serializing all new configs by section.
-        training_values = dict(values.get("training", {}))
-        for key in ("batch_size", "epochs", "grad_accumulation", "max_grad_norm", "seed"):
-            if key in top:
-                training_values.setdefault(key, top.pop(key))
-        checkpoint_values = dict(values.get("checkpoint", {}))
-        for key in ("output_dir", "save_every_steps"):
-            if key in top:
-                checkpoint_values.setdefault(key, top.pop(key))
-        logging_values = dict(values.get("logging", {}))
-        for key in ("wandb_project", "wandb_run_name", "wandb_mode", "wandb_run_id"):
-            if key in top:
-                logging_values.setdefault(key, top.pop(key))
-        memory_values = dict(values.get("memory", {}))
-        legacy_memory_length = memory_values.pop("num_memory_tokens", None)
-        if legacy_memory_length is not None:
-            if "memory_length" in memory_values and memory_values["memory_length"] != legacy_memory_length:
-                raise ValueError("memory.memory_length conflicts with legacy memory.num_memory_tokens")
-            memory_values.setdefault("memory_length", legacy_memory_length)
         return cls(
             model=ModelConfig(**model_values),
-            memory=MemoryConfig(**memory_values),
+            memory=MemoryConfig(**values.get("memory", {})),
             data=DataConfig(**data_values),
             optimizer=OptimizerConfig(**optimizer_values),
             scheduler=SchedulerConfig(**values.get("scheduler", {})),
             evaluation=EvaluationConfig(**values.get("evaluation", {})),
-            training=TrainingConfig(**training_values),
-            checkpoint=CheckpointConfig(**checkpoint_values),
-            logging=LoggingConfig(**logging_values),
-            **top,
+            training=TrainingConfig(**values.get("training", {})),
+            checkpoint=CheckpointConfig(**values.get("checkpoint", {})),
+            logging=LoggingConfig(**values.get("logging", {})),
         )
 
     def to_dict(self) -> dict[str, Any]:

@@ -5,7 +5,7 @@ model:
   lora_alpha: 16.0
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 memory: {memory_length: 8, encoder_heads: 8, decoder_heads: 8, reconstruction_weight: 1.0, qa_weight: 1.0}
-data: {root: /data/lz/contexts/aggregated, train_datasets: [squad, coqa, drop], validation_datasets: [squad], test_datasets: [squad], max_context_tokens: 2048, max_question_tokens: 128, max_answer_tokens: 128, cache_sortish_lengths: true, use_chat_template: false, chat_template_enable_thinking: false}
+data: {root: /data/lz/contexts/aggregated, train_datasets: [squad, coqa, drop], validation_datasets: [squad], test_datasets: [squad], max_context_tokens: 2048, max_question_tokens: 128, max_answer_tokens: 128, cache_sortish_lengths: true, cache_dataset: true, use_chat_template: false, chat_template_enable_thinking: false}
 evaluation: {teacher_forced_every: 2000, autoregressive_every: 4000, max_new_tokens: 128}
 training: {batch_size: 1, epochs: 1, grad_accumulation: 1, max_grad_norm: 1.0, seed: 42}
 optimizer: {name: adamw, lr: 1.0e-4, weight_decay: 0.01}
