@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
@@ -11,6 +12,12 @@ from utils.config import TrainConfig
 from utils.checkpoint import CheckpointManager
 
 
+def _model_label(model_path: str) -> str:
+    import re
+    match = re.search(r"Qwen(?:3)?[-_]?([0-9]+(?:\.[0-9]+)?)[Bb]", model_path, re.IGNORECASE)
+    return f"Qwen{match.group(1)}B" if match else "Qwen"
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate a trained Qwen memory checkpoint")
     parser.add_argument("--config", default="configs/qwen-1.7b/train.yaml")
@@ -19,12 +26,17 @@ def main():
     parser.add_argument("--max-samples", type=int)
     args = parser.parse_args()
     cfg = TrainConfig.from_file(args.config); cfg.validate()
+    checkpoint_path = Path(args.checkpoint).resolve()
+    cfg.checkpoint.output_dir = str(checkpoint_path.parent)
+    if not cfg.logging.wandb_run_name:
+        cfg.logging.wandb_run_name = checkpoint_path.parent.name
+    model_cache_dir = Path("outputs") / _model_label(cfg.model.name_or_path)
     tokenizer, model = load_model(cfg)
-    CheckpointManager(cfg.checkpoint.output_dir).load(args.checkpoint, model)
+    CheckpointManager(cfg.checkpoint.output_dir).load(checkpoint_path, model)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu"); model.to(device)
     names = getattr(cfg.data, f"{args.split}_datasets") or cfg.data.dataset
     split_name = getattr(cfg.data, f"{args.split}_split")
-    ds = AggregatedQADataset(cfg.data.root, names, split_name, tokenizer, cfg.data.max_context_tokens, args.max_samples, cfg.data.filter_long_context, cfg.data.filter_no_qa, allow_empty=True, cache_dir=cfg.checkpoint.output_dir if cfg.data.cache_dataset else None)
+    ds = AggregatedQADataset(cfg.data.root, names, split_name, tokenizer, cfg.data.max_context_tokens, args.max_samples, cfg.data.filter_long_context, cfg.data.filter_no_qa, allow_empty=True, cache_dir=model_cache_dir if cfg.data.cache_dataset else None)
     collate = lambda rows: collate_fn(rows, tokenizer, cfg.data.max_context_tokens, cfg.data.max_question_tokens, cfg.data.max_answer_tokens, cfg.data.append_eos, cfg.data.use_chat_template, cfg.data.chat_template_enable_thinking)
     loader = DataLoader(
         ds, batch_size=cfg.training.batch_size, shuffle=False, collate_fn=collate,

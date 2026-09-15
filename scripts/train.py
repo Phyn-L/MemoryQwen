@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
+from pathlib import Path
+import re
 import random
 
 import torch
@@ -18,6 +21,38 @@ from src.losses import (
 )
 from src.model import load_model
 from utils import CheckpointManager, build_optimizer, build_scheduler
+
+
+def _model_run_label(model_path: str) -> str:
+    match = re.search(r"Qwen(?:3)?[-_]?([0-9]+(?:\.[0-9]+)?)[Bb]", model_path, re.IGNORECASE)
+    if match:
+        return f"Qwen{match.group(1)}B"
+    return "Qwen"
+
+
+def _new_run_name(model_path: str) -> str:
+    return f"{_model_run_label(model_path)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+
+def _model_cache_dir(model_path: str) -> Path:
+    return Path("outputs") / _model_run_label(model_path)
+
+
+def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> None:
+    if resume:
+        run_dir = Path(resume).resolve().parent
+        cfg.checkpoint.output_dir = str(run_dir)
+        cfg.logging.wandb_run_name = cfg.logging.wandb_run_name or run_dir.name
+        return
+    is_main = accelerator is None or accelerator.is_main_process
+    run_name = _new_run_name(cfg.model.name_or_path) if is_main else None
+    num_processes = accelerator.num_processes if accelerator is not None else 1
+    if num_processes > 1:
+        names = [run_name]
+        torch.distributed.broadcast_object_list(names, src=0)
+        run_name = names[0]
+    cfg.logging.wandb_run_name = run_name
+    cfg.checkpoint.output_dir = str(Path("outputs") / run_name)
 
 
 def main() -> None:
@@ -51,6 +86,9 @@ def main() -> None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.to(device)
 
+    _configure_run_paths(cfg, accelerator, args.resume)
+    model_cache_dir = _model_cache_dir(cfg.model.name_or_path)
+
     def make_dataset(split: str):
         names = getattr(cfg.data, f"{split}_datasets") or cfg.data.dataset
         split_name = getattr(cfg.data, f"{split}_split")
@@ -61,7 +99,7 @@ def main() -> None:
             cfg.data.root, names, split_name, tokenizer,
             cfg.data.max_context_tokens, limit,
             cfg.data.filter_long_context, cfg.data.filter_no_qa, allow_empty=(split != "train"),
-            cache_dir=cfg.checkpoint.output_dir if cfg.data.cache_dataset else None,
+            cache_dir=model_cache_dir if cfg.data.cache_dataset else None,
         )
 
     collate = lambda rows: collate_fn(
@@ -74,7 +112,7 @@ def main() -> None:
         train_dataset, tokenizer, cfg.training.batch_size,
         cfg.data.sortish_bucket_multiplier, cfg.training.seed, cfg.data.use_chat_template,
         cfg.data.chat_template_enable_thinking,
-        cfg.checkpoint.output_dir if cfg.data.cache_sortish_lengths else None,
+        model_cache_dir if cfg.data.cache_sortish_lengths else None,
     )
     train_loader = DataLoader(
         train_dataset, batch_size=cfg.training.batch_size, sampler=sampler, collate_fn=collate,

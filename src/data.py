@@ -68,10 +68,13 @@ class AggregatedQADataset(Dataset):
             )
         else:
             rows = self._build_records(files, tokenizer, max_context_tokens, filter_long_context, filter_no_qa)
+            rows = dataset_cache.Dataset.from_list(
+                [dict(zip(("context", "question", "answer", "dataset", "context_id"), row)) for row in rows]
+            )
         if max_samples is not None:
-            rows = rows[:max_samples]
-        self.records = [Record(*row) for row in rows]
-        if not self.records and not allow_empty: raise RuntimeError(f"No usable records found under {root} split={split} datasets={names}")
+            rows = rows.select(range(min(max_samples, len(rows))))
+        self.dataset = rows
+        if not len(self.dataset) and not allow_empty: raise RuntimeError(f"No usable records found under {root} split={split} datasets={names}")
 
     def _build_records(self, files, tokenizer, max_context_tokens, filter_long_context, filter_no_qa):
         rows=[]
@@ -97,8 +100,10 @@ class AggregatedQADataset(Dataset):
                     if ans: rows.append((context, question, ans, name, str(row.get("context_id",""))))
                 file_bar.set_postfix(records=len(rows))
         return rows
-    def __len__(self): return len(self.records)
-    def __getitem__(self, i): return self.records[i]
+    def __len__(self): return len(self.dataset)
+    def __getitem__(self, i):
+        row = self.dataset[i]
+        return Record(row["context"], row["question"], row["answer"], row.get("dataset", ""), row.get("context_id", ""))
 
 class SortishSampler(Sampler[int]):
     CACHE_VERSION = 2
@@ -120,7 +125,7 @@ class SortishSampler(Sampler[int]):
         payload = {
             "version": self.CACHE_VERSION,
             "dataset": getattr(self.dataset, "cache_metadata", {}),
-            "record_count": len(self.dataset.records),
+            "record_count": len(self.dataset),
             "tokenizer": str(tokenizer_name),
             "tokenizer_class": tokenizer.__class__.__name__,
             "vocab_size": getattr(tokenizer, "vocab_size", None),
@@ -137,10 +142,10 @@ class SortishSampler(Sampler[int]):
 
     def _build_lengths(self, tokenizer, use_chat_template, enable_thinking):
         lengths=[]
-        with tqdm(total=len(self.dataset.records), desc="Preparing sortish lengths", unit="sample", disable=not _progress_enabled()) as length_bar:
-            for record in self.dataset.records:
-                question = render_question(tokenizer, record.question, use_chat_template, enable_thinking)
-                lengths.append(len(tokenizer(record.context,add_special_tokens=False).input_ids)+len(tokenizer(question,add_special_tokens=False).input_ids))
+        with tqdm(total=len(self.dataset), desc="Preparing sortish lengths", unit="sample", disable=not _progress_enabled()) as length_bar:
+            for record in self.dataset:
+                question = render_question(tokenizer, record["question"], use_chat_template, enable_thinking)
+                lengths.append(len(tokenizer(record["context"],add_special_tokens=False).input_ids)+len(tokenizer(question,add_special_tokens=False).input_ids))
                 length_bar.update(1)
         return lengths
 
@@ -180,7 +185,7 @@ class SortishSampler(Sampler[int]):
                 cached.get("metadata", {}).get("fingerprint")
                 != metadata["fingerprint"]
                 or not isinstance(lengths, list)
-                or len(lengths) != len(self.dataset.records)
+                or len(lengths) != len(self.dataset)
                 or any(not isinstance(length, int) or length < 0 for length in lengths)
             ):
                 return None

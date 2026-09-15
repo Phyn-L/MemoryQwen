@@ -17,6 +17,10 @@ pip install -e '.[train]'
 PYTHONPATH=. bash scripts/train.sh
 ```
 
+Each fresh run is named like `Qwen1.7B_20260915_173045`. This name is used for
+the W&B run, the checkpoint directory, and the dataset/sortish caches under
+`outputs/<run-name>/`. When resuming, the existing checkpoint directory is reused.
+
 Configuration is YAML-only. Complete model-specific configurations are maintained as YAML files:
 `configs/qwen-1.7b/train.yaml`, `configs/qwen-4b/train.yaml`, and
 `configs/qwen-8b/train.yaml`. Each contains all sections needed for a reproducible
@@ -34,12 +38,11 @@ cached as `sortish_lengths.json` under the configured checkpoint output director
 for example `outputs/qwen-1.7b/`. The cache is rebuilt automatically when its data,
 tokenizer, filtering, or chat-template fingerprint changes.
 With `data.cache_dataset: true` (the default), the filtered records themselves are
-cached under `<checkpoint.output_dir>/dataset_cache/<split>-<fingerprint>/records.jsonl`.
-Reading the source JSONL files and tokenizing every context for the length filter is by
-far the most expensive part of startup, and it happens in every process of an
-`accelerate launch`; this cache skips it on later runs. `sortish_lengths.json` only
-caches the much cheaper length pass that runs after the dataset is already built, so it
-does not avoid that work. Set `data.cache_dataset: false` to always rebuild.
+cached as a Hugging Face Arrow dataset under `<checkpoint.output_dir>/dataset_cache/<split>-<fingerprint>/hf_dataset/`.
+The first run converts the filtered records to Arrow with `Dataset.save_to_disk()`.
+Later runs use `Dataset.load_from_disk()` and avoid JSONL parsing; `sortish_lengths.json`
+still caches the cheaper length pass separately. Set `data.cache_dataset: false` to
+always rebuild from the source JSONL files.
 Use the matching `train.yaml` with `--config` when selecting another backbone.
 
 The source layout is:
@@ -66,6 +69,53 @@ Qwen layer.
 Here `memory.memory_length` is the number of memory tokens `M` (8 by default),
 while `qwen_hidden_size` is each token's Qwen feature width `H` (2048 for
 Qwen3-1.7B); these are independent dimensions.
+
+## Embedding reconstruction loss
+
+The reconstruction target is the original context **input embedding** sequence,
+not the hidden state from a later Qwen layer. For a decoder prediction `\hat{x}`
+and target embedding `x`, both with shape `[B, num_layers, L, H]` after
+broadcasting across layers, the loss is averaged over valid (non-padding) context
+tokens and all Qwen layers. The implemented components are
+
+```text
+MSE     = mean_H((\hat{x} - x)^2)
+Cosine  = 1 - cosine_similarity(\hat{x}, x)
+```
+
+The default configuration uses `reconstruction_loss: mse_cosine` and
+`reconstruction_cosine_weight: 0.1`, giving
+
+```text
+L_recon = MSE + 0.1 * Cosine
+```
+
+This combines coordinate-wise fidelity (including embedding magnitude) with a
+directional or semantic alignment term. The coefficient `0.1` is a baseline
+hyperparameter rather than a theoretically fixed ratio; the numerical and
+gradient scales of the two terms should be reported when comparing variants.
+The reconstruction objective is then combined with answer-only causal QA loss as
+`qa_weight * L_QA + reconstruction_weight * L_recon`.
+
+The following settings define useful ablations for studying what information the
+memory must preserve. Only setting C is implemented by the current
+`mse_cosine` loss; settings D and E describe planned alternatives and require
+additional loss code.
+
+| Setting | Reconstruction objective | Hypothesis tested |
+| --- | --- | --- |
+| A | MSE | Is precise, coordinate-wise recovery important? |
+| B | Cosine | Is preserving embedding direction alone sufficient? |
+| C | MSE + 0.1 Cosine | Current baseline combining magnitude and direction. |
+| D | Cosine + norm loss | Should direction and embedding magnitude be constrained separately? |
+| E | Cosine + relational loss | Is preserving token-to-token representation structure more important? |
+
+For setting D, a norm term can penalize the difference between `\|\hat{x}\|`
+and `\|x\|`. For setting E, a relational term can compare the token-token
+similarity matrices of the predicted and target sequences. These alternatives
+should be compared using both reconstruction metrics and downstream QA metrics; a
+lower embedding loss alone does not establish that the memory is more useful for
+question answering.
 
 ## Possible decoder extension: learned layer embeddings with grouped sharing
 
