@@ -13,7 +13,7 @@ from utils.checkpoint import CheckpointManager
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate a trained Qwen memory checkpoint")
-    parser.add_argument("--config", default="configs/qwen-1.7b/train.json")
+    parser.add_argument("--config", default="configs/qwen-1.7b/train.yaml")
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--split", choices=("validation", "test"), default="test")
     parser.add_argument("--max-samples", type=int)

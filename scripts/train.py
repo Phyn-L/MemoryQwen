@@ -22,7 +22,7 @@ from utils import CheckpointManager, build_optimizer, build_scheduler
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/qwen-1.7b/train.json")
+    parser.add_argument("--config", default="configs/qwen-1.7b/train.yaml")
     parser.add_argument("--resume")
     parser.add_argument("--wandb-run-id")
     args = parser.parse_args()

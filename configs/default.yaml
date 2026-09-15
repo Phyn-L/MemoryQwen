@@ -7,6 +7,9 @@ model:
 memory:
   memory_length: 8
   encoder_heads: 8
+  decoder_hidden_size: 256
+  decoder_ffn_ratio: 2
+  decoder_heads: 8
   reconstruction_weight: 1.0
   qa_weight: 1.0
   reconstruction_loss: mse_cosine

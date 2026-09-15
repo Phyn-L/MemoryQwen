@@ -17,11 +17,10 @@ pip install -e '.[train]'
 PYTHONPATH=. bash scripts/train.sh
 ```
 
-Complete model-specific configurations are maintained in both
-`configs/qwen-1.7b/train.json`, `configs/qwen-4b/train.json`, and
-`configs/qwen-8b/train.json` (JSON) and their corresponding `train.yaml` files.
-The JSON files do not act as partial overrides: each contains all sections needed
-for a reproducible run. Set `data.train_datasets`,
+Configuration is YAML-only. Complete model-specific configurations are maintained as YAML files:
+`configs/qwen-1.7b/train.yaml`, `configs/qwen-4b/train.yaml`, and
+`configs/qwen-8b/train.yaml`. Each contains all sections needed for a reproducible
+run. Set `data.train_datasets`,
 `data.validation_datasets`, and `data.test_datasets` independently, with corresponding
 `*_max_samples` limits. Contexts longer than 2048 tokens and records without a usable
 QA pair are filtered before the sortish sampler is constructed. Set
@@ -41,8 +40,7 @@ far the most expensive part of startup, and it happens in every process of an
 `accelerate launch`; this cache skips it on later runs. `sortish_lengths.json` only
 caches the much cheaper length pass that runs after the dataset is already built, so it
 does not avoid that work. Set `data.cache_dataset: false` to always rebuild.
-Use the matching `train.json` or `train.yaml` with `--config` when selecting another
-backbone.
+Use the matching `train.yaml` with `--config` when selecting another backbone.
 
 The source layout is:
 

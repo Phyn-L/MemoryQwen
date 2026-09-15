@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-import json
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 
 @dataclass
@@ -127,15 +128,10 @@ class TrainConfig:
     @classmethod
     def from_file(cls, path: str | Path) -> "TrainConfig":
         path = Path(path)
+        if path.suffix.lower() not in {".yaml", ".yml"}:
+            raise ValueError(f"configuration must be a YAML file (.yaml/.yml), got: {path}")
         text = path.read_text(encoding="utf-8")
-        if path.suffix.lower() in {".yaml", ".yml"}:
-            try:
-                import yaml
-                values = yaml.safe_load(text) or {}
-            except ImportError as exc:
-                raise RuntimeError("PyYAML is required to read YAML configs; use configs/default.json without optional dependencies") from exc
-        else:
-            values = json.loads(text)
+        values = yaml.safe_load(text) or {}
         values = dict(values)
         data_values = dict(values.get("data", {}))
         for key in ("train_datasets", "validation_datasets", "test_datasets"):
@@ -165,7 +161,11 @@ class TrainConfig:
     def save(self, path: str | Path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_dict(), indent=2, default=list), encoding="utf-8")
+        if path.suffix.lower() not in {".yaml", ".yml"}:
+            raise ValueError(f"configuration must be saved as YAML (.yaml/.yml), got: {path}")
+        values = self.to_dict()
+        values = _yaml_safe_values(values)
+        path.write_text(yaml.safe_dump(values, sort_keys=False), encoding="utf-8")
 
     def validate(self) -> None:
         d, m = self.data, self.memory
@@ -204,3 +204,11 @@ def dtype_from_name(name: str):
         return {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}[name.lower()]
     except KeyError as exc:
         raise ValueError(f"unsupported torch dtype: {name}") from exc
+
+
+def _yaml_safe_values(value):
+    if isinstance(value, dict):
+        return {key: _yaml_safe_values(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_yaml_safe_values(item) for item in value]
+    return value
