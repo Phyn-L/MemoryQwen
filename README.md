@@ -176,9 +176,9 @@ Qwen3-1.7B); these are independent dimensions.
 
 The reconstruction target is the original context **input embedding** sequence,
 not the hidden state from a later Qwen layer. For a decoder prediction `\hat{x}`
-and target embedding `x`, both with shape `[B, num_layers, L, H]` after
-broadcasting across layers, the loss is averaged over valid (non-padding) context
-tokens and all Qwen layers. The implemented components are
+and target embedding `x`, both with shape `[C, num_layers, L, H]`, the loss is
+first reduced per context over valid (non-padding) context tokens and all Qwen
+layers, then averaged over the C contexts. The implemented components are
 
 ```text
 MSE     = mean_H((\hat{x} - x)^2)
@@ -196,8 +196,17 @@ This combines coordinate-wise fidelity (including embedding magnitude) with a
 directional or semantic alignment term. The coefficient `0.1` is a baseline
 hyperparameter rather than a theoretically fixed ratio; the numerical and
 gradient scales of the two terms should be reported when comparing variants.
-The reconstruction objective is then combined with answer-only causal QA loss as
-`qa_weight * L_QA + reconstruction_weight * L_recon`.
+The answer-only causal QA loss is reduced separately: token loss is first averaged
+within each QA row, then QA rows are averaged. The final objective is:
+
+```text
+L_QA    = mean over Q QA-row losses
+L_recon = mean over C context reconstruction losses
+L_total = qa_weight * L_QA + reconstruction_weight * L_recon
+```
+
+The number of QA pairs belonging to a context changes its QA supervision, but does
+not multiply that context's reconstruction loss.
 
 The following settings define useful ablations for studying what information the
 memory must preserve. Only setting C is implemented by the current
@@ -231,3 +240,33 @@ variant rather than the current implementation and should be compared against
 independent decoders with matched bottleneck width. Useful ablations include group
 sizes 1, 2, 4, and 28, with and without learned layer embeddings, evaluated using
 per-layer reconstruction loss, QA metrics, peak memory, and training throughput.
+
+## Verification and numerical invariants
+
+The prefix-sharing path was checked with a tiny Qwen3 configuration using two
+contexts and four QA rows. The shared-prefix path produced:
+
+```text
+prefix.memory:         [2, 3, 32]
+prefix.reconstruction: [2, 2, 5, 32]
+QA logits:              [4, 6, 101]
+labels:                 [4, 6]
+maximum logit difference
+vs. joint [context,memory,question,answer] forward: 8.94e-08
+```
+
+The same check confirmed non-empty gradients for `memory_tokens`, LoRA
+parameters, and reconstruction decoder parameters after a combined QA plus
+reconstruction backward pass. Repeated QA rows share the prefix through
+differentiable indexing, so their gradients accumulate at the owning context.
+
+Repository-level checks:
+
+```bash
+python -m compileall -q src utils scripts
+git diff --check
+```
+
+Full-scale training and million-row cache rebuilding are intentionally not part of
+the focused verification path. Before production training, repeat the numerical
+equivalence and gradient checks with the target Qwen checkpoint and dtype.
