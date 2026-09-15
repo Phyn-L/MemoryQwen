@@ -23,5 +23,5 @@ python -m torch.distributed.run \
   --squad-max-new-tokens 32 \
   --race-max-new-tokens 8 \
   --dtype bfloat16 \
-  --output-dir outputs/icl_baseline/qwen3-1.7b-0shot \
+  --output-dir outputs/icl_baseline/qwen3-8b-0shot \
   "$@"

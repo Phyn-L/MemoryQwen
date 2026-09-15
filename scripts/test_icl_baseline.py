@@ -17,39 +17,66 @@ from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from src.icl_baseline import (
-    ICLExample, aggregate_metrics, example_metrics, load_jsonl, parse_prediction,
-    render_prompt, sample_jsonl,
+    ICLExample,
+    aggregate_metrics,
+    example_metrics,
+    load_jsonl,
+    parse_prediction,
+    render_prompt,
+    sample_jsonl,
 )
 from utils.ddp import barrier, init_distributed, is_main_process
-
 
 DEFAULT_MODEL = "/data/lz/hf_cache/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
 DEFAULT_DATA = Path("/data/lz/contexts/standardized")
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Multi-GPU Qwen3-1.7B few-shot ICL baseline")
+    parser = argparse.ArgumentParser(
+        description="Multi-GPU Qwen3-1.7B few-shot ICL baseline"
+    )
     parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--datasets", nargs="+", choices=("squad", "race"), default=["squad", "race"])
-    parser.add_argument("--squad-validation-file", default=str(DEFAULT_DATA / "squad/validation-v1.1.jsonl"))
-    parser.add_argument("--squad-train-file", default=str(DEFAULT_DATA / "squad/train-v1.1.jsonl"))
-    parser.add_argument("--race-test-file", default=str(DEFAULT_DATA / "race/test.jsonl"))
-    parser.add_argument("--race-train-file", default=str(DEFAULT_DATA / "race/train.jsonl"))
+    parser.add_argument(
+        "--datasets", nargs="+", choices=("squad", "race"), default=["squad", "race"]
+    )
+    parser.add_argument(
+        "--squad-validation-file",
+        default=str(DEFAULT_DATA / "squad/validation-v1.1.jsonl"),
+    )
+    parser.add_argument(
+        "--squad-train-file", default=str(DEFAULT_DATA / "squad/train-v1.1.jsonl")
+    )
+    parser.add_argument(
+        "--race-test-file", default=str(DEFAULT_DATA / "race/test.jsonl")
+    )
+    parser.add_argument(
+        "--race-train-file", default=str(DEFAULT_DATA / "race/train.jsonl")
+    )
     parser.add_argument("--output-dir", default="outputs/icl_baseline/qwen3-1.7b")
     parser.add_argument("--num-shots", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=2, help="Per-GPU batch size")
     parser.add_argument("--max-input-tokens", type=int, default=8192)
     parser.add_argument("--squad-max-new-tokens", type=int, default=32)
     parser.add_argument("--race-max-new-tokens", type=int, default=8)
-    parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
+    parser.add_argument(
+        "--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16"
+    )
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--max-samples", type=int, help="Debug-only cap applied independently to each dataset")
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        help="Debug-only cap applied independently to each dataset",
+    )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--no-chat-template", action="store_true")
-    parser.add_argument("--resume", action="store_true", help="Reuse completed rows in rank shard files")
+    parser.add_argument(
+        "--resume", action="store_true", help="Reuse completed rows in rank shard files"
+    )
     args = parser.parse_args()
     if args.num_shots < 0 or args.batch_size <= 0 or args.max_input_tokens <= 0:
-        parser.error("num-shots must be non-negative and batch/token limits must be positive")
+        parser.error(
+            "num-shots must be non-negative and batch/token limits must be positive"
+        )
     return args
 
 
@@ -71,14 +98,21 @@ def seed_everything(seed: int, rank: int):
 
 
 def load_model(args, device):
-    dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}[args.dtype]
+    dtype = {
+        "bfloat16": torch.bfloat16,
+        "float16": torch.float16,
+        "float32": torch.float32,
+    }[args.dtype]
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     tokenizer.padding_side = "left"
     tokenizer.truncation_side = "left"
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype=dtype, trust_remote_code=True, attn_implementation="sdpa",
+        args.model,
+        dtype=dtype,
+        trust_remote_code=True,
+        attn_implementation="sdpa",
     ).to(device)
     model.eval()
     return tokenizer, model
@@ -101,37 +135,90 @@ def completed_indices(path: Path) -> set[int]:
 
 
 @torch.inference_mode()
-def evaluate_dataset(args, dataset, records, demos, tokenizer, model, rank, world_size, device, output_dir):
+def evaluate_dataset(
+    args,
+    dataset,
+    records,
+    demos,
+    tokenizer,
+    model,
+    rank,
+    world_size,
+    device,
+    output_dir,
+):
     shard_path = output_dir / f"{dataset}.rank-{rank:05d}-of-{world_size:05d}.jsonl"
     done = completed_indices(shard_path) if args.resume else set()
-    indexed = [(index, record) for index, record in enumerate(records) if index % world_size == rank and index not in done]
-    loader = DataLoader(indexed, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, collate_fn=collate_records)
+    indexed = [
+        (index, record)
+        for index, record in enumerate(records)
+        if index % world_size == rank and index not in done
+    ]
+    loader = DataLoader(
+        indexed,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        collate_fn=collate_records,
+    )
     mode = "a" if args.resume else "w"
-    max_new_tokens = args.squad_max_new_tokens if dataset == "squad" else args.race_max_new_tokens
+    max_new_tokens = (
+        args.squad_max_new_tokens if dataset == "squad" else args.race_max_new_tokens
+    )
     with shard_path.open(mode, encoding="utf-8") as handle:
-        progress = tqdm(loader, total=len(loader), desc=f"{dataset} rank {rank}", unit="batch", disable=not is_main_process())
+        progress = tqdm(
+            loader,
+            total=len(loader),
+            desc=f"{dataset} rank {rank}",
+            unit="batch",
+            disable=not is_main_process(),
+        )
         for indices, examples in progress:
-            prompts = [render_prompt(tokenizer, example, demos, not args.no_chat_template) for example in examples]
+            prompts = [
+                render_prompt(tokenizer, example, demos, not args.no_chat_template)
+                for example in examples
+            ]
             encoded = tokenizer(
-                prompts, return_tensors="pt", padding=True, truncation=True,
-                max_length=args.max_input_tokens, add_special_tokens=False,
+                prompts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=args.max_input_tokens,
+                add_special_tokens=False,
             ).to(device)
             generated = model.generate(
-                **encoded, max_new_tokens=max_new_tokens, do_sample=False, use_cache=True,
-                pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
+                **encoded,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                use_cache=True,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
             )
-            new_tokens = generated[:, encoded.input_ids.shape[1]:]
-            raw_predictions = tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
-            for index, example, raw_prediction in zip(indices, examples, raw_predictions):
+            new_tokens = generated[:, encoded.input_ids.shape[1] :]
+            raw_predictions = tokenizer.batch_decode(
+                new_tokens, skip_special_tokens=True
+            )
+            for index, example, raw_prediction in zip(
+                indices, examples, raw_predictions
+            ):
                 prediction, predicted_letter = parse_prediction(example, raw_prediction)
                 metrics = example_metrics(prediction, example.references)
                 row = {
-                    "index": index, "id": example.id, "dataset": dataset,
-                    "prediction": prediction, "raw_prediction": raw_prediction.strip(),
-                    "references": list(example.references), **metrics,
+                    "index": index,
+                    "id": example.id,
+                    "dataset": dataset,
+                    "prediction": prediction,
+                    "raw_prediction": raw_prediction.strip(),
+                    "references": list(example.references),
+                    **metrics,
                 }
                 if dataset == "race":
-                    row.update({"predicted_letter": predicted_letter, "answer_letter": example.answer_letter})
+                    row.update(
+                        {
+                            "predicted_letter": predicted_letter,
+                            "answer_letter": example.answer_letter,
+                        }
+                    )
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             handle.flush()
     barrier()
@@ -153,7 +240,8 @@ def merge_and_score(dataset: str, output_dir: Path, world_size: int):
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
     metrics = aggregate_metrics(rows)
     (output_dir / f"{dataset}.metrics.json").write_text(
-        json.dumps(metrics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+        json.dumps(metrics, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
     )
     print(f"{dataset}: {json.dumps(metrics, ensure_ascii=False)}", flush=True)
 
@@ -161,24 +249,34 @@ def merge_and_score(dataset: str, output_dir: Path, world_size: int):
 def experiment_metadata(args, world_size, demonstrations):
     try:
         revision = subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL, timeout=5,
+            ["git", "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
         ).strip()
     except (OSError, subprocess.SubprocessError):
         revision = None
     return {
         "arguments": vars(args),
         "protocol": {
-            "decoding": "greedy", "squad": "SQuAD v1.1 validation",
-            "race": "RACE all test", "em_f1_normalization": "official SQuAD style",
+            "decoding": "greedy",
+            "squad": "SQuAD v1.1 validation",
+            "race": "RACE all test",
+            "em_f1_normalization": "official SQuAD style",
             "multi_reference_reduction": "maximum per example",
             "bleu_4": "corpus BLEU-4, closest reference length, add-one smoothing",
             "rouge_l": "sentence-level LCS F1, macro average",
         },
         "distributed": {"world_size": world_size},
-        "demonstrations": {name: [asdict(example) for example in values] for name, values in demonstrations.items()},
+        "demonstrations": {
+            name: [asdict(example) for example in values]
+            for name, values in demonstrations.items()
+        },
         "versions": {
-            "python": platform.python_version(), "torch": torch.__version__,
-            "transformers": __import__("transformers").__version__, "git_revision": revision,
+            "python": platform.python_version(),
+            "torch": torch.__version__,
+            "transformers": __import__("transformers").__version__,
+            "git_revision": revision,
         },
     }
 
@@ -199,7 +297,12 @@ def main():
     }
     if is_main_process():
         (output_dir / "run_config.json").write_text(
-            json.dumps(experiment_metadata(args, world_size, demonstrations), ensure_ascii=False, indent=2) + "\n",
+            json.dumps(
+                experiment_metadata(args, world_size, demonstrations),
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
     barrier()
@@ -207,10 +310,18 @@ def main():
     for dataset in args.datasets:
         records = load_jsonl(paths[dataset][0], dataset)
         if args.max_samples is not None:
-            records = records[:args.max_samples]
+            records = records[: args.max_samples]
         evaluate_dataset(
-            args, dataset, records, demonstrations[dataset], tokenizer, model,
-            rank, world_size, device, output_dir,
+            args,
+            dataset,
+            records,
+            demonstrations[dataset],
+            tokenizer,
+            model,
+            rank,
+            world_size,
+            device,
+            output_dir,
         )
     if dist.is_initialized():
         dist.destroy_process_group()
