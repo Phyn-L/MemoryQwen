@@ -53,11 +53,10 @@ still caches the cheaper length pass separately. Set `data.cache_dataset: false`
 always rebuild from the source JSONL files.
 The dataset and sortish caches are context-level and use bumped format versions, so
 old flat-QA caches (including ~998k-row length caches) are ignored automatically.
-The current model API requires equal batch dimensions, so train/evaluation use
-`index_select` to expand context rows to Q before the joint Qwen forward. This
-preserves model and memory semantics but does not fully reuse Transformer computation
-for repeated contexts. Evaluation uses `evaluation.qa_batch_size` (4 by default)
-to micro-batch expanded QA rows while accumulating metrics by the actual QA count.
+The model path uses a differentiable context-prefix cache: each context is encoded
+once, and its memory prefix is gathered with `qa_context_indices` for all of that
+context's QA rows. Evaluation uses `evaluation.qa_batch_size` (4 by default) to
+micro-batch QA continuations while accumulating metrics by the actual QA count.
 Use the matching `train.yaml` with `--config` when selecting another backbone.
 
 The source layout is:
@@ -71,6 +70,94 @@ src/model.py  src/losses.py  src/MemoryDecoder.py  src/data.py
 src/dataset_cache.py  utils/optimizer.py  utils/scheduler.py  utils/checkpoint.py
 utils/config.py  utils/ddp.py
 ```
+
+## Context-prefix sharing
+
+The training and evaluation data path has two batch dimensions:
+
+```text
+C = number of contexts in the DataLoader batch
+Q = number of QA rows represented by those contexts
+
+context_ids:         [C, L]
+question_ids:        [Q, QL]
+answer_ids:          [Q, AL]
+qa_context_indices:  [Q]
+```
+
+`qa_context_indices[j]` identifies the context that owns QA row `j`. Training
+samples at most `data.qa_per_context` QA pairs per context on every collate call;
+validation and test retain every valid QA pair.
+
+`src/model.py` exposes two stages:
+
+```python
+prefix = model.encode_context_prefix(context_embeds, context_mask)
+output = model.forward_qa_with_prefix(
+    prefix, qa_context_indices, question_embeds, question_mask,
+    answer_embeds, answer_mask, labels,
+)
+```
+
+`encode_context_prefix()` runs Qwen once on `[context, memory]` for the C contexts
+and returns:
+
+- per-layer memory hidden states `[C, num_layers, M, H]`;
+- final memory `[C, M, H]`;
+- reconstruction predictions `[C, num_layers, L, H]`;
+- a memory-only KV cache for each context;
+- the context target and mask used by reconstruction loss.
+
+`forward_qa_with_prefix()` selects prefix rows with differentiable
+`index_select`, then runs only the `[question, answer]` continuation for Q QA rows.
+The original `forward()` remains as a compatibility wrapper that constructs an
+identity QA mapping and routes through the same two-stage implementation.
+
+### Differentiable KV cache
+
+The prefix cache is an in-memory Hugging Face `DynamicCache`, not a disk cache and
+not a cache shared across optimizer steps. It is created and consumed within one
+forward/backward pass. Only the memory part of the prefix KV is retained, because
+the attention mask prevents question and answer tokens from reading context tokens
+directly.
+
+The selected cache is built from tensor indexing without `detach()`, `.data`,
+`numpy()`, or `torch.no_grad()` in the training path. Consequently, gradients from
+multiple QA rows accumulate into the same context prefix:
+
+```text
+QA_1 loss ─┐
+QA_2 loss ─┼─> shared memory KV ─> context prefix ─> context / memory / LoRA
+QA_3 loss ─┘
+```
+
+The cache itself is treated as read-only. Each QA chunk receives a new cache whose
+keys and values are differentiable indexed views of the original prefix cache;
+question and answer KV are then appended only to that chunk-local cache. This avoids
+in-place batch selection and prevents one QA chunk from contaminating another.
+
+Question and answer position ids remain absolute positions from the original joint
+sequence: question positions start at `context_length + memory_length`, rather than
+at the shorter memory-only cache length. This preserves Qwen rotary-position
+semantics.
+
+### Three execution paths
+
+- **Training:** one prefix encode per local context batch, followed by the sampled
+  QA continuation rows. The prefix graph remains attached until the combined loss
+  backward pass.
+- **Teacher-forced validation:** one prefix encode per context batch, then all QA
+  rows are processed in `evaluation.qa_batch_size` chunks. No QA is dropped or
+  truncated.
+- **Autoregressive evaluation/test:** one prefix encode per context batch; each QA
+  gets an independent question/answer continuation cache and incremental token
+  generation. Prefix computation is shared, while generated-token state remains
+  QA-specific.
+
+The DDP boundary is the local DataLoader shard. Every rank builds and consumes
+prefixes only for its own contexts; no prefix hidden state or KV tensor is gathered
+across ranks. Only scalar loss/metric reductions are suitable for distributed
+aggregation.
 
 Each decoder in `src/MemoryDecoder.py` receives only its own layer's memory
 embedding (`[B, M, H]`). It projects memory and positional queries into a

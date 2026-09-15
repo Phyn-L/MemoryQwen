@@ -171,13 +171,11 @@ def main() -> None:
             ids = {k: v.to(device) for k, v in batch.items() if k != "records"}
             base_model = accelerator.unwrap_model(model) if accelerator is not None else model
             embedding = base_model.qwen.get_input_embeddings()
-            context_indices = ids["qa_context_indices"]
-            expanded_context_ids = ids["context_ids"].index_select(0, context_indices)
-            expanded_context_mask = ids["context_mask"].index_select(0, context_indices)
             output = model(
-                embedding(expanded_context_ids), expanded_context_mask,
+                embedding(ids["context_ids"]), ids["context_mask"],
                 embedding(ids["question_ids"]), ids["question_mask"],
                 embedding(ids["answer_ids"]), ids["answer_mask"], ids["labels"],
+                ids["qa_context_indices"],
             )
             qa = qa_loss(output.logits, output.labels)
             reconstruction = reconstruction_loss(

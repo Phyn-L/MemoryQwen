@@ -5,6 +5,11 @@ import torch
 from torch import nn
 from .MemoryDecoder import MemoryDecoder
 
+try:
+    from transformers.cache_utils import DynamicCache
+except ImportError:  # pragma: no cover - transformers is required at runtime
+    DynamicCache = None
+
 
 @dataclass
 class MetaLoRAOutput:
@@ -15,6 +20,18 @@ class MetaLoRAOutput:
     reconstruction: torch.Tensor
     context_target: torch.Tensor
     context_mask: torch.Tensor
+
+
+@dataclass
+class ContextPrefix:
+    layer_memory: torch.Tensor
+    memory: torch.Tensor
+    memory_cache: object
+    reconstruction: torch.Tensor
+    context_target: torch.Tensor
+    context_mask: torch.Tensor
+    context_length: int
+    memory_length: int
 
 
 class StaticLoRALinear(nn.Module):
@@ -100,6 +117,38 @@ def build_block_causal_mask(
     return mask.masked_fill(~allowed[:, None], torch.finfo(dtype).min)
 
 
+def build_continuation_mask(
+    question_mask: torch.Tensor,
+    answer_mask: torch.Tensor,
+    memory_length: int,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Mask for question/answer tokens attending to a memory-only cache."""
+    question_mask, answer_mask = question_mask.bool(), answer_mask.bool()
+    bsz, question_length = question_mask.shape
+    answer_length = answer_mask.shape[1]
+    current = question_length + answer_length
+    allowed = torch.zeros((bsz, current, memory_length + current), dtype=torch.bool, device=question_mask.device)
+    for batch in range(bsz):
+        q_valid, a_valid = question_mask[batch], answer_mask[batch]
+        for i in range(question_length):
+            if q_valid[i]:
+                allowed[batch, i, :memory_length] = True
+                allowed[batch, i, memory_length:memory_length + i + 1] = q_valid[: i + 1]
+            else:
+                allowed[batch, i, memory_length + i] = True
+        for i in range(answer_length):
+            row = question_length + i
+            if a_valid[i]:
+                allowed[batch, row, :memory_length] = True
+                allowed[batch, row, memory_length:memory_length + question_length] = q_valid
+                allowed[batch, row, memory_length + question_length:memory_length + question_length + i + 1] = a_valid[: i + 1]
+            else:
+                allowed[batch, row, memory_length + row] = True
+    mask = torch.zeros((bsz, 1, current, memory_length + current), dtype=dtype, device=question_mask.device)
+    return mask.masked_fill(~allowed[:, None], torch.finfo(dtype).min)
+
+
 class MetaLoRA(nn.Module):
     """Qwen encoder/decoder with ordinary (static) PEFT LoRA and reconstruction decoders."""
     def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048):
@@ -180,38 +229,104 @@ class MetaLoRA(nn.Module):
     def _memory_prefix(self, layer_memory):
         return layer_memory[:, -1]  # final Qwen layer memory is the input prefix
 
-    def forward(self, context_embeds, context_mask, question_embeds, question_mask, answer_embeds, answer_mask, labels):
-        context_mask, question_mask, answer_mask = context_mask.bool(), question_mask.bool(), answer_mask.bool()
-        layer_memory, encoded, x, am = self._encode_context(context_embeds, context_mask, question_embeds, question_mask, answer_embeds, answer_mask)
-        memory = self._memory_prefix(layer_memory)
-        ignored = torch.full((labels.size(0), context_embeds.size(1) + memory.size(1) + question_embeds.size(1)), -100, dtype=labels.dtype, device=labels.device)
-        lm = torch.cat([ignored, labels], 1)
-        reconstruction = torch.stack([decoder(layer_memory[:, i], context_embeds.size(1)) for i, decoder in enumerate(self.decoders)], dim=1)
-        return MetaLoRAOutput(encoded.logits, lm, memory, layer_memory, reconstruction, context_embeds, context_mask)
+    def _reconstruction(self, layer_memory, context_embeds, context_mask):
+        return torch.stack([decoder(layer_memory[:, i], context_embeds.size(1)) for i, decoder in enumerate(self.decoders)], dim=1)
+
+    def encode_context_prefix(self, context_embeds, context_mask) -> ContextPrefix:
+        """Encode each context and memory once, retaining a differentiable KV cache."""
+        context_embeds = context_embeds.to(dtype=self.dtype)
+        context_mask = context_mask.bool()
+        memory_inputs = self.memory_tokens.unsqueeze(0).expand(context_embeds.size(0), -1, -1)
+        sequence = torch.cat([context_embeds, memory_inputs], dim=1)
+        empty = context_mask.new_zeros(context_embeds.size(0), 0)
+        block_mask = build_block_causal_mask(context_mask, memory_inputs.size(1), empty, empty, sequence.dtype)
+        out = self.qwen(inputs_embeds=sequence, attention_mask=block_mask, output_hidden_states=True, use_cache=True, return_dict=True)
+        states = out.hidden_states or (sequence, out.last_hidden_state)
+        layer_memory = []
+        for state in states[1:1 + len(self.decoders)]:
+            layer_memory.append(state[:, context_embeds.size(1):context_embeds.size(1) + memory_inputs.size(1)])
+        while len(layer_memory) < len(self.decoders):
+            layer_memory.append(layer_memory[-1])
+        layer_memory = torch.stack(layer_memory, dim=1)
+        cache = out.past_key_values
+        if cache is None:
+            raise RuntimeError("Qwen did not return a KV cache for prefix encoding")
+        memory_layers = []
+        for layer in cache.layers:
+            keys = layer.keys[..., context_embeds.size(1):, :]
+            values = layer.values[..., context_embeds.size(1):, :]
+            memory_layers.append((keys, values))
+        memory_cache = DynamicCache(ddp_cache_data=memory_layers, config=self.qwen.config)
+        reconstruction = self._reconstruction(layer_memory, context_embeds, context_mask)
+        return ContextPrefix(layer_memory, self._memory_prefix(layer_memory), memory_cache, reconstruction, context_embeds, context_mask, context_embeds.size(1), memory_inputs.size(1))
+
+    @staticmethod
+    def _select_cache(cache, indices, config):
+        layers = []
+        for layer in cache.layers:
+            layers.append((layer.keys.index_select(0, indices), layer.values.index_select(0, indices)))
+        return DynamicCache(ddp_cache_data=layers, config=config)
+
+    def forward_qa_with_prefix(self, prefix, qa_context_indices, question_embeds, question_mask, answer_embeds, answer_mask, labels):
+        question_embeds, answer_embeds = question_embeds.to(dtype=self.dtype), answer_embeds.to(dtype=self.dtype)
+        indices = qa_context_indices.to(question_embeds.device, dtype=torch.long)
+        cache = self._select_cache(prefix.memory_cache, indices, self.qwen.config)
+        sequence = torch.cat([question_embeds, answer_embeds], dim=1)
+        mask = build_continuation_mask(question_mask, answer_mask, prefix.memory_length, sequence.dtype)
+        start = prefix.context_length + prefix.memory_length
+        positions = torch.arange(start, start + sequence.size(1), device=sequence.device).unsqueeze(0).expand(sequence.size(0), -1)
+        out = self.qwen(inputs_embeds=sequence, attention_mask=mask, position_ids=positions, past_key_values=cache, use_cache=True, return_dict=True)
+        ignored = torch.full((labels.size(0), question_embeds.size(1)), -100, dtype=labels.dtype, device=labels.device)
+        return MetaLoRAOutput(out.logits, torch.cat([ignored, labels], dim=1), prefix.memory, prefix.layer_memory, prefix.reconstruction, prefix.context_target, prefix.context_mask)
+
+    def forward(self, context_embeds, context_mask, question_embeds, question_mask, answer_embeds, answer_mask, labels, qa_context_indices=None):
+        prefix = self.encode_context_prefix(context_embeds, context_mask)
+        indices = qa_context_indices if qa_context_indices is not None else torch.arange(question_embeds.size(0), device=question_embeds.device)
+        return self.forward_qa_with_prefix(prefix, indices, question_embeds, question_mask, answer_embeds, answer_mask, labels)
+
+    @torch.no_grad()
+    def generate_answer_with_prefix(self, prefix, qa_context_indices, question_ids, question_mask, tokenizer, max_new_tokens=128):
+        """Generate from a shared context prefix with independent QA caches."""
+        embedding = self.qwen.get_input_embeddings()
+        rows = []
+        for row in range(question_ids.size(0)):
+            index = qa_context_indices[row:row + 1].to(question_ids.device, dtype=torch.long)
+            cache = self._select_cache(prefix.memory_cache, index, self.qwen.config)
+            valid = int(question_mask[row].sum())
+            question = embedding(question_ids[row:row + 1, :valid]).to(dtype=self.dtype)
+            qmask = question_mask[row:row + 1, :valid].bool()
+            empty = qmask.new_zeros(1, 0)
+            mask = build_continuation_mask(qmask, empty, prefix.memory_length, question.dtype)
+            start = prefix.context_length + prefix.memory_length
+            positions = torch.arange(start, start + valid, device=question.device).unsqueeze(0)
+            output = self.qwen(inputs_embeds=question, attention_mask=mask, position_ids=positions, past_key_values=cache, use_cache=True, return_dict=True)
+            cache = output.past_key_values
+            generated = []
+            next_id = output.logits[:, -1].argmax(dim=-1)
+            for step in range(max_new_tokens):
+                generated.append(next_id)
+                if int(next_id.item()) == int(tokenizer.eos_token_id) or step + 1 == max_new_tokens:
+                    break
+                token = embedding(next_id[:, None]).to(dtype=self.dtype)
+                total_cache_length = prefix.memory_length + valid + step
+                attention_mask = torch.ones((1, total_cache_length + 1), dtype=torch.bool, device=token.device)
+                position_ids = torch.tensor([[start + valid + step]], device=token.device)
+                output = self.qwen(inputs_embeds=token, attention_mask=attention_mask, position_ids=position_ids, past_key_values=cache, use_cache=True, return_dict=True)
+                cache = output.past_key_values
+                next_id = output.logits[:, -1].argmax(dim=-1)
+            rows.append(torch.cat(generated))
+        width = max(row.numel() for row in rows)
+        result = torch.full((len(rows), width), tokenizer.pad_token_id, dtype=torch.long, device=question_ids.device)
+        for index, row in enumerate(rows):
+            result[index, :row.numel()] = row
+        return result
 
     @torch.no_grad()
     def generate_answer(self, context_ids, question_ids, context_mask, question_mask, tokenizer, max_new_tokens=128):
-        self.eval(); emb=self.qwen.get_input_embeddings(); rows=[]
-        for i in range(context_ids.size(0)):
-            c=context_ids[i:i+1]; q=question_ids[i:i+1]; cm=context_mask[i:i+1].bool(); qm=question_mask[i:i+1].bool()
-            layers, _, x, am = self._encode_context(emb(c), cm, emb(q), qm)
-            memory=self._memory_prefix(layers)
-            generated_ids=[]
-            generated_embeds=emb(c).new_empty(1, 0, emb.embedding_dim)
-            for _ in range(max_new_tokens):
-                sequence=torch.cat([emb(c), memory, emb(q), generated_embeds], dim=1)
-                answer_mask=cm.new_ones(1, generated_embeds.size(1))
-                block_mask=build_block_causal_mask(cm, memory.size(1), qm, answer_mask, sequence.dtype)
-                out=self.qwen(inputs_embeds=sequence, attention_mask=block_mask, use_cache=False, return_dict=True)
-                next_id=out.logits[:, -1].argmax(-1)
-                generated_ids.append(next_id)
-                if int(next_id[0]) == int(tokenizer.eos_token_id):
-                    break
-                generated_embeds=torch.cat([generated_embeds, emb(next_id[:, None])], dim=1)
-            rows.append(torch.cat(generated_ids,dim=0) if generated_ids else torch.empty(0,dtype=torch.long,device=c.device))
-        width=max(r.numel() for r in rows); out=torch.full((len(rows),width),tokenizer.pad_token_id,dtype=torch.long,device=context_ids.device)
-        for i,r in enumerate(rows): out[i,-r.numel():]=r
-        return out
+        embedding = self.qwen.get_input_embeddings()
+        prefix = self.encode_context_prefix(embedding(context_ids), context_mask)
+        indices = torch.arange(question_ids.size(0), device=question_ids.device)
+        return self.generate_answer_with_prefix(prefix, indices, question_ids, question_mask, tokenizer, max_new_tokens)
 
 
 def load_model(cfg):
@@ -239,6 +354,7 @@ ModelOutput = MetaLoRAOutput
 
 __all__ = [
     "MetaLoRA", "MetaLoRAOutput", "QwenMemoryModel", "ModelOutput",
-    "StaticLoRALinear", "MemoryDecoder", "build_block_causal_mask",
+    "StaticLoRALinear", "MemoryDecoder", "ContextPrefix",
+    "build_block_causal_mask", "build_continuation_mask",
     "load_model",
 ]
