@@ -6,8 +6,10 @@ model:
   lora_dropout: 0.0
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 memory:
-  num_memory_tokens: 8
+  memory_length: 8
   encoder_heads: 8
+  decoder_hidden_size: 256
+  decoder_ffn_ratio: 2
   decoder_heads: 8
   reconstruction_weight: 1.0
   qa_weight: 1.0
@@ -36,7 +38,7 @@ evaluation:
   autoregressive_every: 4000
   max_new_tokens: 128
 training:
-  batch_size: 2
+  batch_size: 1
   epochs: 1
   grad_accumulation: 1
   max_grad_norm: 1.0

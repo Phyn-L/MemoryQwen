@@ -3,12 +3,10 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2}"
-IFS=',' read -ra VISIBLE_GPUS <<< "$CUDA_VISIBLE_DEVICES"
-NUM_PROCESSES="${NUM_PROCESSES:-${#VISIBLE_GPUS[@]}}"
+export CUDA_VISIBLE_DEVICES=0,1,2
 if command -v accelerate >/dev/null 2>&1; then
   accelerate launch \
-    --num_processes 1 \
+    --num_processes 3 \
     --num_machines 1 \
     --mixed_precision bf16 \
     --dynamo_backend no \

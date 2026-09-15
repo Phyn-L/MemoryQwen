@@ -5,7 +5,7 @@ model:
   lora_alpha: 16
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 memory:
-  num_memory_tokens: 8
+  memory_length: 8
   encoder_heads: 8
   reconstruction_weight: 1.0
   qa_weight: 1.0

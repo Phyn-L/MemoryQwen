@@ -49,5 +49,27 @@ utils/config.py  utils/ddp.py
 ```
 
 Each decoder in `src/MemoryDecoder.py` receives only its own layer's memory
-embedding (`[B, M, H]`) and reconstructs the complete context embedding sequence
-(`[B, L, H]`). `src/model.py` stacks these outputs as `[B, num_layers, L, H]`.
+embedding (`[B, M, H]`). It projects memory and positional queries into a
+configurable bottleneck of width `memory.decoder_hidden_size`, applies
+cross-attention and an FFN with expansion ratio `memory.decoder_ffn_ratio`, and
+projects the result back to `H`. The decoder therefore reconstructs the complete
+context embedding sequence (`[B, L, H]`), and `src/model.py` stacks these outputs
+as `[B, num_layers, L, H]`. The Qwen-1.7B configuration uses a width of 256, an
+FFN ratio of 2, and 8 attention heads while retaining one independent decoder per
+Qwen layer.
+Here `memory.memory_length` is the number of memory tokens `M` (8 by default),
+while `qwen_hidden_size` is each token's Qwen feature width `H` (2048 for
+Qwen3-1.7B); these are independent dimensions.
+
+## Possible decoder extension: learned layer embeddings with grouped sharing
+
+A resource-efficient follow-up is to share one bottleneck decoder within each
+group of adjacent Qwen layers. Before decoding, add a learned layer embedding to
+the projected memory tokens and/or positional queries so that the shared decoder
+can condition its reconstruction on the source layer. For example, 28 Qwen layers
+can be divided into seven groups of four layers, reducing decoder parameters by
+approximately 4x while retaining layer identity. This is an exploratory model
+variant rather than the current implementation and should be compared against
+independent decoders with matched bottleneck width. Useful ablations include group
+sizes 1, 2, 4, and 28, with and without learned layer embeddings, evaluated using
+per-layer reconstruction loss, QA metrics, peak memory, and training throughput.

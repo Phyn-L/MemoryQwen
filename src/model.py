@@ -46,7 +46,7 @@ class LayerReconstructionDecoder(nn.Module):
 
 def build_block_causal_mask(
     context_mask: torch.Tensor,
-    memory_tokens: int,
+    memory_length: int,
     question_mask: torch.Tensor,
     answer_mask: torch.Tensor,
     dtype: torch.dtype,
@@ -63,9 +63,9 @@ def build_block_causal_mask(
     context_mask = context_mask.bool(); question_mask = question_mask.bool(); answer_mask = answer_mask.bool()
     bsz, context_len = context_mask.shape
     question_len, answer_len = question_mask.shape[1], answer_mask.shape[1]
-    total = context_len + memory_tokens + question_len + answer_len
+    total = context_len + memory_length + question_len + answer_len
     allowed = torch.zeros((bsz, total, total), dtype=torch.bool, device=context_mask.device)
-    c0, m0, q0 = 0, context_len, context_len + memory_tokens
+    c0, m0, q0 = 0, context_len, context_len + memory_length
     a0 = q0 + question_len
     for batch in range(bsz):
         c_valid = context_mask[batch]
@@ -76,18 +76,18 @@ def build_block_causal_mask(
                 allowed[batch, c0 + i, c0 : c0 + i + 1] = c_valid[: i + 1]
             else:
                 allowed[batch, c0 + i, c0 + i] = True
-        valid_memory = torch.ones(memory_tokens, dtype=torch.bool, device=allowed.device)
-        for i in range(memory_tokens):
+        valid_memory = torch.ones(memory_length, dtype=torch.bool, device=allowed.device)
+        for i in range(memory_length):
             allowed[batch, m0 + i, c0 : c0 + context_len] = c_valid
         for i in range(question_len):
             if q_valid[i]:
-                allowed[batch, q0 + i, m0 : m0 + memory_tokens] = valid_memory
+                allowed[batch, q0 + i, m0 : m0 + memory_length] = valid_memory
                 allowed[batch, q0 + i, q0 : q0 + i + 1] = q_valid[: i + 1]
             else:
                 allowed[batch, q0 + i, q0 + i] = True
         for i in range(answer_len):
             if a_valid[i]:
-                allowed[batch, a0 + i, m0 : m0 + memory_tokens] = valid_memory
+                allowed[batch, a0 + i, m0 : m0 + memory_length] = valid_memory
                 allowed[batch, a0 + i, q0 : q0 + question_len] = q_valid
                 allowed[batch, a0 + i, a0 : a0 + i + 1] = a_valid[: i + 1]
             else:
@@ -98,22 +98,25 @@ def build_block_causal_mask(
 
 class MetaLoRA(nn.Module):
     """Qwen encoder/decoder with ordinary (static) PEFT LoRA and reconstruction decoders."""
-    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, num_memory_tokens=8, encoder_heads=8, target_modules=None, dropout=0.0, max_context_tokens=2048):
+    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048):
         super().__init__()
         self.rank, self.alpha = rank, alpha
         self.target_modules = tuple(target_modules or ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"))
         self.qwen = self._add_peft_lora(qwen, rank, alpha, dropout)
-        self.hidden_size = self.qwen.config.hidden_size
+        self.qwen_hidden_size = self.qwen.config.hidden_size
         # Global learnable memory tokens are added to the pooled Qwen context
         # representation. They are trained together with LoRA and the decoders.
         self.memory_tokens = nn.Parameter(
-            torch.randn(num_memory_tokens, self.hidden_size) * 0.02
+            torch.randn(memory_length, self.qwen_hidden_size) * 0.02
         )
         layers = int(self.qwen.config.num_hidden_layers)
-        if self.hidden_size % encoder_heads:
-            encoder_heads = max(1, min(encoder_heads, self.hidden_size))
-            while self.hidden_size % encoder_heads: encoder_heads -= 1
-        self.decoders = nn.ModuleList([MemoryDecoder(self.hidden_size, encoder_heads, max_context_tokens) for _ in range(layers)])
+        self.decoders = nn.ModuleList([
+            MemoryDecoder(
+                self.qwen_hidden_size, decoder_hidden_size, decoder_heads,
+                decoder_ffn_ratio, max_context_tokens,
+            )
+            for _ in range(layers)
+        ])
 
     def _add_peft_lora(self, qwen, rank, alpha, dropout):
         try:
@@ -144,9 +147,10 @@ class MetaLoRA(nn.Module):
         if answer_embeds is None:
             answer_embeds = context_embeds.new_empty(context_embeds.size(0), 0, context_embeds.size(-1))
             answer_mask = context_mask.new_zeros(context_embeds.size(0), 0)
+        memory_length = self.memory_tokens.size(0)
         memory_inputs = self.memory_tokens.unsqueeze(0).expand(context_embeds.size(0), -1, -1)
         sequence = torch.cat([context_embeds, memory_inputs, question_embeds, answer_embeds], dim=1)
-        block_mask = build_block_causal_mask(context_mask, memory_inputs.size(1), question_mask, answer_mask, sequence.dtype)
+        block_mask = build_block_causal_mask(context_mask, memory_length, question_mask, answer_mask, sequence.dtype)
         out = self.qwen(inputs_embeds=sequence, attention_mask=block_mask, output_hidden_states=True, use_cache=False, return_dict=True)
         states = out.hidden_states
         if states is None: states = (sequence, out.last_hidden_state)
@@ -199,7 +203,15 @@ def load_model(cfg):
     tok=AutoTokenizer.from_pretrained(cfg.model.name_or_path, local_files_only=True); tok.pad_token=tok.pad_token or tok.eos_token
     qwen=AutoModelForCausalLM.from_pretrained(cfg.model.name_or_path, dtype=dtype_from_name(cfg.model.torch_dtype), local_files_only=True)
     qwen.config.use_cache=False
-    model=MetaLoRA(qwen, rank=cfg.model.lora_rank, alpha=cfg.model.lora_alpha, num_memory_tokens=cfg.memory.num_memory_tokens, encoder_heads=getattr(cfg.memory, "decoder_heads", cfg.memory.encoder_heads), target_modules=cfg.model.target_modules, dropout=cfg.model.lora_dropout)
+    model=MetaLoRA(
+        qwen, rank=cfg.model.lora_rank, alpha=cfg.model.lora_alpha,
+        memory_length=cfg.memory.memory_length,
+        decoder_hidden_size=cfg.memory.decoder_hidden_size,
+        decoder_heads=cfg.memory.decoder_heads,
+        decoder_ffn_ratio=cfg.memory.decoder_ffn_ratio,
+        target_modules=cfg.model.target_modules, dropout=cfg.model.lora_dropout,
+        max_context_tokens=cfg.data.max_context_tokens,
+    )
     for name,p in model.named_parameters():
         p.requires_grad=("lora_A" in name or "lora_B" in name or name == "memory_tokens" or name.startswith("decoders."))
     return tok, model

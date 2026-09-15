@@ -26,8 +26,10 @@ class ModelConfig:
 
 @dataclass
 class MemoryConfig:
-    num_memory_tokens: int = 8
+    memory_length: int = 8
     encoder_heads: int = 8
+    decoder_hidden_size: int = 256
+    decoder_ffn_ratio: int = 2
     decoder_heads: int = 8
     reconstruction_weight: float = 1.0
     qa_weight: float = 1.0
@@ -163,9 +165,15 @@ class TrainConfig:
         for key in ("wandb_project", "wandb_run_name", "wandb_mode", "wandb_run_id"):
             if key in top:
                 logging_values.setdefault(key, top.pop(key))
+        memory_values = dict(values.get("memory", {}))
+        legacy_memory_length = memory_values.pop("num_memory_tokens", None)
+        if legacy_memory_length is not None:
+            if "memory_length" in memory_values and memory_values["memory_length"] != legacy_memory_length:
+                raise ValueError("memory.memory_length conflicts with legacy memory.num_memory_tokens")
+            memory_values.setdefault("memory_length", legacy_memory_length)
         return cls(
             model=ModelConfig(**model_values),
-            memory=MemoryConfig(**values.get("memory", {})),
+            memory=MemoryConfig(**memory_values),
             data=DataConfig(**data_values),
             optimizer=OptimizerConfig(**optimizer_values),
             scheduler=SchedulerConfig(**values.get("scheduler", {})),
@@ -192,8 +200,12 @@ class TrainConfig:
             raise ValueError("question/answer token limits must be positive")
         if d.sortish_bucket_multiplier <= 0:
             raise ValueError("sortish_bucket_multiplier must be positive")
-        if self.model.lora_rank <= 0 or m.num_memory_tokens <= 0:
-            raise ValueError("lora_rank and num_memory_tokens must be positive")
+        if self.model.lora_rank <= 0 or m.memory_length <= 0:
+            raise ValueError("lora_rank and memory_length must be positive")
+        if m.decoder_hidden_size <= 0 or m.decoder_ffn_ratio <= 0 or m.decoder_heads <= 0:
+            raise ValueError("decoder_hidden_size, decoder_ffn_ratio and decoder_heads must be positive")
+        if m.decoder_hidden_size % m.decoder_heads:
+            raise ValueError("memory.decoder_hidden_size must be divisible by memory.decoder_heads")
         if m.reconstruction_loss not in {"mse", "cosine", "mse_cosine"}:
             raise ValueError("reconstruction_loss must be mse, cosine, or mse_cosine")
         if m.qa_weight < 0 or m.reconstruction_weight < 0:
