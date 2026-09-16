@@ -187,22 +187,22 @@ agree key for key on every key in `src.metrics.METRIC_KEYS`:
 Both evaluators additionally report `first_token_em`: the first answer token must be
 produced from memory alone, so it is the retrieval signal that `em`/`f1` are not.
 
-Two differences between the two harnesses remain:
+Both evaluators reduce over *every* gold answer with a metric-wise max, and
+`src/data.py` now carries all of them through the dataset cache (`QARecord.answers`,
+`dataset_cache.CACHE_VERSION = 4`; the older schema kept only the first answer, which made
+the evaluator see one reference where the baseline sees up to six -- of the 16498 answered
+QA pairs in `aggregated/squad/validation.jsonl`, 12728 have 3 references, 2092 have 5 and
+1384 have 4). `first_token_em` uses the same rule: matching any annotator's first token
+counts as a hit. `tests/test_references.py` covers the end-to-end path
+(jsonl -> dataset -> HF cache -> reload), which is where a missed `CACHE_VERSION` bump would
+show up.
 
-1. **Reference reduction.** The evaluator scores against `QARecord.answer`, which
-   `src/data.py:_answer()` fills with the *first non-empty* reference, while
-   `src/icl_baseline.example_metrics` reduces with `max` over every reference. The
-   aggregated data really does carry several: `aggregated/squad/validation.jsonl` holds
-   16498 answered QA pairs, of which 12728 have 3 references, 2092 have 5 and 1384 have 4
-   (a further 5945 have none and are dropped by `filter_no_qa`). On this split the
-   evaluator therefore sees one reference where the baseline sees up to six, which is the
-   ~6 F1 gap previously noted here. Closing it means carrying every reference through the
-   cached dataset (`QARecord`, a `dataset_cache.CACHE_VERSION` bump, the collate, the
-   evaluator) -- a data-pipeline change rather than a scoring change.
-2. The harnesses also read different files: the evaluator uses
-   `data.root/squad/<split>.jsonl` from the aggregated tree, while the baseline defaults to
-   `/data/lz/contexts/standardized/squad/validation-v1.1.jsonl` (10570 questions). Compare
-   the two only when both point at the same split.
+One difference remains, and it is a property of the inputs rather than of the code:
+
+- The harnesses read different files. The evaluator uses `data.root/squad/<split>.jsonl`
+  from the aggregated tree, while `scripts/test_icl_baseline.py` defaults to
+  `/data/lz/contexts/standardized/squad/validation-v1.1.jsonl` (10570 questions). Compare
+  the two only when both point at the same split.
 
 ### Regression check for the two target-format fixes
 

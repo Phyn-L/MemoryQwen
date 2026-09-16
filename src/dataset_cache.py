@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from datasets import Dataset
 
-CACHE_VERSION = 3
+CACHE_VERSION = 4  # 4: QARecord carries every gold answer (answers), not just the first
 CACHE_DIR_NAME = "dataset_cache"
 DATASET_DIR_NAME = "hf_dataset"
 

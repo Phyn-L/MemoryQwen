@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 from utils.ddp import is_main_process
 
 from .losses import combine_losses, context_lm_loss, qa_loss, reconstruction_loss
-from .metrics import METRIC_KEYS, qa_metrics
+from .metrics import METRIC_KEYS, best_reference_metrics
 
 
 def _distributed_sum(values, device):
@@ -34,6 +34,20 @@ def _distributed_sum(values, device):
 class Evaluator:
     def __init__(self, tokenizer, cfg):
         self.tokenizer, self.cfg = tokenizer, cfg
+
+    def _first_token_ids(self, record) -> set[int]:
+        """First token id of every gold answer of one QA pair.
+
+        ``first_token_em`` asks whether the answer came from the memory alone, so it uses
+        the same best-reference rule as the metrics: matching any annotator's first token
+        counts as a hit.
+        """
+        first_ids = set()
+        for reference in record.references:
+            tokens = self.tokenizer(reference, add_special_tokens=False).input_ids
+            if tokens:
+                first_ids.add(int(tokens[0]))
+        return first_ids
 
     def _batch(self, model, prefix, batch, device, start=0, end=None):
         end = end or batch["question_ids"].size(0)
@@ -134,12 +148,12 @@ class Evaluator:
                     # answer position that must be produced from the memory alone
                     # (every later token can copy the gold prefix it was fed).
                     first_token_hits += int(
-                        predictions[i][active][0].item() == target[i][active][0].item()
+                        int(predictions[i][active][0].item()) in self._first_token_ids(record)
                     )
                     text = self.tokenizer.decode(
                         predictions[i][active].tolist(), skip_special_tokens=True
                     )
-                    metrics = qa_metrics(text, record.answer)
+                    metrics = best_reference_metrics(text, record.references)
                     for key, value in metrics.items():
                         totals[key] += value
                     samples += 1
@@ -233,22 +247,15 @@ class Evaluator:
             for i, record in enumerate(batch["records"]):
                 if max_qa is not None and samples >= max_qa:
                     break
-                gold_first = self.tokenizer(
-                    record.answer, add_special_tokens=False
-                ).input_ids
                 row = generated[i].tolist()
-                gold_token = gold_first[0] if gold_first else None
                 first_token_hit += int(
-                    gold_token is not None
-                    and row
-                    and row[0] == gold_token
+                    bool(row)
+                    and row[0] in self._first_token_ids(record)
                     and row[0] != self.tokenizer.pad_token_id
                 )
-                metrics = qa_metrics(
-                    self.tokenizer.decode(
-                        generated[i].tolist(), skip_special_tokens=True
-                    ),
-                    record.answer,
+                metrics = best_reference_metrics(
+                    self.tokenizer.decode(row, skip_special_tokens=True),
+                    record.references,
                 )
                 for key, value in metrics.items():
                     sums[key] += value

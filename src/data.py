@@ -28,6 +28,17 @@ class QARecord:
     answer: str
     dataset: str = ""
     context_id: str = ""
+    # Every non-empty gold answer. ``answer`` stays the first one because that is the
+    # training target (one answer must be supervised); evaluation must consider all of
+    # them, which is what ``references`` is for.
+    answers: tuple[str, ...] = ()
+
+    @property
+    def references(self) -> tuple[str, ...]:
+        """All gold answers, falling back to ``answer`` for records built without them."""
+        if self.answers:
+            return self.answers
+        return (self.answer,) if self.answer else ()
 
 
 @dataclass(frozen=True)
@@ -49,10 +60,16 @@ def render_question(tokenizer, question: str, use_chat_template: bool = False, e
         return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
 
-def _answer(qa: dict[str, Any]) -> str | None:
+def _answers(qa: dict[str, Any]) -> tuple[str, ...]:
+    """All non-empty gold answers of one QA pair, in file order.
+
+    SQuAD ships several annotator answers per question and the official metric counts a
+    prediction correct if it matches any of them, so dropping all but the first (which is
+    what this used to do) makes the evaluator systematically stricter than the baseline.
+    """
     values = qa.get("answers", qa.get("answer", []))
     values = values if isinstance(values, list) else [values]
-    return next((str(value).strip() for value in values if value is not None and str(value).strip()), None)
+    return tuple(str(value).strip() for value in values if value is not None and str(value).strip())
 
 
 class AggregatedContextDataset(Dataset):
@@ -104,11 +121,13 @@ class AggregatedContextDataset(Dataset):
                             continue
                     pairs = []
                     for qa in row.get("qa_pairs", []) or []:
-                        answer = _answer(qa); question = str(qa.get("question", "")).strip()
-                        if filter_no_qa and (not question or not answer):
+                        answers = _answers(qa); question = str(qa.get("question", "")).strip()
+                        if filter_no_qa and (not question or not answers):
                             continue
-                        if question and answer:
-                            pairs.append(QARecord(question, answer, name, str(row.get("context_id", ""))))
+                        if question and answers:
+                            pairs.append(QARecord(
+                                question, answers[0], name, str(row.get("context_id", "")), answers,
+                            ))
                     if pairs:
                         records.append(ContextRecord(context, tuple(pairs), name, str(row.get("context_id", ""))))
                     else:
@@ -133,7 +152,15 @@ class AggregatedContextDataset(Dataset):
 
     def __getitem__(self, index):
         row = self.dataset[index]
-        pairs = tuple(QARecord(str(q["question"]), str(q["answer"]), str(q.get("dataset", row.get("dataset", ""))), str(q.get("context_id", row.get("context_id", "")))) for q in row["qa_pairs"])
+        pairs = tuple(
+            QARecord(
+                str(q["question"]), str(q["answer"]),
+                str(q.get("dataset", row.get("dataset", ""))),
+                str(q.get("context_id", row.get("context_id", ""))),
+                tuple(str(value) for value in q.get("answers", ()) or ()),
+            )
+            for q in row["qa_pairs"]
+        )
         return ContextRecord(str(row["context"]), pairs, str(row.get("dataset", "")), str(row.get("context_id", "")))
 
 
