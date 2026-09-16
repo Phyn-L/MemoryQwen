@@ -168,38 +168,41 @@ match `scripts/test_icl_baseline.py --squad-max-new-tokens 32`. Setting
 `autoregressive_every` to a huge number is how the `pgw1382s` run ended up with no
 trustworthy score at all.
 
-### Two rulers: which keys to compare with the ICL baseline
+### Metric semantics
 
-Every metric is reported twice, in `src.metrics.METRIC_KEYS` order:
+Answer-quality metrics use the official SQuAD normalizer -- lowercase, punctuation
+stripped, articles dropped -- because that is what the published ICL baseline numbers use,
+and the two must be the same number for a comparison to mean anything. There is exactly one
+implementation (`src/metrics.py`) and one reduction (`best_reference_metrics`), and
+`tests/test_metrics.py` asserts that `src.icl_baseline.example_metrics` and the evaluator
+agree key for key on every key in `src.metrics.METRIC_KEYS`:
 
-| key | normalizer | use |
-| --- | --- | --- |
-| `em` `f1` `rouge_l` `precision` | `normalize_text` (lowercase, non-alphanumerics to spaces, **articles kept**) | the training-time ruler, unchanged since the first run, so historical numbers stay comparable |
-| `em_official` `f1_official` `rouge_l_official` `precision_official` | `normalize_official` (lowercase, punctuation stripped, **articles dropped**) | the official SQuAD ruler — **these are the ones to compare against `scripts/test_icl_baseline.py`** |
+| key | definition |
+| --- | --- |
+| `em` | normalized prediction equals a gold answer exactly |
+| `f1` | token-overlap F1 against the best gold answer |
+| `rouge_l` | LCS F1 against the best gold answer |
+| `precision` | fraction of predicted tokens present in the reference (formerly, and wrongly, called `bleu`) |
 
-The distinction is not cosmetic: for `prediction="a cat"`, `reference="cat"` the legacy
-ruler gives `em=0`, `f1=0.667`, the official ruler `em=1`, `f1=1`. `tests/test_metrics.py`
-pins both directions — the `_official` keys equal `src.icl_baseline.example_metrics` for a
-single reference, and the unsuffixed keys are bit-identical to what they were before the
-official keys existed.
+Both evaluators additionally report `first_token_em`: the first answer token must be
+produced from memory alone, so it is the retrieval signal that `em`/`f1` are not.
 
-Three differences between the two harnesses matter, and only the first is closed:
+Two differences between the two harnesses remain:
 
-1. **Normalization** — closed by the `_official` keys above.
-2. **Reference reduction.** The evaluator scores against `QARecord.answer`, which
+1. **Reference reduction.** The evaluator scores against `QARecord.answer`, which
    `src/data.py:_answer()` fills with the *first non-empty* reference, while
-   `src/icl_baseline.example_metrics` takes `max` over all references. The aggregated data
-   really does carry several: `aggregated/squad/validation.jsonl` holds 16498 answered QA
-   pairs, of which 12728 have 3 references, 2092 have 5 and 1384 have 4 (a further 5945
-   pairs have none and are dropped by `filter_no_qa`). On this split the evaluator sees one
-   reference where the baseline sees up to six, which is the ~6 F1 gap previously noted
-   here. Closing it means carrying every reference through the cached dataset
-   (`QARecord`, a `dataset_cache.CACHE_VERSION` bump, the collate, the evaluator) — a
-   data-pipeline change rather than a scoring change, so it is left as a separate decision.
-3. The harnesses also read different files: the evaluator uses
+   `src/icl_baseline.example_metrics` reduces with `max` over every reference. The
+   aggregated data really does carry several: `aggregated/squad/validation.jsonl` holds
+   16498 answered QA pairs, of which 12728 have 3 references, 2092 have 5 and 1384 have 4
+   (a further 5945 have none and are dropped by `filter_no_qa`). On this split the
+   evaluator therefore sees one reference where the baseline sees up to six, which is the
+   ~6 F1 gap previously noted here. Closing it means carrying every reference through the
+   cached dataset (`QARecord`, a `dataset_cache.CACHE_VERSION` bump, the collate, the
+   evaluator) -- a data-pipeline change rather than a scoring change.
+2. The harnesses also read different files: the evaluator uses
    `data.root/squad/<split>.jsonl` from the aggregated tree, while the baseline defaults to
    `/data/lz/contexts/standardized/squad/validation-v1.1.jsonl` (10570 questions). Compare
-   `_official` keys only when both point at the same split.
+   the two only when both point at the same split.
 
 ### Regression check for the two target-format fixes
 

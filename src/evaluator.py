@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 from utils.ddp import is_main_process
 
 from .losses import combine_losses, context_lm_loss, qa_loss, reconstruction_loss
-from .metrics import METRIC_KEYS, qa_metrics_all
+from .metrics import METRIC_KEYS, qa_metrics
 
 
 def _distributed_sum(values, device):
@@ -139,7 +139,7 @@ class Evaluator:
                     text = self.tokenizer.decode(
                         predictions[i][active].tolist(), skip_special_tokens=True
                     )
-                    metrics = qa_metrics_all(text, record.answer)
+                    metrics = qa_metrics(text, record.answer)
                     for key, value in metrics.items():
                         totals[key] += value
                     samples += 1
@@ -244,7 +244,7 @@ class Evaluator:
                     and row[0] == gold_token
                     and row[0] != self.tokenizer.pad_token_id
                 )
-                metrics = qa_metrics_all(
+                metrics = qa_metrics(
                     self.tokenizer.decode(
                         generated[i].tolist(), skip_special_tokens=True
                     ),

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from .metrics import exact_match, normalize_official, rouge_l, token_f1
+from .metrics import METRIC_KEYS, best_reference_metrics, normalize_answer
 
 
 @dataclass(frozen=True)
@@ -134,9 +134,9 @@ def parse_prediction(example: ICLExample, raw_prediction: str) -> tuple[str, str
         return first_line, ""
     match = re.search(r"(?:^|[\s(\[])s*([A-D])(?:[\s).:\]]|$)", raw.upper())
     if not match:
-        normalized = normalize_official(raw)
+        normalized = normalize_answer(raw)
         for index, option in enumerate(example.options):
-            if normalized == normalize_official(option):
+            if normalized == normalize_answer(option):
                 letter = "ABCD"[index]
                 return option, letter
         return raw, ""
@@ -145,18 +145,12 @@ def parse_prediction(example: ICLExample, raw_prediction: str) -> tuple[str, str
 
 
 def example_metrics(prediction: str, references: Sequence[str]) -> dict[str, float]:
-    """Official SQuAD normalization, best reference per example.
+    """Official normalization and best-reference reduction, shared with the evaluator.
 
-    The arithmetic lives in :mod:`src.metrics`; only the normalizer differs from
-    the training-time evaluator, and it is passed explicitly so the two numbers
-    are comparable by construction.
+    This is a thin alias of :func:`src.metrics.best_reference_metrics` so the baseline and
+    the memory model cannot drift apart in either the normalizer or the reduction.
     """
-    references = tuple(references) or ("",)
-    return {
-        "em": max(exact_match(prediction, reference, normalize_official) for reference in references),
-        "f1": max(token_f1(prediction, reference, normalize_official) for reference in references),
-        "rouge_l": max(rouge_l(prediction, reference, normalize_official) for reference in references),
-    }
+    return best_reference_metrics(prediction, references)
 
 
 def corpus_bleu(predictions: Sequence[str], references: Sequence[Sequence[str]], max_order: int = 4) -> float:
@@ -165,8 +159,8 @@ def corpus_bleu(predictions: Sequence[str], references: Sequence[Sequence[str]],
     totals = [0] * max_order
     predicted_length = reference_length = 0
     for prediction, sample_references in zip(predictions, references):
-        prediction_tokens = normalize_official(prediction).split()
-        reference_tokens = [normalize_official(value).split() for value in (sample_references or [""])]
+        prediction_tokens = normalize_answer(prediction).split()
+        reference_tokens = [normalize_answer(value).split() for value in (sample_references or [""])]
         predicted_length += len(prediction_tokens)
         reference_length += min(
             (len(value) for value in reference_tokens),
@@ -197,9 +191,9 @@ def _ngrams(tokens: Sequence[str], order: int) -> Counter:
 def aggregate_metrics(rows: Iterable[dict]) -> dict[str, float | int]:
     rows = list(rows)
     if not rows:
-        return {"count": 0, "em": 0.0, "f1": 0.0, "bleu_4": 0.0, "rouge_l": 0.0}
+        return {"count": 0, "bleu_4": 0.0, **{key: 0.0 for key in METRIC_KEYS}}
     result: dict[str, float | int] = {"count": len(rows)}
-    for metric in ("em", "f1", "rouge_l"):
+    for metric in METRIC_KEYS:
         result[metric] = sum(float(row[metric]) for row in rows) / len(rows)
     result["bleu_4"] = corpus_bleu(
         [str(row["prediction"]) for row in rows],

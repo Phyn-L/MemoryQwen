@@ -1,18 +1,16 @@
 """Metric-stack contract.
 
-Two things are easy to get wrong and are asserted here:
+The evaluator and the ICL baseline must produce the *same* number for the same prediction.
+They previously differed in the normalizer (articles kept vs dropped) and in the reduction
+over several gold answers (first reference vs max over all). Both are now single-sourced,
+and this file pins that down:
 
-1. The evaluator reduces a *flattened list* of metric accumulators through
-   ``dist.all_reduce``. If a key were missing from ``METRIC_KEYS``, or ordered differently
-   on different ranks, the reduction would silently mix values between metrics. So the
-   evaluator's key list must be exactly the key set that ``qa_metrics_all`` produces, in
-   the same order.
-2. The ``_official`` metrics must really be the official-normalized ones, and the
-   unsuffixed ones must really be the legacy-normalized ones -- otherwise the whole point
-   of reporting both (comparing with the ICL baseline without invalidating old runs) is
-   lost.
-
-Also documents the divergence the two rulers have, which is why both exist.
+1. ``METRIC_KEYS`` is the evaluator's accumulator order. A distributed reduce flattens the
+   accumulators into a list, so a key missing from that tuple -- or ordered differently on
+   different ranks -- would silently mix values between metrics.
+2. There is exactly one normalizer, and it is the official SQuAD one.
+3. ``best_reference_metrics`` is the metric-wise max over references and agrees with
+   ``src.icl_baseline.example_metrics``, which is the number the baseline reports.
 """
 from __future__ import annotations
 
@@ -22,78 +20,74 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.metrics import (  # noqa: E402
-    LEGACY_METRIC_KEYS,
     METRIC_KEYS,
-    OFFICIAL_SUFFIX,
-    normalize_official,
-    normalize_text,
+    best_reference_metrics,
+    normalize_answer,
     qa_metrics,
-    qa_metrics_all,
-    qa_metrics_official,
 )
 
 SAMPLES = [
-    ("a cat", "cat"),
-    ("the cat", "a cat"),
-    ("cat", "cat"),
-    ("Paris", ["paris"][0]),
-    ("hello, world!", "hello world"),
-    ("", ""),
-    ("", "answer"),
-    ("answer", ""),
-    ("New York City", "new york city"),
-    ("one two three four", "one two three"),
+    ("a cat", ["cat"]),
+    ("the cat", ["a cat"]),
+    ("cat", ["cat"]),
+    ("Paris", ["paris"]),
+    ("hello, world!", ["hello world"]),
+    ("", [""]),
+    ("", ["answer"]),
+    ("answer", [""]),
+    ("New York City", ["new york city", "NYC"]),
+    ("one two three four", ["one two three"]),
+    ("x y z", ["z y x"]),
 ]
 
 
 def test_metric_keys_match_what_the_evaluator_produces():
-    produced = tuple(qa_metrics_all("a cat", "cat").keys())
-    assert produced == METRIC_KEYS, f"evaluator key order {METRIC_KEYS} != produced {produced}"
+    produced = tuple(qa_metrics("a cat", "cat").keys())
+    assert produced == METRIC_KEYS, f"evaluator order {METRIC_KEYS} != produced {produced}"
 
 
-def test_metric_keys_are_two_disjoint_normalizations_of_the_same_four_metrics():
-    assert len(set(METRIC_KEYS)) == len(METRIC_KEYS), "duplicate key in METRIC_KEYS"
-    assert METRIC_KEYS == LEGACY_METRIC_KEYS + tuple(
-        f"{key}{OFFICIAL_SUFFIX}" for key in LEGACY_METRIC_KEYS
-    )
+def test_there_is_one_normalizer_and_it_is_the_official_one():
+    # Articles are dropped, punctuation is removed, everything is lowercased.
+    assert normalize_answer("The  Cat, sat!") == "cat sat"
+    assert normalize_answer("A CAT") == normalize_answer("cat")
+    # The old training-time normalizer kept articles; that divergence is gone.
+    assert qa_metrics("a cat", "cat")["em"] == 1.0
+    assert qa_metrics("the cat", "a cat")["em"] == 1.0
+    assert qa_metrics("a cat", "cat")["f1"] == 1.0
 
 
-def test_official_keys_are_the_official_normalization():
-    for prediction, reference in SAMPLES:
-        combined = qa_metrics_all(prediction, reference)
-        expected = qa_metrics(prediction, reference, normalize_official)
-        for key, value in expected.items():
-            assert combined[f"{key}{OFFICIAL_SUFFIX}"] == value, (prediction, reference, key)
+def test_best_reference_metrics_is_the_metric_wise_max():
+    prediction, references = "a dog", ["cat", "a dog", "the dog"]
+    got = best_reference_metrics(prediction, references)
+    per_reference = [qa_metrics(prediction, reference) for reference in references]
+    for key in METRIC_KEYS:
+        assert got[key] == max(row[key] for row in per_reference), key
+        # Every reference contributes at least one metric-wise maximum here, so a
+        # first-reference-only reduction would be strictly worse.
+    assert got["em"] == 1.0
 
 
-def test_legacy_keys_are_unchanged_by_this_feature():
-    """The unsuffixed keys must stay on the training-time ruler, byte for byte."""
-    for prediction, reference in SAMPLES:
-        combined = qa_metrics_all(prediction, reference)
-        legacy = qa_metrics(prediction, reference)
-        for key, value in legacy.items():
-            assert combined[key] == value, (prediction, reference, key)
+def test_empty_reference_list_is_treated_as_one_empty_answer():
+    assert best_reference_metrics("cat", []) == qa_metrics("cat", "")
 
 
-def test_the_two_rulers_really_do_differ():
-    """Guards the reason both sets exist: if they agreed, one set would be redundant."""
-    prediction, reference = "a cat", "cat"
-    assert not normalize_text(prediction) == normalize_official(prediction)
-    legacy = qa_metrics(prediction, reference)
-    official = qa_metrics_official(prediction, reference)
-    assert legacy["em"] == 0.0 and legacy["f1"] < 1.0
-    assert official[f"em{OFFICIAL_SUFFIX}"] == 1.0 and official[f"f1{OFFICIAL_SUFFIX}"] == 1.0
-
-
-def test_official_matches_the_icl_baseline_stack():
-    """The ICL baseline's own metric functions must agree with our _official keys."""
+def test_official_metrics_match_the_icl_baseline_stack():
+    """The baseline's own per-example metrics must equal ours, key for key."""
     from src.icl_baseline import example_metrics
 
-    for prediction, reference in SAMPLES:
-        baseline = example_metrics(prediction, [reference])
-        official = qa_metrics_official(prediction, reference)
-        for key in ("em", "f1", "rouge_l"):
-            assert baseline[key] == official[f"{key}{OFFICIAL_SUFFIX}"], (prediction, reference, key)
+    for prediction, references in SAMPLES:
+        baseline = example_metrics(prediction, references)
+        ours = best_reference_metrics(prediction, references)
+        for key in METRIC_KEYS:
+            assert baseline[key] == ours[key], (prediction, references, key)
+
+
+def test_no_legacy_dual_track_remains():
+    """Guard against re-introducing a second ruler by accident."""
+    import src.metrics as metrics
+
+    assert not hasattr(metrics, "normalize_text"), "the legacy normalizer is back"
+    assert not hasattr(metrics, "qa_metrics_all"), "the dual-track helper is back"
 
 
 if __name__ == "__main__":
