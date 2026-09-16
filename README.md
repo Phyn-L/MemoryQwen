@@ -211,26 +211,64 @@ counts as a hit. `tests/test_references.py` covers the end-to-end path
 (jsonl -> dataset -> HF cache -> reload), which is where a missed `CACHE_VERSION` bump would
 show up.
 
-Both harnesses now read the same file by default: `scripts/test_icl_baseline.py` points at
-`<data.root>/squad/validation.jsonl` from the aggregated tree and reads it through
-`src.icl_baseline.iter_examples`, which handles the aggregated (context-nested) schema. The
-standardized tree is a subset of it, so one tree removes any chance of the two evaluation
-sets drifting apart. `tests/test_icl_data.py` asserts the parity on the real files.
+Both harnesses read the same file, and it is the only supported one:
+`scripts/test_icl_baseline.py` defaults to `<data.root>/squad/validation.jsonl` and reads it
+through `src.icl_baseline.iter_examples`, which understands the aggregated context schema and
+**raises** on the old one-question-per-line layout instead of yielding an empty evaluation
+set. `tests/test_icl_data.py` asserts the parity against the training split on the real files.
 
-Two properties of that file are worth knowing before quoting a number from it:
+### The SQuAD evaluation set, in detail
 
-1. It is **v1.1 dev (10570 rows) concatenated with v2.0 dev (5928 rows)** per context, and
-   the two versions annotate the same paragraphs. The 16498 answered rows therefore cover
-   only **10531 distinct (context, question) pairs**: 36% of rows are repeats (up to 4x the
-   same question), and for 17 questions the repeated rows even disagree on the gold answers.
-   Both harnesses weight these identically, so the comparison between them is fair, but the
-   row count is not an effective sample size -- and a mean over the file silently gives those
-   questions ~1.6x the weight of the others.
-2. `<data.root>/squad/test.jsonl` is empty (0 bytes), so `--split test` for squad has nothing
-   to evaluate; use the validation split.
+`<data.root>/squad/*.jsonl` is not "SQuAD dev" in the sense the papers mean. It is the
+**v1.1 and v2.0 sets concatenated per paragraph**, and that composition is visible in every
+number measured from it:
 
-The 5945 unanswerable v2.0 questions are dropped on both sides -- `filter_no_qa` for training,
-`load_jsonl` for the baseline -- so the two harnesses score exactly the same rows.
+| | validation | train |
+| --- | --- | --- |
+| contexts | 2067 | 19030 |
+| QA rows | 22443 | 217918 |
+| ...tagged `*-v1.1` | 10570 | 87599 |
+| ...tagged `*-v2.0` | 11873 | 130319 |
+| rows with no gold answer (dropped by both harnesses) | 5945 | 43498 |
+| answered rows -- what a metric is averaged over | 16498 | 174420 |
+| **distinct `(context, question)`** | **10531** | **87406** |
+| answered rows that repeat another row | 5967 (36%) | 87014 (50%) |
+| distinct questions answerable in *both* versions | 5915 | 86761 |
+| distinct questions whose own repeat rows disagree | 17 | 79 |
+
+What follows from that:
+
+- **The row count is not the sample size.** Both harnesses average over rows, so the 5915
+  validation questions present in *both* versions carry roughly twice the weight of the 4616
+  that only v1.1 answers -- v2.0 marks those impossible, so they contribute a single row each.
+  Comparisons *between two of our own runs* are unaffected, because the weighting is identical
+  on both sides. An absolute number quoted next to a published SQuAD figure is not apples to
+  apples: the file mixes two annotation vintages and over-weights the overlap.
+- **The disagreements are not v1.1-versus-v2.0 annotation drift.** All 17 validation and all
+  79 train disagreements are between rows of the *same* version -- the aggregation simply kept
+  the same question twice. `what is one name used to refer to the jurisdiction of NCT of ...`
+  appears twice as `train-v1.1`, once with `New Delhi` and once with `Delhi`. Several train
+  answers are outright fragments (`Buddh` for `Buddhism`, `m and E`, `yptian Se`), which looks
+  like a character-offset bug in the aggregation's answer extraction rather than annotation
+  noise. Training samples QA pairs per context, so duplicated questions also skew which
+  questions get trained on.
+- **The 5945 unanswerable rows are v2.0's**, and both harnesses drop them -- `filter_no_qa`
+  for training, `load_jsonl` for the baseline -- so the two score the same rows. Nothing
+  currently trains or scores SQuAD 2.0's unanswerable task.
+- `<data.root>/squad/test.jsonl` is **0 bytes**, so squad has no test split; use validation.
+
+Three ways to clean this up, in increasing scope. None is a scoring change, so none is applied
+here -- the current file is the one every recorded run used:
+
+1. de-duplicate by `(context, question)` at load time, keeping the first row: 10531 rows, so
+   the row count becomes the sample size; where the duplicate rows disagree the retained
+   answer is arbitrary, which is why this is the least satisfying option;
+2. keep only `*-v1.1` rows: 10570 validation rows, i.e. exactly SQuAD v1.1 dev and comparable
+   with published numbers -- and the same filter on the train file, which is then what the
+   model is trained on;
+3. fix the aggregation that produced these files: merge by `(context, question)` and reconcile
+   `answer_starts`/`answers`. Only this option also addresses the fragment answers, and it
+   belongs in whichever script built the aggregated tree.
 
 ### Regression check for the two target-format fixes
 

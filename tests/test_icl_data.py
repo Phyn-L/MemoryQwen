@@ -1,12 +1,10 @@
 """The ICL baseline and the training evaluator must read the same questions.
 
 `scripts/test_icl_baseline.py` used to default to `contexts/standardized/` while the
-training pipeline read `contexts/aggregated/`. Those two files are not merely different
-paths: the aggregated squad validation file is SQuAD v2.0-shaped (10531 answerable +
-5945 unanswerable questions, the latter dropped by `filter_no_qa`), and its answerable
-subset happens to be exactly SQuAD v1.1 dev. So both harnesses now default to the
-aggregated tree, read through `iter_examples`, and the parity is asserted here instead of
-being assumed.
+training pipeline read `contexts/aggregated/`, and the two files do not contain the same
+rows (10570 vs 16498 answered), so the two means were over differently weighted sets. The
+aggregated tree is now the only supported schema -- `iter_examples` raises on anything else
+-- and the parity is asserted here instead of being assumed.
 """
 from __future__ import annotations
 
@@ -19,7 +17,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from src.data import AggregatedContextDataset  # noqa: E402
-from src.icl_baseline import _from_row, iter_examples, load_jsonl  # noqa: E402
+from src.icl_baseline import iter_examples, load_jsonl  # noqa: E402
 from utils.config import TrainConfig  # noqa: E402
 
 CONFIG = REPO / "configs" / "qwen-1.7b" / "train.yaml"
@@ -35,14 +33,22 @@ def _write(path: Path, rows) -> Path:
     return path
 
 
-def test_flat_schema_passes_through():
+def test_a_non_aggregated_file_raises_instead_of_looking_empty():
+    """A one-question-per-line file must fail loudly, not yield nothing.
+
+    Pointing --squad-validation-file at the standardized tree silently produced an empty
+    evaluation set before; the aggregated schema is the only supported input now.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         path = _write(Path(tmp) / "flat.jsonl", [
             {"id": "a", "context": "ctx", "question": "q", "answers": ["x"]},
         ])
-        examples = load_jsonl(path, "squad")
-        assert [example.id for example in examples] == ["a"]
-        assert examples[0].references == ("x",)
+        try:
+            load_jsonl(path, "squad")
+        except ValueError as error:
+            assert "qa_pairs" in str(error) and "aggregated" in str(error), error
+        else:
+            raise AssertionError("a flat/standardized file must be rejected")
 
 
 def test_aggregated_schema_is_exploded_per_question():
@@ -77,10 +83,10 @@ def test_questions_without_a_gold_answer_are_skipped():
 def test_rows_without_ids_get_unique_identifiers():
     with tempfile.TemporaryDirectory() as tmp:
         path = _write(Path(tmp) / "noid.jsonl", [
-            {"context": "c", "question": "flat", "answers": ["a"]},
+            {"context": "c", "qa_pairs": [{"question": "n1", "answers": ["a"]}]},
             {"context": "c2", "qa_pairs": [
-                {"question": "n1", "answers": ["a"]},
-                {"question": "n2", "answers": ["b"]},
+                {"question": "n2", "answers": ["a"]},
+                {"question": "n3", "answers": ["b"]},
             ]},
         ])
         ids = [example.id for example in load_jsonl(path, "squad")]
@@ -131,20 +137,22 @@ def test_icl_default_file_and_training_validation_split_are_the_same_questions()
     assert len(baseline) > 0
 
 
-def test_iter_examples_reports_line_and_index_for_both_schemas():
+def test_iter_examples_reports_line_and_index():
     with tempfile.TemporaryDirectory() as tmp:
-        path = _write(Path(tmp) / "both.jsonl", [
-            {"context": "c", "question": "flat", "answers": ["a"]},
-            {"context": "c2", "qa_pairs": [{"question": "n1", "answers": ["a"]},
-                                           {"question": "n2", "answers": ["b"]}]},
+        path = _write(Path(tmp) / "agg.jsonl", [
+            {"context": "c", "qa_pairs": [{"question": "n1", "answers": ["a"]}]},
+            {"context": "c2", "qa_pairs": [{"question": "n2", "answers": ["a"]},
+                                           {"question": "n3", "answers": ["b"]}]},
         ])
-        seen = [(line_number, index, row["question"]) for row, line_number, index in iter_examples(path, "squad")]
-        assert seen == [(1, 0, "flat"), (2, 0, "n1"), (2, 1, "n2")]
+        seen = [
+            (line_number, index, row["question"])
+            for row, line_number, index in iter_examples(path, "squad")
+        ]
+        assert seen == [(1, 0, "n1"), (2, 0, "n2"), (2, 1, "n3")]
 
-        # And the two schemas produce identical examples for identical question fields.
-        flat = _from_row({"id": "x", "context": "c", "question": "q", "answers": ["a"], "metadata": {}}, "squad", 1, 0)
-        nested = _from_row({"id": "x", "context": "c", "question": "q", "answers": ["a"], "metadata": {}}, "squad", 9, 4)
-        assert flat == nested
+        # The flattened row keeps the context from the enclosing line.
+        flat_row = next(iter(iter_examples(path, "squad")))[0]
+        assert flat_row["context"] == "c"
 
 
 if __name__ == "__main__":

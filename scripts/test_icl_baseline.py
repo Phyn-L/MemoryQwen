@@ -29,10 +29,10 @@ from utils.config import dtype_from_name
 from utils.ddp import barrier, init_distributed, is_main_process
 
 DEFAULT_MODEL = "/data/lz/hf_cache/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
-# Same tree the training pipeline uses (data.root in configs/*/train.yaml). The
-# standardized tree is a subset of it -- aggregated/squad/validation.jsonl is SQuAD
-# v2.0-shaped, whose answerable subset is exactly SQuAD v1.1 dev -- so reading one tree for
-# both harnesses removes any chance of the two evaluation sets drifting apart.
+# The same tree the training pipeline uses (data.root in configs/*/train.yaml), and the only
+# supported one: `src.icl_baseline.iter_examples` reads the aggregated context schema and
+# rejects anything else. See the README section "The SQuAD evaluation set, in detail" for
+# what that file actually contains.
 DEFAULT_DATA = Path("/data/lz/contexts/aggregated")
 
 

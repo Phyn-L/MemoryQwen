@@ -24,14 +24,16 @@ class ICLExample:
 
 
 def iter_examples(path: str | Path, dataset: str):
-    """Yield ``(flat_row, line_number, index_within_line)`` for either file schema.
+    """Yield ``(flat_row, line_number, index_within_line)`` from an aggregated file.
 
-    ``contexts/standardized/`` stores one question per line. ``contexts/aggregated/`` groups
-    a context's questions under ``qa_pairs``, and the per-question fields are identical (also
-    for RACE, whose ``metadata.options``/``answer_letter`` survive the aggregation). Exploding
-    the nested schema here means every consumer reads exactly one layout, which is what lets
-    the baseline and the training evaluator share a data tree instead of two files that merely
-    happen to agree today.
+    Every data file in this project comes from the aggregated tree, where one context's
+    questions are grouped under ``qa_pairs`` and the per-question fields are the original
+    ones -- also for RACE, whose ``metadata.options``/``answer_letter`` survive the
+    aggregation. Flattening that nesting here is the only schema handling any consumer needs.
+
+    A file without ``qa_pairs`` raises instead of yielding rows with no question in them:
+    pointing ``--squad-validation-file`` at the old one-question-per-line ``standardized``
+    tree used to look like an empty evaluation set rather than a mistake.
     """
     with Path(path).open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
@@ -40,8 +42,11 @@ def iter_examples(path: str | Path, dataset: str):
             row = json.loads(line)
             pairs = row.get("qa_pairs")
             if pairs is None:
-                yield row, line_number, 0
-                continue
+                raise ValueError(
+                    f"{path}:{line_number} has no 'qa_pairs'; expected the aggregated context "
+                    "schema (contexts/aggregated). The one-question-per-line 'standardized' "
+                    "files are not a supported input."
+                )
             for index, pair in enumerate(pairs or ()):
                 flat = dict(pair)
                 flat["context"] = row.get("context", "")
