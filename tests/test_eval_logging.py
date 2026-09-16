@@ -98,37 +98,22 @@ def test_teacher_forced_only_does_not_emit_an_autoregressive_section():
     assert set(sections[train.TEACHER_FORCED_SECTION]) == ANSWER_KEYS | LOSS_KEYS
 
 
-def test_train_only_losses_join_the_teacher_forced_section():
-    """ae_loss/distill_loss exist only during training, so they must be carried in explicitly."""
-    teacher = {key: 0.5 for key in ANSWER_KEYS}
-    teacher.update({"loss": 1.5, "qa_loss": 1.4, "reconstruction_loss": 1.3, "ppl": 4.0})
-    train_terms = {
-        "loss": 9.9, "qa_loss": 9.9, "reconstruction_loss": 9.9,
-        "ae_loss": 1.25, "distill_loss": 0.5,
-    }
-    payloads = train.eval_log_payloads(teacher, None, train_terms)
-    sections = _sections(payloads)
-    assert set(sections) == {train.TEACHER_FORCED_SECTION}
-    teacher_section = sections[train.TEACHER_FORCED_SECTION]
-    assert teacher_section["ae_loss"] == 1.25
-    assert teacher_section["distill_loss"] == 0.5
-    # the evaluation pass stays authoritative for the numbers it computed itself
-    assert teacher_section["loss"] == 1.5
-    assert teacher_section["qa_loss"] == 1.4
-    assert teacher_section["reconstruction_loss"] == 1.3
-    # training-only terms never leak into the autoregressive section, and an evaluation pass
-    # that did compute a key keeps its own value (the real evaluator produces qa_loss/ppl/
-    # reconstruction_loss but never ae_loss/distill_loss).
-    autoregressive = {key: 0.7 for key in ANSWER_KEYS}
-    autoregressive.update({"loss": 1.9, "qa_loss": 1.9, "reconstruction_loss": 1.9, "ppl": 5.0})
-    payloads = train.eval_log_payloads(None, autoregressive, train_terms)
-    sections = _sections(payloads)
-    assert set(sections) == {train.TEACHER_FORCED_SECTION, train.AUTOREGRESSIVE_SECTION}
-    teacher_section = sections[train.TEACHER_FORCED_SECTION]
-    assert teacher_section["ae_loss"] == 1.25
-    assert teacher_section["distill_loss"] == 0.5
-    assert teacher_section["loss"] == 1.9, "the evaluation pass must keep its own numbers"
-    assert set(sections[train.AUTOREGRESSIVE_SECTION]) == ANSWER_KEYS
+def test_training_losses_are_not_folded_into_the_evaluation_sections():
+    """The training loop logs ``train/*`` every 10 steps; the eval payloads must stay clean.
+
+    Regression for an unnecessary patch: folding the training terms into
+    ``eval_log_payloads`` made ``val_teacher_forced/loss`` mean "training loss" on
+    non-evaluation steps and "validation loss" on evaluation steps.
+    """
+    payloads = train.eval_log_payloads(None, None)
+    assert payloads == [], "an empty evaluation must log nothing"
+    payloads = train.eval_log_payloads(_teacher_payload(), _autoregressive_payload())
+    for key in (key for payload in payloads for key in payload):
+        assert not key.startswith("train/"), f"{key!r} leaked into the evaluation payloads"
+    # and the training terms keep their own prefix in the loop's own payload
+    terms = {"loss": 1.0, "qa_loss": 0.5, "ae_loss": 2.0, "distill_loss": 0.25}
+    training_payload = {f"train/{key}": value for key, value in terms.items()}
+    assert set(training_payload) == {"train/loss", "train/qa_loss", "train/ae_loss", "train/distill_loss"}
 
 
 if __name__ == "__main__":
