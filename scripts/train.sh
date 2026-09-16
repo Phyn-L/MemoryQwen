@@ -33,8 +33,14 @@ fi
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 CONFIG="${CONFIG:-configs/qwen-1.7b/train.yaml}"
-if [ ! -f "$ROOT/$CONFIG" ]; then
-  echo "train.sh: config '$CONFIG' not found under $ROOT" >&2
+# CONFIG may be absolute (a scratch config outside the repo) or relative to the checkout,
+# which is what `cd "$ROOT"` above makes the caller's relative paths mean.
+case "$CONFIG" in
+  /*) CONFIG_PATH="$CONFIG" ;;
+  *)  CONFIG_PATH="$ROOT/$CONFIG" ;;
+esac
+if [ ! -f "$CONFIG_PATH" ]; then
+  echo "train.sh: config '$CONFIG' not found (looked at $CONFIG_PATH)" >&2
   exit 1
 fi
 
@@ -68,7 +74,7 @@ esac
 [ "$NUM_PROCESSES" -ge 1 ] || NUM_PROCESSES=1
 
 if [ "$NUM_PROCESSES" -eq 1 ]; then
-  exec python scripts/train.py --config "$CONFIG" "$@"
+  exec python scripts/train.py --config "$CONFIG_PATH" "$@"
 fi
 
 # Multi-GPU requires a launcher: with plain `python`, Accelerator() reports
@@ -91,4 +97,4 @@ exec accelerate launch \
   --num_machines 1 \
   --mixed_precision bf16 \
   --dynamo_backend no \
-  scripts/train.py --config "$CONFIG" "$@"
+  scripts/train.py --config "$CONFIG_PATH" "$@"
