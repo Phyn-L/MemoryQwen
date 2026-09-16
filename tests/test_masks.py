@@ -148,8 +148,8 @@ def test_continuation_mask_is_block_mask_with_empty_context():
         assert torch.equal(derived, direct), "continuation mask is no longer the empty-context block mask"
 
 
-def test_no_valid_row_is_fully_masked():
-    """Every real query row must keep at least one unmasked key, or softmax yields NaN."""
+def test_only_memory_rows_can_be_fully_blocked_and_only_with_an_empty_context():
+    """The exact blocking contract, so a change in either direction is caught."""
     for context_mask, question_mask, answer_mask, memory_length in _random_cases(seed=3):
         context_mask, question_mask, answer_mask = (
             context_mask.bool(), question_mask.bool(), answer_mask.bool()
@@ -162,27 +162,47 @@ def test_no_valid_row_is_fully_masked():
         )[0]
 
         context_len = context_mask.size(1)
-        m0 = context_len
-        q0 = context_len + memory_length
+        m0, q0 = context_len, context_len + memory_length
 
-        # The continuation mask (generation path) must never have an empty row.
-        assert bool(continuation.any(dim=-1).all()), "continuation mask has an all-(-inf) row"
+        # The generation path must never produce a fully blocked row.
+        assert bool(continuation.any(dim=-1).all()), "continuation mask has a fully blocked row"
 
-        # Block mask: context rows (real or padded) and QA rows (real or padded) always
-        # have a key. Memory rows [m0, q0) are the documented exception: they only see
-        # context, so an all-padded context masks them completely. The data pipeline drops
-        # empty contexts, which is what keeps that unreachable.
         for b in range(block.size(0)):
             for row in range(block.size(1)):
+                fully_blocked = not bool(block[b, row].any())
                 if m0 <= row < q0:
-                    if not context_mask[b].any():
-                        assert not bool(block[b, row].any()), (
-                            "memory row should be fully masked when the context is empty"
-                        )
-                    continue
-                assert bool(block[b, row].any()), (
-                    f"block mask row {row} (batch {b}) is all -inf although the query always has a key"
-                )
+                    assert fully_blocked == (not context_mask[b].any()), (
+                        f"memory row {row}: fully_blocked={fully_blocked} but that row has "
+                        f"{int(context_mask[b].sum())} valid context token(s)"
+                    )
+                else:
+                    assert not fully_blocked, (
+                        f"row {row} (batch {b}) is fully blocked; only memory rows may be"
+                    )
+
+
+def test_blocked_entries_are_finite_so_no_row_can_nan():
+    """Pin WHY a fully blocked memory row is safe: ``finfo.min``, not ``-inf``.
+
+    Softmax over an all-``finfo.min`` row is uniform and finite; over an all-``-inf`` row it
+    is NaN. Verified against the real Qwen3 attention with a fully blocked row: finite for
+    both ``eager`` and ``sdpa`` with ``finfo.min``, NaN under ``eager`` with ``-inf``. So a
+    "simplification" of the blocked value to ``-inf`` must fail this test.
+    """
+    for context_mask, question_mask, answer_mask, memory_length in _random_cases(seed=4, count=20):
+        for dtype in (torch.float32, torch.bfloat16):
+            mask = build_block_causal_mask(
+                context_mask.bool(), memory_length, question_mask.bool(), answer_mask.bool(), dtype,
+            )
+            assert bool(torch.isfinite(mask).all()), "the block mask must contain no inf"
+            # Realistic negative logits; blocked rows must stay finite through softmax.
+            scores = torch.randn_like(mask) * 4.0 - 2.0
+            weights = torch.softmax(scores + mask, dim=-1)
+            assert bool(torch.isfinite(weights).all()), "softmax over the block mask was non-finite"
+
+    # The failure mode guarded against, demonstrated directly.
+    neg_inf_row = torch.full((1, 1, 1, 4), float("-inf"))
+    assert not bool(torch.isfinite(torch.softmax(neg_inf_row, dim=-1)).all())
 
 
 if __name__ == "__main__":

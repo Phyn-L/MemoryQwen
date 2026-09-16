@@ -139,6 +139,17 @@ def build_block_causal_mask(
     positions. Padding keys are blocked. Padded query rows keep a self edge to
     avoid all-``-inf`` rows; their outputs are ignored by the loss.
 
+    The memory rows are the one kind of row that can end up fully blocked: they see
+    nothing but the context, so a row whose context is entirely padding leaves them with
+    no key. This does **not** produce NaN, because blocked entries are written as
+    ``torch.finfo(dtype).min`` -- a finite number -- so such a row's softmax is uniform
+    (all-equal logits) rather than ``0/0``. Measured on the real Qwen3 attention with a
+    fully blocked row: finite for both ``eager`` and ``sdpa``; substituting ``-inf`` for
+    ``finfo.min`` does produce NaN under ``eager``, which is why the finite value matters.
+    The uniformity is still meaningless, so ``src/data.py`` drops contexts that tokenize
+    to nothing, making an all-padding context row unreachable in practice; the padding
+    self-edge below is what keeps *context and QA* rows well defined regardless.
+
     This is the vectorised form of the original row-by-row builder. The loop version
     read one GPU scalar per row (``if c_valid[i]:``), which forces a device
     synchronisation and a separate kernel launch per row; at context length 2048

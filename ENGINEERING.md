@@ -169,6 +169,21 @@ def build_continuation_mask(question_mask, answer_mask, memory_length, dtype):
 **(c) 顺手**：`scripts/train.sh` 里加 `export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`。
 历史上 `pgw1382s` / `3d9ya35y` 的 OOM 报错自己就提示了这一条，但脚本里没有。
 
+### 附：全遮蔽行会不会 NaN？——不会，但原因是"写的是 finfo.min 而不是 -inf"
+
+审计时一度怀疑 memory 行存在 NaN 隐患：memory 行只 attend context，若某行 context 全为
+padding，这 M 行就没有任何 key。实测结论是**不会 NaN**，机制值得记下来：
+
+- `build_block_causal_mask` 用 `masked_fill(~allowed, torch.finfo(dtype).min)`，写入的是**有限**的
+  最负值，不是 `-inf`；全遮蔽行因此是"所有 logits 相等"，softmax 退化成均匀分布，有限。
+- 直接对真实 Qwen3 attention 注入"整行遮蔽"的 mask 验证（eager 与 sdpa 都试）：
+  用 `finfo.min` 两种后端都有限；把同一行的值换成 `-inf`，**eager 立刻 NaN**，sdpa 仍然有限。
+  也就是说"不会 NaN"完全依赖于那个有限值，谁把它"简化"成 `-inf` 就会踩雷。
+  `tests/test_masks.py::test_blocked_entries_are_finite_so_no_row_can_nan` 把这一点钉住了。
+- 不过均匀分布仍然是无意义的（memory 隐状态会被 decoder 和 prefix 使用），所以真正的防护在
+  数据层：`_build_records` 现在除了丢弃空字符串 context，也会丢弃**分词后为空**的 context，
+  使"context 行至少有一个有效 token"成为代码保证而非注释假设。
+
 ---
 
 ## 2. gradient_checkpointing 没有接线（而且直接开是坏的）

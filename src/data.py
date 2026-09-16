@@ -91,6 +91,14 @@ class AggregatedContextDataset(Dataset):
                         continue
                     if filter_long_context and tokenizer is not None:
                         ids = tokenizer(context, add_special_tokens=False, truncation=True, max_length=max_context_tokens + 1).input_ids
+                        if not ids:
+                            # A non-empty string that tokenizes to nothing would give this
+                            # row an all-False context_mask, i.e. memory query rows with no
+                            # key at all to attend to. build_block_causal_mask stays finite
+                            # in that case (it writes finfo.min, see the note there) but the
+                            # sample is meaningless, so drop it like an empty context.
+                            empty_context += 1
+                            continue
                         if len(ids) > max_context_tokens:
                             dropped_long += 1
                             continue
