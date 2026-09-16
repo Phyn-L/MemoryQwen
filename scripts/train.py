@@ -17,6 +17,8 @@ from src.losses import (
     memory_contrastive_loss,
     qa_loss,
     reconstruction_loss,
+    sample_positions,
+    sequence_lm_loss,
 )
 from src.model import load_model
 from src.metrics import METRIC_KEYS
@@ -39,7 +41,7 @@ AUTOREGRESSIVE_SECTION = "val_autoregressive"
 ANSWER_METRIC_KEYS = (*METRIC_KEYS, "first_token_em")
 # Loss-like scalars only exist on the teacher-forced pass (the autoregressive pass can run
 # one internally to obtain them, but they are still that pass's numbers).
-LOSS_KEYS = ("loss", "qa_loss", "ppl", "reconstruction_loss")
+LOSS_KEYS = ("loss", "qa_loss", "ppl", "reconstruction_loss", "ae_loss")
 
 
 def eval_log_payloads(teacher_metrics=None, autoregressive_metrics=None):
@@ -278,6 +280,22 @@ def main() -> None:
                 if cfg.memory.contrastive_weight
                 else None
             )
+            # Memory-prefixed autoencoding: reconstruct the context through the frozen
+            # backbone, scored by its own (tied) unembedding. This is the objective the
+            # compression literature uses; it starts near the LM's own nats/token instead of
+            # near ln(vocab), so its weight is comparable to qa_weight.
+            ae = None
+            if cfg.memory.ae_lm_weight and output.ae_hidden is not None:
+                positions = None
+                if cfg.memory.ae_lm_positions > 0:
+                    positions = sample_positions(output.ae_mask, cfg.memory.ae_lm_positions)[0]
+                ae = sequence_lm_loss(
+                    output.ae_hidden,
+                    output.ae_labels,
+                    base_model.ae_head,
+                    output.ae_mask,
+                    positions=positions,
+                )
             total, terms = combine_losses(
                 qa,
                 reconstruction,
@@ -285,6 +303,8 @@ def main() -> None:
                 cfg.memory.reconstruction_weight,
                 contrastive,
                 cfg.memory.contrastive_weight,
+                ae,
+                cfg.memory.ae_lm_weight,
             )
             if accelerator is not None:
                 accelerator.backward(total)

@@ -137,13 +137,11 @@ class VocabularyHead(nn.Module):
    ```
    复用 `build_continuation_mask` 而不是新写 mask：它的 question 行规则（看全部 memory + 因果自身）正是 AE 需要的 teacher-forced 结构。**位置约定与现有 QA 路径一致**（memory 在原位置，解码序列排在其后），不需要对 RoPE 做任何"重新旋转"。
 2. **`sequence_lm_loss(hidden, labels, head, mask, positions=None, max_logits_rows=...)`**：单次词表头应用（不是逐层 28 次）+ 分块 + `torch.utils.checkpoint`；`positions` 支持全量或采样。成本：B×L 行 × 38.9M MACs（B=4, L=2048 → ~0.6 TFLOPs，约 1% 步开销）。
-3. **`fused_forward`**（`training.fuse_qa_pass: true` 时启用）：一次前向 `[context | memory | question | answer]`，用 `build_block_causal_mask` + 显式 `position_ids`，走 `_transformer_body`（**不经过 lm_head**），然后
-   - `layer_memory` 取自 `hidden_states[i][:, m0:q0]`；
-   - memory KV 取 `cache` 的 `[context_len : context_len+M]` 切片，供 AE 段复用；
-   - QA logits 只对 `hidden[:, q0:]` 应用 **tied 身份头** `hidden @ E.T`（`tie_word_embeddings=true` 时与模型自带 lm_head 数值等价，且不对 context 行浪费一次头计算）；
-   - 由于 `build_block_causal_mask` 的 context 行本来就是"只看 context 的因果 LM"，**teacher logits（B1 用）从这一段免费得到**。
-4. 配置：`training.fuse_qa_pass: bool = False`、`memory.ae_lm_weight: float = 0.0`（0 = 关闭）、`memory.ae_lm_positions: int = 0`（0 = 全部 context 位置）。
+3. **teacher logits 免费拿（原"融合前向"）**：实现时确认了一个约束 —— 训练 collate 会把 QA 行**展平**（`qa_context_indices` 把 B×qa 行映射到 B 个 context，见 `src/data.py:220-223`），所以"把 QA 并进 encoder 一次前向"在本仓库布局下省不掉前向：两个 pass 处理的是不同的 token 集合（B×(L+M) 与 B×qa×(Q+A)），总 token 数不变。融合的真实价值是**免费 teacher logits**，而这一点可以直接从既有 encoder pass 拿到：`build_block_causal_mask` 的 context 行只 attend 更早的 context，因此它们的末层隐状态**就是**纯因果 LM 分布。于是给 `ContextPrefix` 增加 `context_hidden`（复用已经算出来的 `hidden_states`，零额外显存/算力），B1 的 teacher 由此得来。
+   （若日后仍要真正的单次前向，需要新增"每个 context 一行、QA 块之间互相隔离"的块对角 mask 并改 collate；评估路径与生成路径无法复用该布局，收益仅剩 kernel 启动开销，故本轮不做。）
+4. 配置：`memory.ae_lm_weight: float = 0.0`（0 = 关闭）、`memory.ae_lm_positions: int = 0`（0 = 全部 context 位置，>0 时按 `sample_positions` 采样）。
 5. 日志：`scripts/train.py::LOSS_KEYS` 增加 `"ae_loss"`（缺失时不记录，兼容旧的 eval payload 测试）。
+6. AE 用 **backbone 自己的 tied unembedding**（新增零参数 `TiedUnembedding`）打分，不新学分类头；memory-only 的 `context_lm` 探针继续用 `context_lm_head`，两个目标互不污染。
 
 **怎么验证**：
 - `tests/test_ae_lm.py`（微缩 Qwen3，CPU）：
@@ -154,6 +152,15 @@ class VocabularyHead(nn.Module):
   5. `sequence_lm_loss` 在 `positions` 采样与全量两种模式下都有限且可分块（chunk 边界与整块等价）。
 - 全套 pytest。
 - 冒烟（关键判据）：512 token、M=16，`ae_lm_weight=1.0`，看 **AE nats/token 是否进入 2–4**（对照：现在 memory-only 是 ~11.9），以及 memory-only 探针（保留的 `context_lm`）与 AR F1 是否同步改善。
+- **已完成的实测（真实 1.7B、真实英文文本、memory 尚未训练，CPU 冒烟）**：
+
+  | 目标 | nats/token |
+  |---|---|
+  | teacher：纯因果 LM（= full-context bypass） | **2.103** |
+  | **ae：memory 前缀 + gold prefix（500x eq.1）** | **2.472** |
+  | probe：memory-only（旧目标） | **12.140**（ln vocab = 11.931） |
+
+  说明冻结 LM 解码把目标一开局就放回语言模型量级（与 teacher 差 0.37 nats，这 0.37 正是 memory 要学的部分），而旧目标贴着随机分类基线。`memory_tokens` 梯度范数 28.4，冻结参数梯度为 0。
 
 **风险/回退**：融合路径改动了 `forward` 的默认结构 → 由 `fuse_qa_pass=false` 保持旧路径，且等价性测试钉住；AE pass 多一次上下文前向（算力/激活约 +1 倍），冒烟用小上下文。回退 = 权重置 0 / 开关置 false。
 

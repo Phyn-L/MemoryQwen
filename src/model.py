@@ -27,6 +27,11 @@ class MetaLoRAOutput:
     context_lm_hidden: torch.Tensor | None = None
     context_lm_labels: torch.LongTensor | None = None
     context_lm_mask: torch.Tensor | None = None
+    # Memory-prefixed teacher-forced reconstruction of the context (the autoencoding
+    # objective). Populated only when ``memory.ae_lm_weight`` is non-zero.
+    ae_hidden: torch.Tensor | None = None
+    ae_labels: torch.LongTensor | None = None
+    ae_mask: torch.Tensor | None = None
 
 
 @dataclass
@@ -47,6 +52,10 @@ class ContextPrefix:
     context_mask: torch.Tensor
     context_length: int
     memory_length: int
+    # Last-layer states of the *context* rows of the encoder pass. Those rows attend only
+    # to earlier context tokens, so they are the plain causal-LM distribution for the
+    # context -- i.e. the teacher a distillation objective needs, for free.
+    context_hidden: torch.Tensor | None = None
 
 
 def is_trainable_parameter_name(name: str) -> bool:
@@ -61,6 +70,33 @@ def is_trainable_parameter_name(name: str) -> bool:
         or name == "memory_tokens"
         or name.startswith(("decoders.", "context_lm_head."))
     )
+
+
+class TiedUnembedding(nn.Module):
+    """Zero-parameter unembedding: score with the backbone's own (tied) embedding.
+
+    ``tie_word_embeddings`` makes the language-model head the input embedding matrix, and
+    that is exactly the read-out the context-compression papers use for their
+    autoencoding objective. Using it here introduces no parameters, so the autoencoding
+    loss trains only the memory slots / LoRA adapters and never a fresh classifier; the
+    memory-side ``context_lm_head`` stays dedicated to the memory-only probe objective.
+    """
+
+    def __init__(self, embedding_getter):
+        super().__init__()
+        if embedding_getter is None:
+            raise ValueError("TiedUnembedding needs an embedding getter")
+        self._embedding_getter = embedding_getter
+
+    @property
+    def compute_dtype(self) -> torch.dtype:
+        return self._embedding_getter().dtype
+
+    def materialized_weight(self) -> torch.Tensor:
+        return self._embedding_getter()
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        return F.linear(hidden, self.materialized_weight())
 
 
 class VocabularyHead(nn.Module):
@@ -342,7 +378,7 @@ class MetaLoRA(nn.Module):
     ``StaticLoRALinear``/``MemoryDecoder`` cast on entry and exit, and the losses
     upcast before reducing.
     """
-    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, context_lm=False, use_peft=False, head_mode="linear", head_init="auto", init_mode="randn", init_seed=0, allow_slot_attention=False):
+    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, context_lm=False, use_peft=False, head_mode="linear", head_init="auto", init_mode="randn", init_seed=0, allow_slot_attention=False, ae_lm=False):
         super().__init__()
         self.rank, self.alpha = rank, alpha
         self.target_modules = tuple(target_modules or ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"))
@@ -398,6 +434,15 @@ class MetaLoRA(nn.Module):
         # Qwen's embedding weight is the single source of truth for the frozen
         # backbone dtype. It must not drag the trainable modules back to bfloat16,
         # so the trainable dtype is restored immediately afterwards.
+        #
+        # ``ae_lm`` additionally arms the memory-prefixed autoencoding pass, which reads
+        # the context back out through the backbone's own (tied) unembedding. It carries
+        # no parameters of its own.
+        self.ae_lm = bool(ae_lm)
+        self.ae_head = (
+            TiedUnembedding(lambda: self.qwen.get_input_embeddings().weight)
+            if self.ae_lm else None
+        )
         self.to(dtype=qwen_dtype)
         self.set_trainable_dtype(trainable_dtype)
         # Which memory-writer options are active, recorded for reproducibility. The
@@ -646,7 +691,7 @@ class MetaLoRA(nn.Module):
             reconstruction = None
         else:
             reconstruction = self._reconstruction(layer_memory, context_embeds, context_mask)
-        return ContextPrefix(layer_memory, self._memory_prefix(layer_memory), memory_cache, reconstruction, context_embeds, context_mask, context_embeds.size(1), memory_inputs.size(1))
+        return ContextPrefix(layer_memory, self._memory_prefix(layer_memory), memory_cache, reconstruction, context_embeds, context_mask, context_embeds.size(1), memory_inputs.size(1), context_hidden=states[-1][:, :context_embeds.size(1)])
 
     @staticmethod
     def _select_cache(cache, indices, config):
@@ -675,12 +720,51 @@ class MetaLoRA(nn.Module):
             context_mask=prefix.context_mask,
         )
 
+    def autoencode_with_memory(self, prefix, context_embeds, context_mask):
+        """Teacher-forced reconstruction of the context through the memory prefix.
+
+        This is the autoencoding objective the context-compression literature uses (e.g.
+        500xCompressor eq. 1): the *frozen backbone* is the decoder, the per-layer key/value
+        pairs of the memory prefix it, and every context token is predicted from the memory
+        plus the gold prefix, ``P(t_i | memory, t_<i)``. The memory slots and the LoRA
+        adapters still receive gradient because the prefix is differentiable, but no
+        decoder has to be learned from scratch -- which is exactly what separates this from
+        the memory-only ``context_lm`` objective (where every token must be produced from
+        the memory alone).
+
+        The continuation mask is reused: its "question rows" rule is "read all memory, then
+        attend causally to yourself", which is precisely teacher forcing over the context.
+        Positions start after the memory, matching ``forward_qa_with_prefix``, so the memory
+        keys keep the positions they were encoded with and no RoPE surgery is needed.
+
+        Returns the last hidden state ``[B, L, H]``. The caller scores it with the
+        backbone's own (tied) unembedding through :func:`src.losses.sequence_lm_loss`, so
+        vocabulary-sized logits are never materialised for all positions at once.
+        """
+        context_embeds = context_embeds.to(dtype=self.dtype)
+        context_mask = context_mask.bool()
+        empty = context_mask.new_zeros(context_mask.size(0), 0)
+        mask = build_continuation_mask(context_mask, empty, prefix.memory_length, context_embeds.dtype)
+        start = prefix.context_length + prefix.memory_length
+        positions = torch.arange(start, start + context_embeds.size(1), device=context_embeds.device)
+        positions = positions.unsqueeze(0).expand(context_embeds.size(0), -1)
+        out = self._transformer_body(
+            inputs_embeds=context_embeds,
+            attention_mask=mask,
+            position_ids=positions,
+            past_key_values=prefix.memory_cache,
+            use_cache=False,
+            return_dict=True,
+        )
+        return out.last_hidden_state
+
     def forward(self, context_embeds, context_mask, question_embeds, question_mask, answer_embeds, answer_mask, labels, qa_context_indices=None, context_ids=None, context_lm_positions=None):
         """Training path.
 
         ``context_ids`` is required when the auxiliary objective is ``context_lm``: the
         regression target could be read back out of ``context_embeds`` but a token
-        classification target cannot, because the embedding lookup is not invertible.
+        classification target cannot, because the embedding lookup is not invertible. It is
+        also required for the autoencoding objective (``ae_lm``).
         """
         prefix = self.encode_context_prefix(context_embeds, context_mask)
         indices = qa_context_indices if qa_context_indices is not None else torch.arange(question_embeds.size(0), device=question_embeds.device)
@@ -695,6 +779,18 @@ class MetaLoRA(nn.Module):
             output.context_lm_hidden = terms.hidden
             output.context_lm_labels = terms.labels
             output.context_lm_mask = terms.mask
+        if self.ae_lm:
+            if context_ids is None:
+                raise ValueError("the autoencoding objective needs context_ids, but forward() received none")
+            context_ids = context_ids.to(context_embeds.device)
+            context_mask = context_mask.to(context_embeds.device).bool()
+            hidden = self.autoencode_with_memory(prefix, context_embeds, context_mask)
+            # Align prediction and target here, once: hidden[i] scores context_ids[i + 1].
+            # The first context token has no predecessor to be predicted from, so it is the
+            # only unscored position.
+            output.ae_hidden = hidden[:, :-1]
+            output.ae_labels = context_ids[:, 1:]
+            output.ae_mask = context_mask[:, 1:]
         return output
 
     @torch.no_grad()
@@ -838,6 +934,7 @@ def load_model(cfg):
         init_mode=cfg.memory.init_mode,
         init_seed=cfg.memory.init_seed,
         allow_slot_attention=cfg.memory.allow_slot_attention,
+        ae_lm=cfg.memory.ae_lm_weight > 0,
     )
     for name,p in model.named_parameters():
         p.requires_grad=is_trainable_parameter_name(name)
@@ -848,6 +945,7 @@ __all__ = [
     "MetaLoRA", "MetaLoRAOutput",
     "StaticLoRALinear", "MemoryDecoder", "ContextPrefix", "ContextLMTerms",
     "VocabularyHead",
+    "TiedUnembedding",
     "build_block_causal_mask", "build_continuation_mask",
     "is_trainable_parameter_name", "load_model",
     "disable_autocast_for_peft_lora",

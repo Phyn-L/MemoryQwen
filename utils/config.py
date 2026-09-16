@@ -113,6 +113,14 @@ class MemoryConfig:
     # memory tokens are ordinary causal positions and do see each other; the default
     # keeps the historical "each slot reads the context only" behaviour.
     allow_slot_attention: bool = False
+    # Memory-prefixed autoencoding objective (0 = off). The context is reconstructed
+    # through the *frozen* backbone with the memory's per-layer KV as a prefix, i.e.
+    # P(t_i | memory, t_<i), scored by the backbone's own (tied) unembedding. This is the
+    # objective the context-compression literature uses; the memory-only diagnostic
+    # (reconstruction_loss="context_lm") stays available next to it.
+    ae_lm_weight: float = 0.0
+    # Context targets scored by the autoencoding objective; <= 0 scores every position.
+    ae_lm_positions: int = 0
     # context_lm: number of context positions scored per context per step. The shared
     # vocabulary head is applied to num_layers * context_lm_positions rows, so this is
     # the knob that bounds the auxiliary objective's cost. <= 0 means "all positions".
@@ -282,6 +290,10 @@ class TrainConfig:
             raise ValueError("memory.head_init must be auto, random or memory_projection")
         if m.init_mode not in {"randn", "token_embed", "vocab_mean"}:
             raise ValueError("memory.init_mode must be randn, token_embed or vocab_mean")
+        if m.ae_lm_weight < 0:
+            raise ValueError("memory.ae_lm_weight must be non-negative")
+        if m.ae_lm_positions < 0:
+            raise ValueError("memory.ae_lm_positions must be >= 0 (0 scores every position)")
         if m.context_lm_positions < 0:
             raise ValueError("memory.context_lm_positions must be >= 0 (0 scores every position)")
         if m.qa_weight < 0 or m.reconstruction_weight < 0:
