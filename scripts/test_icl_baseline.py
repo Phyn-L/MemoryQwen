@@ -25,15 +25,21 @@ from src.icl_baseline import (
     render_prompt,
     sample_jsonl,
 )
-from utils.config import dtype_from_name
+from utils.config import dtype_from_name, expand_env
 from utils.ddp import barrier, init_distributed, is_main_process
 
-DEFAULT_MODEL = "/data/lz/hf_cache/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
+# Both defaults go through the same ${VAR:-default} mechanism the YAML configs use, so a
+# machine with a different model directory or data tree overrides them with MODEL_ROOT /
+# DATA_ROOT (see scripts/env.local.sh) rather than editing this file.
+DEFAULT_MODEL = expand_env(
+    "${MODEL_ROOT:-/data/lz/hf_cache/hub}/models--Qwen--Qwen3-1.7B/"
+    "snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
+)
 # The same tree the training pipeline uses (data.root in configs/*/train.yaml), and the only
 # supported one: `src.icl_baseline.iter_examples` reads the aggregated context schema and
 # rejects anything else. See the README section "The SQuAD evaluation set, in detail" for
 # what that file actually contains.
-DEFAULT_DATA = Path("/data/lz/contexts/aggregated")
+DEFAULT_DATA = Path(expand_env("${DATA_ROOT:-/data/lz/contexts/aggregated}"))
 
 
 def parse_args():

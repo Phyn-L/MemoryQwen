@@ -1,10 +1,54 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import os
 from pathlib import Path
+import re
 from typing import Any
 
 import yaml
+
+
+# ``${VAR}`` or ``${VAR:-default}`` inside a configuration string.
+ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def expand_env(value: str) -> str:
+    """Expand ``${VAR}`` and ``${VAR:-default}`` references in one configuration string.
+
+    Machine-specific locations must not be baked into tracked files. The model directory and
+    the aggregated data root live somewhere different on every cluster, and editing the YAML
+    there turns every ``git pull`` into a conflict -- which is exactly what happened. Writing
+    them as ``${MODEL_ROOT:-/data/lz/hf_cache/hub}`` keeps the default valid where it was
+    written and lets another machine override it through the environment (the usual route is
+    a gitignored ``scripts/env.local.sh``, see the README).
+
+    A bare ``${VAR}`` with no fallback raises when the variable is unset, so a typo cannot
+    silently turn into an empty path.
+    """
+    def replace(match: re.Match) -> str:
+        name, default = match.group(1), match.group(2)
+        if os.environ.get(name):
+            return os.environ[name]
+        if default is not None:
+            return default
+        raise ValueError(
+            f"${{{name}}} is not set and has no default; export {name} or write "
+            f"${{{name}:-<default>}} in the configuration"
+        )
+
+    return ENV_REFERENCE.sub(replace, value)
+
+
+def expand_env_values(value: Any) -> Any:
+    """Apply :func:`expand_env` to every string in a nested configuration structure."""
+    if isinstance(value, str):
+        return expand_env(value)
+    if isinstance(value, dict):
+        return {key: expand_env_values(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [expand_env_values(item) for item in value]
+    return value
 
 
 @dataclass
@@ -157,7 +201,7 @@ class TrainConfig:
         if path.suffix.lower() not in {".yaml", ".yml"}:
             raise ValueError(f"configuration must be a YAML file (.yaml/.yml), got: {path}")
         text = path.read_text(encoding="utf-8")
-        values = yaml.safe_load(text) or {}
+        values = expand_env_values(yaml.safe_load(text) or {})
         values = dict(values)
         data_values = dict(values.get("data", {}))
         for key in ("train_datasets", "validation_datasets", "test_datasets"):

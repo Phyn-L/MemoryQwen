@@ -25,6 +25,42 @@ pip install -e '.[train]'
 PYTHONPATH=. bash scripts/train.sh
 ```
 
+### Running on another machine
+
+The shipped configs point at the machine the code was developed on, but no path is baked in:
+every location is written as `${VAR:-default}`, so a cluster with different directories
+overrides it through the environment instead of editing tracked files -- editing them is what
+made `git pull` conflict. `utils.config.expand_env` does the substitution, and
+`${VAR}` without a `:-` fallback raises rather than silently expanding to an empty path.
+
+| variable | replaces | cloud default |
+| --- | --- | --- |
+| `MODEL_ROOT` | the HF hub directory in `model.name_or_path` | `/data/lz/hf_cache/hub` |
+| `DATA_ROOT` | `data.root` | `/data/lz/contexts/aggregated` |
+| `WANDB_MODE` | `logging.wandb_mode` (use `offline` on a machine without internet) | `online` |
+| `CUDA_VISIBLE_DEVICES` | which cards are visible, and therefore how many workers `scripts/train.sh` starts | unset (all) |
+| `NUM_PROCESSES` | the worker count, overriding the count derived from the visible cards | derived |
+| `CONFIG` | the config every entry-point script uses | `configs/qwen-1.7b/train.yaml` |
+
+Put them in `scripts/env.local.sh`, which is gitignored and sourced by `train.sh`, `test.sh`
+and `test_icl_baseline.sh` when present:
+
+```bash
+# scripts/env.local.sh -- one machine's settings, never committed
+export MODEL_ROOT=/home/lijie/proj2/xmu/lz
+export DATA_ROOT=/home/lijie/proj2/xmu/lz/aggregated
+export WANDB_MODE=offline
+```
+
+`tests/test_config_env.py` checks that the shipped configs still resolve to the cloud defaults
+with an empty environment, and to the H200 paths above when those variables are set.
+
+`scripts/train.sh` starts one worker per visible GPU, sets
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, and **fails** if several processes are
+requested while `accelerate` is missing. It no longer hardcodes a device list or a process
+count: an 8-card node used to run on the 4 cards the script named, and if `accelerate` was not
+installed the run quietly continued on a single card.
+
 `.[train]` installs `peft`, but whether `peft` is present no longer decides which LoRA
 implementation runs: `model.use_peft` does, and it defaults to `false`. See
 [LoRA backend](#lora-backend).

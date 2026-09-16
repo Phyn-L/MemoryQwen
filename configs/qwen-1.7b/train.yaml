@@ -1,5 +1,5 @@
 model:
-  name_or_path: /data/lz/hf_cache/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  name_or_path: ${MODEL_ROOT:-/data/lz/hf_cache/hub}/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
   torch_dtype: bfloat16
   trainable_dtype: float32
   lora_rank: 8
@@ -26,7 +26,7 @@ memory:
   reconstruction_cosine_weight: 0.5
   contrastive_weight: 0.0
 data:
-  root: /data/lz/contexts/aggregated
+  root: ${DATA_ROOT:-/data/lz/contexts/aggregated}
   train_datasets: all
   validation_datasets: [squad]
   test_datasets: [squad]
@@ -73,4 +73,4 @@ checkpoint:
   save_every_steps: 5000
 logging:
   wandb_project: MemoryQwen
-  wandb_mode: online
+  wandb_mode: ${WANDB_MODE:-online}

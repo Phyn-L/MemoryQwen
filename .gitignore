@@ -14,3 +14,6 @@ wandb/
 
 # scratch/experiment artifacts: kept on disk, never versioned
 .tmp_analysis/
+
+# per-machine settings (paths, wandb mode, visible devices)
+scripts/env.local.sh

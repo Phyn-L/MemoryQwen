@@ -3,4 +3,12 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
-python scripts/test.py --config configs/qwen-1.7b/train.yaml "$@"
+
+# Same gitignored per-machine file as train.sh (MODEL_ROOT / DATA_ROOT / WANDB_MODE / ...).
+if [ -f "$ROOT/scripts/env.local.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$ROOT/scripts/env.local.sh"
+fi
+
+CONFIG="${CONFIG:-configs/qwen-1.7b/train.yaml}"
+exec python scripts/test.py --config "$CONFIG" "$@"
