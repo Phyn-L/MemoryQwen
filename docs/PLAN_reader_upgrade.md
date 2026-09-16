@@ -194,11 +194,12 @@ class VocabularyHead(nn.Module):
 
 **为什么**：2048 token 里与某道题相关的常常只占 1%，而当前 memory 是**问题无关**的（编码时不知道要问什么）→ 必须"什么都留"，这正是 45% 差距的来源。变体 2 保留"一次压缩、多次查询"的缓存优势，只在问题期加一次**极廉价**的再采样（K/V 只有 M 个 key，代价可忽略）。
 
-**怎么改**：
-- `QuestionResampler(H, num_readout=R, layers=2, heads=4)`：R 个可学习 latent 对 `cat([question_embeds(masked), prefix.memory], dim=1)` 做 2 层 cross-attn+FFN，输出 `[B, R, H]`，**作为输入 embedding 插入序列**（由 backbone 自己算它们的 K/V，因此不需要 per-layer prefix 投影）。参数 ~4–8M。
-- mask：布局扩展为 `[context | memory | question | readout | answer]`；readout 行看"全部 memory + 全部有效 question"；answer 行看"memory + question + readout + 因果 answer"。`readout_length=0` 时逐位等于旧实现（回归钉）。
-- 训练/评测：`forward_qa_with_prefix`（及 `fused_forward`）序列变为 `[question, readout, answer]`，`labels` 在 question/readout 段填 `-100`；`generate_answers_with_prefix` 的 prefill 变为 `[question, readout]`，位置 = question 真实末尾之后，增量步的 cache 前缀 mask 同步包含 readout。
-- 配置：`memory.readout_length: int = 0`（0 = 关闭）、`memory.readout_layers: int = 2`、`memory.readout_heads: int = 4`。
+**怎么改（已实现）**：
+- `src/resampler.py::QuestionResampler`：R 个可学习 latent 对 `cat([question_embeds(masked), memory], dim=1)` 做 `readout_layers` 层 cross-attn+FFN，输出 `[B, R, H]`，**作为输入 embedding 插入序列**（由 backbone 自己算 K/V，因此不需要 per-layer prefix 投影）。question 与 memory 先投影到 `readout_hidden_size`（默认 256，与 per-layer decoder 同宽度）的瓶颈再进 cross-attn —— 全宽版本在 H=2048 时每层 ~34M 参数，瓶颈版整模块 ~2.6M。
+- **输出投影按 token-embedding 量级初始化**（`std = 0.02/sqrt(width)`）：read-out 是插进输入流的，步 0 时应当是"无 read-out 路径的小扰动"，而不是一个 out-of-distribution 的大激活。测试里钉住了这一点（初始 `out.std() < 0.05`）。
+- mask：布局扩展为 `[context | memory | question | readout | answer]`（块掩码）与 `[memory(prefix) | question | readout | answer]`（续写掩码）；readout 行看"全部 memory + 全部有效 question"，answer 行看"memory + question + readout + 因果 answer"，**question 行看不到 readout**；`readout_length=0` 时逐位等于旧实现（回归钉）。
+- 训练/评测：`forward_qa_with_prefix` 序列变为 `[question, readout, answer]`，readout 段标签填 `-100`（`qa_loss` 的 shift 语义不变，answer 标签对齐由测试钉住）；`generate_answers_with_prefix` 的 prefill 变为 `[question, readout]`，readout 位置取"每行真实 question 末尾之后"（`start + valid + r`），增量步位置为 `start + valid + R + step`，cache 前缀 mask 同步包含 readout。`evaluator` 的两条路径都走这些函数，因此自动生效。
+- 配置：`memory.readout_length`（默认 0 = 关闭）、`readout_layers`（2）、`readout_heads`（4）、`readout_hidden_size`（256）；`validate()` 检查可整除。
 
 **怎么验证**：
 - `tests/test_readout.py`（微缩 Qwen3 + `_FakeQwen` 双路径）：
@@ -208,6 +209,7 @@ class VocabularyHead(nn.Module):
   4. 参数量/形状断言；`evaluator` 两条路径在 tiny 模型上可跑通。
 - 全套 pytest。
 - 冒烟：M=16、`readout_length` ∈ {0, 8} 对照，看 AR F1 与 held-out 问题子集（按 context 划分）上的差异。
+- **已完成的实测（真实 1.7B、CPU 冒烟）**：`readout_length=8` 时 resampler 2,633,728 参数（全部可训练），可训练参数总量 80,152,576；前向 `[question|readout|answer]` 的 logits/labels 形状 = Q+R+A、readout 行标签为 -100、answer 标签对齐保持；`qa_loss` 反向后 **39/39 个 resampler 参数张量拿到非零梯度**（说明 answer 行确实 attend 到 readout），冻结参数无梯度；`generate_answers_with_prefix` 正常产出且调用 resampler。
 
 **风险/回退**：生成路径最易错（位置/bookkeeping）→ 三重护栏：关闭即等价、mask 逐位断言、tiny 模型 greedy 一致性。回退 = `readout_length: 0`。
 

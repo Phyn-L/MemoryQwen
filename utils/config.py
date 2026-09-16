@@ -133,6 +133,15 @@ class MemoryConfig:
     distill_entropy_weight: bool = False
     # Truncate the teacher distribution to its k most likely tokens (0 = keep all).
     distill_topk: int = 0
+    # Per-question read-out over the cached (question-agnostic) memory: R learnable latents
+    # cross-attend over the question and the memory and are inserted as R extra input
+    # positions between the question and the answer. 0 = off (the historical behaviour).
+    readout_length: int = 0
+    readout_layers: int = 2
+    readout_heads: int = 4
+    # Bottleneck width of the resampler (the same 256 the per-layer decoders use). A
+    # full-width cross-attention block would cost ~34M parameters per layer.
+    readout_hidden_size: int = 256
     # context_lm: number of context positions scored per context per step. The shared
     # vocabulary head is applied to num_layers * context_lm_positions rows, so this is
     # the knob that bounds the auxiliary objective's cost. <= 0 means "all positions".
@@ -319,6 +328,17 @@ class TrainConfig:
                 "memory.distill_weight needs the memory-prefixed autoencoding pass to "
                 "distil into: set memory.ae_lm_weight > 0 as well"
             )
+        if m.readout_length < 0:
+            raise ValueError("memory.readout_length must be >= 0 (0 disables the read-out)")
+        if m.readout_length > 0:
+            if m.readout_layers <= 0:
+                raise ValueError("memory.readout_layers must be positive when the read-out is on")
+            if m.readout_heads <= 0:
+                raise ValueError("memory.readout_heads must be positive when the read-out is on")
+            if m.readout_hidden_size <= 0:
+                raise ValueError("memory.readout_hidden_size must be positive")
+            if m.readout_hidden_size % m.readout_heads:
+                raise ValueError("memory.readout_hidden_size must be divisible by readout_heads")
         if m.context_lm_positions < 0:
             raise ValueError("memory.context_lm_positions must be >= 0 (0 scores every position)")
         if m.qa_weight < 0 or m.reconstruction_weight < 0:

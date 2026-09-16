@@ -6,6 +6,7 @@ from torch import nn
 from torch.nn import functional as F
 from .MemoryDecoder import MemoryDecoder
 from .dtypes import no_autocast
+from .resampler import QuestionResampler
 
 try:
     from transformers.cache_utils import DynamicCache
@@ -71,7 +72,7 @@ def is_trainable_parameter_name(name: str) -> bool:
         "lora_A" in name
         or "lora_B" in name
         or name == "memory_tokens"
-        or name.startswith(("decoders.", "context_lm_head."))
+        or name.startswith(("decoders.", "context_lm_head.", "resampler."))
     )
 
 
@@ -254,13 +255,15 @@ def build_block_causal_mask(
     answer_mask: torch.Tensor,
     dtype: torch.dtype,
     allow_slot_attention: bool = False,
+    readout_length: int = 0,
 ) -> torch.Tensor:
-    """Build an additive mask for ``[context, memory, question, answer]``.
+    """Build an additive mask for ``[context, memory, question, readout, answer]``.
 
     Context positions attend only to valid, earlier context positions. Memory
     positions attend only to valid context positions (never to another memory
     token, unless ``allow_slot_attention``). Question positions attend to memory and
-    earlier question positions, while answer positions attend to memory, question, and
+    earlier question positions, read-out positions (``readout_length`` > 0) attend to
+    memory and the question, and answer positions attend to memory, question, read-out and
     earlier answer positions. Padding keys are blocked. Padded query rows keep a self
     edge to avoid all-``-inf`` rows; their outputs are ignored by the loss.
 
@@ -289,11 +292,15 @@ def build_block_causal_mask(
     context_mask = context_mask.bool(); question_mask = question_mask.bool(); answer_mask = answer_mask.bool()
     bsz, context_len = context_mask.shape
     question_len, answer_len = question_mask.shape[1], answer_mask.shape[1]
-    total = context_len + memory_length + question_len + answer_len
+    readout_length = int(readout_length)
+    if readout_length < 0:
+        raise ValueError("readout_length must be >= 0")
+    total = context_len + memory_length + question_len + readout_length + answer_len
     device = context_mask.device
     m0 = context_len
     q0 = context_len + memory_length
-    a0 = q0 + question_len
+    r0 = q0 + question_len
+    a0 = r0 + readout_length
     allowed = torch.zeros((bsz, total, total), dtype=torch.bool, device=device)
     # context rows: causal over valid context keys only
     causal_context = torch.tril(torch.ones(context_len, context_len, dtype=torch.bool, device=device))
@@ -309,23 +316,33 @@ def build_block_causal_mask(
             torch.ones(memory_length, memory_length, dtype=torch.bool, device=device)
         )
         allowed[:, m0:q0, m0:q0] = causal_memory
-    causal_qa = torch.tril(torch.ones(question_len + answer_len, question_len + answer_len, dtype=torch.bool, device=device))
+    causal_qa = torch.tril(torch.ones(question_len + readout_length + answer_len, question_len + readout_length + answer_len, dtype=torch.bool, device=device))
     # question rows: all memory + causal over valid question keys
-    allowed[:, q0:a0, m0:q0] = True
-    allowed[:, q0:a0, q0:a0] = question_mask[:, None, :] & causal_qa[:question_len, :question_len]
-    # answer rows: all memory + all valid question keys + causal over valid answer keys
+    allowed[:, q0:r0, m0:q0] = True
+    allowed[:, q0:r0, q0:r0] = question_mask[:, None, :] & causal_qa[:question_len, :question_len]
+    if readout_length:
+        # read-out rows: all memory + every valid question key. They are derived from the
+        # question and the memory, so they must not see the answer.
+        allowed[:, r0:a0, m0:q0] = True
+        allowed[:, r0:a0, q0:r0] = question_mask[:, None, :]
+    # answer rows: all memory + all valid question keys (+ read-out) + causal over answers
     allowed[:, a0:, m0:q0] = True
-    allowed[:, a0:, q0:a0] = question_mask[:, None, :]
-    allowed[:, a0:, a0:] = answer_mask[:, None, :] & causal_qa[question_len:, question_len:]
+    allowed[:, a0:, q0:r0] = question_mask[:, None, :]
+    if readout_length:
+        allowed[:, a0:, r0:a0] = True
+    allowed[:, a0:, a0:] = answer_mask[:, None, :] & causal_qa[question_len + readout_length:, question_len + readout_length:]
     # padding query rows keep a single self edge
     context_rows = torch.arange(context_len, device=device)
     context_eye = torch.zeros((bsz, context_len, total), dtype=torch.bool, device=device)
     context_eye[:, context_rows, context_rows] = True
     allowed[:, :context_len] = torch.where(context_mask[:, :, None], allowed[:, :context_len], context_eye)
-    qa_rows = torch.arange(question_len + answer_len, device=device)
-    qa_eye = torch.zeros((bsz, question_len + answer_len, total), dtype=torch.bool, device=device)
+    qa_len = question_len + readout_length + answer_len
+    qa_rows = torch.arange(qa_len, device=device)
+    qa_eye = torch.zeros((bsz, qa_len, total), dtype=torch.bool, device=device)
     qa_eye[:, qa_rows, q0 + qa_rows] = True
-    qa_valid = torch.cat([question_mask, answer_mask], dim=1)
+    qa_valid = torch.cat(
+        [question_mask, question_mask.new_ones(bsz, readout_length), answer_mask], dim=1
+    )
     allowed[:, q0:] = torch.where(qa_valid[:, :, None], allowed[:, q0:], qa_eye)
     mask = torch.zeros((bsz, 1, total, total), dtype=dtype, device=device)
     return mask.masked_fill(~allowed[:, None], torch.finfo(dtype).min)
@@ -336,31 +353,46 @@ def build_continuation_mask(
     answer_mask: torch.Tensor,
     memory_length: int,
     dtype: torch.dtype,
+    readout_length: int = 0,
 ) -> torch.Tensor:
-    """Mask for question/answer tokens attending to a memory-only cache.
+    """Mask for question/read-out/answer tokens attending to a memory-only cache.
 
     Vectorised form of the original row-by-row builder; both produce identical masks.
-    This is exactly :func:`build_block_causal_mask` with an empty context, sliced to drop
-    the memory query rows -- ``tests/test_masks.py`` asserts that equivalence so the two
-    cannot drift apart.
+    With ``readout_length=0`` this is exactly :func:`build_block_causal_mask` with an empty
+    context, sliced to drop the memory query rows -- ``tests/test_masks.py`` asserts that
+    equivalence for both values so the two cannot drift apart.
+
+    The optional read-out rows sit between the question and the answer. They are built from
+    the question and the memory, so they may read every valid question key but never the
+    answer; the answer rows may read them.
     """
     question_mask, answer_mask = question_mask.bool(), answer_mask.bool()
     bsz, question_length = question_mask.shape
     answer_length = answer_mask.shape[1]
-    current = question_length + answer_length
+    readout_length = int(readout_length)
+    if readout_length < 0:
+        raise ValueError("readout_length must be >= 0")
+    current = question_length + readout_length + answer_length
     device = question_mask.device
     row = torch.arange(current, device=device)
     causal = row[:, None] >= row[None, :]
     allowed = torch.zeros((bsz, current, memory_length + current), dtype=torch.bool, device=device)
     allowed[:, :, :memory_length] = True
+    r0 = question_length + readout_length
     allowed[:, :question_length, memory_length:memory_length + question_length] = (
         question_mask[:, None, :] & causal[:question_length, :question_length]
     )
-    allowed[:, question_length:, memory_length:memory_length + question_length] = question_mask[:, None, :]
-    allowed[:, question_length:, memory_length + question_length:] = (
-        answer_mask[:, None, :] & causal[question_length:, question_length:]
+    if readout_length:
+        allowed[:, question_length:r0, memory_length:memory_length + question_length] = question_mask[:, None, :]
+    allowed[:, r0:, memory_length:memory_length + question_length] = question_mask[:, None, :]
+    if readout_length:
+        allowed[:, r0:, memory_length + question_length:memory_length + r0] = True
+    allowed[:, r0:, memory_length + r0:] = (
+        answer_mask[:, None, :] & causal[r0:, r0:]
     )
-    valid = torch.cat([question_mask, answer_mask], dim=1)
+    valid = torch.cat(
+        [question_mask, question_mask.new_ones(bsz, readout_length), answer_mask], dim=1
+    )
     self_edge = torch.zeros_like(allowed)
     self_edge[:, row, memory_length + row] = True
     allowed = torch.where(valid[:, :, None], allowed, self_edge)
@@ -381,7 +413,7 @@ class MetaLoRA(nn.Module):
     ``StaticLoRALinear``/``MemoryDecoder`` cast on entry and exit, and the losses
     upcast before reducing.
     """
-    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, context_lm=False, use_peft=False, head_mode="linear", head_init="auto", init_mode="randn", init_seed=0, allow_slot_attention=False, ae_lm=False):
+    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, context_lm=False, use_peft=False, head_mode="linear", head_init="auto", init_mode="randn", init_seed=0, allow_slot_attention=False, ae_lm=False, readout_length=0, readout_layers=2, readout_heads=4, readout_hidden_size=256):
         super().__init__()
         self.rank, self.alpha = rank, alpha
         self.target_modules = tuple(target_modules or ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"))
@@ -445,6 +477,16 @@ class MetaLoRA(nn.Module):
         self.ae_head = (
             TiedUnembedding(lambda: self.qwen.get_input_embeddings().weight)
             if self.ae_lm else None
+        )
+        # Per-question read-out over the (question-agnostic, cacheable) memory. Zero means
+        # the historical behaviour: the answer attends only to the memory and the question.
+        self.readout_length = int(readout_length)
+        self.resampler = (
+            QuestionResampler(
+                self.qwen_hidden_size, self.readout_length, readout_layers, readout_heads,
+                width=readout_hidden_size, dtype=trainable_dtype,
+            )
+            if self.readout_length > 0 else None
         )
         self.to(dtype=qwen_dtype)
         self.set_trainable_dtype(trainable_dtype)
@@ -703,16 +745,36 @@ class MetaLoRA(nn.Module):
             layers.append((layer.keys.index_select(0, indices), layer.values.index_select(0, indices)))
         return DynamicCache(ddp_cache_data=layers, config=config)
 
+    def _readout_embeddings(self, prefix, question_embeds, question_mask, indices=None):
+        """``[B, R, H]`` question-conditioned positions, or None when the read-out is off.
+
+        ``indices`` selects which memory rows the questions belong to (the training collate
+        flattens several QA rows per context, and generation groups rows by context), so the
+        resampled memory always matches the question row it is paired with.
+        """
+        if self.resampler is None:
+            return None
+        if prefix.memory is None:
+            raise RuntimeError("the question read-out needs the memory representation")
+        memory = prefix.memory if indices is None else prefix.memory.index_select(0, indices)
+        readout = self.resampler(question_embeds, question_mask, memory)
+        return readout.to(dtype=self.dtype)
+
     def forward_qa_with_prefix(self, prefix, qa_context_indices, question_embeds, question_mask, answer_embeds, answer_mask, labels):
         question_embeds, answer_embeds = question_embeds.to(dtype=self.dtype), answer_embeds.to(dtype=self.dtype)
         indices = qa_context_indices.to(question_embeds.device, dtype=torch.long)
         cache = self._select_cache(prefix.memory_cache, indices, self.qwen.config)
-        sequence = torch.cat([question_embeds, answer_embeds], dim=1)
-        mask = build_continuation_mask(question_mask, answer_mask, prefix.memory_length, sequence.dtype)
+        readout = self._readout_embeddings(prefix, question_embeds, question_mask, indices)
+        extra = 0 if readout is None else readout.size(1)
+        if readout is None:
+            sequence = torch.cat([question_embeds, answer_embeds], dim=1)
+        else:
+            sequence = torch.cat([question_embeds, readout, answer_embeds], dim=1)
+        mask = build_continuation_mask(question_mask, answer_mask, prefix.memory_length, sequence.dtype, readout_length=extra)
         start = prefix.context_length + prefix.memory_length
         positions = torch.arange(start, start + sequence.size(1), device=sequence.device).unsqueeze(0).expand(sequence.size(0), -1)
         out = self.qwen(inputs_embeds=sequence, attention_mask=mask, position_ids=positions, past_key_values=cache, use_cache=True, return_dict=True)
-        ignored = torch.full((labels.size(0), question_embeds.size(1)), -100, dtype=labels.dtype, device=labels.device)
+        ignored = torch.full((labels.size(0), question_embeds.size(1) + extra), -100, dtype=labels.dtype, device=labels.device)
         return MetaLoRAOutput(
             logits=out.logits,
             labels=torch.cat([ignored, labels], dim=1),
@@ -860,19 +922,32 @@ class MetaLoRA(nn.Module):
                     self.qwen.config,
                 )
                 question = embedding(q_ids).to(dtype=self.dtype)
+                readout = self._readout_embeddings(
+                    prefix, question, q_mask,
+                    qa_context_indices[row_index].to(device, dtype=torch.long),
+                )
+                extra = 0 if readout is None else readout.size(1)
+                if readout is None:
+                    sequence, sequence_positions = question, positions
+                else:
+                    # The read-out sits right after each row's real question tokens, exactly
+                    # where a row-by-row decode would put it.
+                    readout_positions = start + valid.unsqueeze(1) + torch.arange(extra, device=device).unsqueeze(0)
+                    sequence = torch.cat([question, readout], dim=1)
+                    sequence_positions = torch.cat([positions, readout_positions], dim=1)
                 empty = q_mask.new_zeros(count, 0)
-                mask = build_continuation_mask(q_mask, empty, prefix.memory_length, question.dtype)
-                output = self.qwen(inputs_embeds=question, attention_mask=mask, position_ids=positions,
+                mask = build_continuation_mask(q_mask, empty, prefix.memory_length, question.dtype, readout_length=extra)
+                output = self.qwen(inputs_embeds=sequence, attention_mask=mask, position_ids=sequence_positions,
                                    past_key_values=cache, use_cache=True, return_dict=True)
                 cache = output.past_key_values
                 next_id = output.logits[:, -1].argmax(dim=-1)
                 finished = torch.zeros(count, dtype=torch.bool, device=device)
                 # Question padding must stay blocked for the incremental steps too: the
-                # cache layout is [memory, question (with padding), generated...], and a
-                # plain all-ones mask would expose the padding keys that the prefill
+                # cache layout is [memory, question (with padding), read-out, generated...],
+                # and a plain all-ones mask would expose the padding keys that the prefill
                 # masked out.  Rows without padding make this a no-op.
                 cache_prefix_mask = torch.cat(
-                    [q_mask.new_ones(count, prefix.memory_length), q_mask], dim=1
+                    [q_mask.new_ones(count, prefix.memory_length), q_mask, q_mask.new_ones(count, extra)], dim=1
                 )
                 for step in range(max_new_tokens):
                     for slot, row in enumerate(rows):
@@ -890,7 +965,7 @@ class MetaLoRA(nn.Module):
                          q_mask.new_ones(count, step + 1)],
                         dim=1,
                     )
-                    position_ids = (start + valid + step).unsqueeze(1)
+                    position_ids = (start + valid + extra + step).unsqueeze(1)
                     output = self.qwen(inputs_embeds=token, attention_mask=attention_mask,
                                        position_ids=position_ids, past_key_values=cache,
                                        use_cache=True, return_dict=True)
@@ -943,6 +1018,10 @@ def load_model(cfg):
         init_seed=cfg.memory.init_seed,
         allow_slot_attention=cfg.memory.allow_slot_attention,
         ae_lm=cfg.memory.ae_lm_weight > 0,
+        readout_length=cfg.memory.readout_length,
+        readout_layers=cfg.memory.readout_layers,
+        readout_heads=cfg.memory.readout_heads,
+        readout_hidden_size=cfg.memory.readout_hidden_size,
     )
     for name,p in model.named_parameters():
         p.requires_grad=is_trainable_parameter_name(name)
@@ -954,6 +1033,7 @@ __all__ = [
     "StaticLoRALinear", "MemoryDecoder", "ContextPrefix", "ContextLMTerms",
     "VocabularyHead",
     "TiedUnembedding",
+    "QuestionResampler",
     "build_block_causal_mask", "build_continuation_mask",
     "is_trainable_parameter_name", "load_model",
     "disable_autocast_for_peft_lora",

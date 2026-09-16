@@ -32,16 +32,17 @@ def _allowed(mask: torch.Tensor) -> torch.Tensor:
 
 
 def _block_oracle(context_mask, memory_length, question_mask, answer_mask,
-                  allow_slot_attention=False):
+                  allow_slot_attention=False, readout_length=0):
     """Independent transcription of the block-mask rules. Returns [B, T, T] bool."""
     context_mask, question_mask, answer_mask = (
         context_mask.bool(), question_mask.bool(), answer_mask.bool()
     )
     bsz, context_len = context_mask.shape
     question_len, answer_len = question_mask.shape[1], answer_mask.shape[1]
-    total = context_len + memory_length + question_len + answer_len
+    total = context_len + memory_length + question_len + readout_length + answer_len
     m0, q0 = context_len, context_len + memory_length
-    a0 = q0 + question_len
+    r0 = q0 + question_len
+    a0 = r0 + readout_length
     allowed = torch.zeros(bsz, total, total, dtype=torch.bool)
     for b in range(bsz):
         for i in range(context_len):
@@ -64,12 +65,19 @@ def _block_oracle(context_mask, memory_length, question_mask, answer_mask,
                     allowed[b, q0 + i, q0 + j] = bool(question_mask[b, j])
             else:
                 allowed[b, q0 + i, q0 + i] = True
+        for k in range(readout_length):
+            for j in range(m0, q0):
+                allowed[b, r0 + k, j] = True
+            for j in range(question_len):
+                allowed[b, r0 + k, q0 + j] = bool(question_mask[b, j])
         for i in range(answer_len):
             if answer_mask[b, i]:
                 for j in range(m0, q0):
                     allowed[b, a0 + i, j] = True
                 for j in range(question_len):
                     allowed[b, a0 + i, q0 + j] = bool(question_mask[b, j])
+                for j in range(readout_length):
+                    allowed[b, a0 + i, r0 + j] = True
                 for j in range(i + 1):
                     allowed[b, a0 + i, a0 + j] = bool(answer_mask[b, j])
             else:
@@ -77,11 +85,12 @@ def _block_oracle(context_mask, memory_length, question_mask, answer_mask,
     return allowed
 
 
-def _continuation_oracle(question_mask, answer_mask, memory_length):
+def _continuation_oracle(question_mask, answer_mask, memory_length, readout_length=0):
     question_mask, answer_mask = question_mask.bool(), answer_mask.bool()
     bsz, question_len = question_mask.shape
     answer_len = answer_mask.shape[1]
-    current = question_len + answer_len
+    current = question_len + readout_length + answer_len
+    r0 = question_len + readout_length
     allowed = torch.zeros(bsz, current, memory_length + current, dtype=torch.bool)
     for b in range(bsz):
         for i in range(question_len):
@@ -91,14 +100,20 @@ def _continuation_oracle(question_mask, answer_mask, memory_length):
                     allowed[b, i, memory_length + j] = bool(question_mask[b, j])
             else:
                 allowed[b, i, memory_length + i] = True
+        for k in range(readout_length):
+            allowed[b, question_len + k, :memory_length] = True
+            for j in range(question_len):
+                allowed[b, question_len + k, memory_length + j] = bool(question_mask[b, j])
         for i in range(answer_len):
-            row = question_len + i
+            row = r0 + i
             if answer_mask[b, i]:
                 allowed[b, row, :memory_length] = True
                 for j in range(question_len):
                     allowed[b, row, memory_length + j] = bool(question_mask[b, j])
+                for j in range(readout_length):
+                    allowed[b, row, memory_length + question_len + j] = True
                 for j in range(i + 1):
-                    allowed[b, row, memory_length + question_len + j] = bool(answer_mask[b, j])
+                    allowed[b, row, memory_length + r0 + j] = bool(answer_mask[b, j])
             else:
                 allowed[b, row, memory_length + row] = True
     return allowed
@@ -127,29 +142,96 @@ def _as_min(mask: torch.Tensor) -> torch.Tensor:
 
 
 def test_block_mask_matches_independent_oracle():
-    for context_mask, question_mask, answer_mask, memory_length in _random_cases():
-        got = _allowed(build_block_causal_mask(context_mask, memory_length, question_mask, answer_mask, torch.float32))[0, 0]
-        want = _block_oracle(context_mask, memory_length, question_mask, answer_mask)[0]
-        assert torch.equal(got, want), "block mask diverged from the documented rules"
+    for readout_length in (0, 3):
+        for context_mask, question_mask, answer_mask, memory_length in _random_cases():
+            got = _allowed(build_block_causal_mask(
+                context_mask, memory_length, question_mask, answer_mask, torch.float32,
+                readout_length=readout_length,
+            ))[0, 0]
+            want = _block_oracle(
+                context_mask, memory_length, question_mask, answer_mask,
+                readout_length=readout_length,
+            )[0]
+            assert torch.equal(got, want), "block mask diverged from the documented rules"
 
 
 def test_continuation_mask_matches_independent_oracle():
-    for _, question_mask, answer_mask, memory_length in _random_cases(seed=1):
-        got = _allowed(build_continuation_mask(question_mask, answer_mask, memory_length, torch.float32))[0, 0]
-        want = _continuation_oracle(question_mask, answer_mask, memory_length)[0]
-        assert torch.equal(got, want), "continuation mask diverged from the documented rules"
+    for readout_length in (0, 3):
+        for _, question_mask, answer_mask, memory_length in _random_cases(seed=1):
+            got = _allowed(build_continuation_mask(
+                question_mask, answer_mask, memory_length, torch.float32,
+                readout_length=readout_length,
+            ))[0, 0]
+            want = _continuation_oracle(
+                question_mask, answer_mask, memory_length, readout_length
+            )[0]
+            assert torch.equal(got, want), "continuation mask diverged from the documented rules"
 
 
 def test_continuation_mask_is_block_mask_with_empty_context():
     """The invariant that makes it safe to keep two builders."""
-    for context_mask, question_mask, answer_mask, memory_length in _random_cases(seed=2):
-        bsz = question_mask.size(0)
-        empty_context = torch.zeros(bsz, 0, dtype=torch.bool)
-        derived = build_block_causal_mask(
-            empty_context, memory_length, question_mask, answer_mask, torch.float32,
-        )[:, :, memory_length:, :]
-        direct = build_continuation_mask(question_mask, answer_mask, memory_length, torch.float32)
-        assert torch.equal(derived, direct), "continuation mask is no longer the empty-context block mask"
+    for readout_length in (0, 3):
+        for context_mask, question_mask, answer_mask, memory_length in _random_cases(seed=2):
+            bsz = question_mask.size(0)
+            empty_context = torch.zeros(bsz, 0, dtype=torch.bool)
+            derived = build_block_causal_mask(
+                empty_context, memory_length, question_mask, answer_mask, torch.float32,
+                readout_length=readout_length,
+            )[:, :, memory_length:, :]
+            direct = build_continuation_mask(
+                question_mask, answer_mask, memory_length, torch.float32,
+                readout_length=readout_length,
+            )
+            assert torch.equal(derived, direct), "continuation mask is no longer the empty-context block mask"
+
+
+def test_readout_rows_see_the_question_but_never_the_answer():
+    """The read-out rule, stated directly: question -> read-out -> answer, one way only."""
+    for _, question_mask, answer_mask, memory_length in _random_cases(seed=6, count=40):
+        readout_length = 3
+        blocks = _allowed(build_block_causal_mask(
+            torch.zeros(question_mask.size(0), 0, dtype=torch.bool), memory_length,
+            question_mask, answer_mask, torch.float32, readout_length=readout_length,
+        ))
+        continuations = _allowed(build_continuation_mask(
+            question_mask, answer_mask, memory_length, torch.float32,
+            readout_length=readout_length,
+        ))
+        question_len, answer_len = question_mask.size(1), answer_mask.size(1)
+        r0, a0 = question_len, question_len + readout_length
+        for b in range(question_mask.size(0)):
+            block = blocks[b, 0]
+            continuation = continuations[b, 0]
+            readout_rows = continuation[r0:a0]
+            # every read-out row sees all memory keys and every valid question key
+            assert bool(readout_rows[:, :memory_length].all()), "read-out row lost the memory"
+            for j in range(question_len):
+                seen = readout_rows[:, memory_length + j]
+                assert bool(seen.eq(bool(question_mask[b, j])).all()), "read-out row/question key mismatch"
+            # and never an answer key
+            assert not bool(readout_rows[:, memory_length + a0:].any()), "read-out saw an answer key"
+            # the question rows never see a read-out key
+            assert not bool(continuation[:question_len, memory_length + r0:memory_length + a0].any()), (
+                "a question row saw a read-out key"
+            )
+            # every real answer row sees every read-out key (padding rows keep only their
+            # self edge, which is the documented behaviour)
+            if bool(question_mask[b].any()):
+                for i in range(answer_len):
+                    if bool(answer_mask[b, i]):
+                        assert bool(continuation[a0 + i, memory_length + r0:memory_length + a0].all()), (
+                            "a real answer row lost the read-out"
+                        )
+            # the block mask agrees with the continuation mask on the same rows/keys
+            # (the block mask additionally carries the memory query rows)
+            assert torch.equal(block[memory_length:], continuation), "block and continuation disagree"
+        zero = _allowed(build_continuation_mask(
+            question_mask, answer_mask, memory_length, torch.float32, readout_length=0,
+        ))
+        historical = _allowed(build_continuation_mask(
+            question_mask, answer_mask, memory_length, torch.float32,
+        ))
+        assert torch.equal(zero, historical), "default read-out length changed the mask"
 
 
 def test_only_memory_rows_can_be_fully_blocked_and_only_with_an_empty_context():
