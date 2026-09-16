@@ -23,15 +23,46 @@ class ICLExample:
     answer_letter: str = ""
 
 
-def load_jsonl(path: str | Path, dataset: str) -> list[ICLExample]:
-    """Load the standardized, one-question-per-line evaluation files."""
-    records = []
+def iter_examples(path: str | Path, dataset: str):
+    """Yield ``(flat_row, line_number, index_within_line)`` for either file schema.
+
+    ``contexts/standardized/`` stores one question per line. ``contexts/aggregated/`` groups
+    a context's questions under ``qa_pairs``, and the per-question fields are identical (also
+    for RACE, whose ``metadata.options``/``answer_letter`` survive the aggregation). Exploding
+    the nested schema here means every consumer reads exactly one layout, which is what lets
+    the baseline and the training evaluator share a data tree instead of two files that merely
+    happen to agree today.
+    """
     with Path(path).open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
                 continue
             row = json.loads(line)
-            records.append(_from_row(row, dataset, line_number))
+            pairs = row.get("qa_pairs")
+            if pairs is None:
+                yield row, line_number, 0
+                continue
+            for index, pair in enumerate(pairs or ()):
+                flat = dict(pair)
+                flat["context"] = row.get("context", "")
+                flat.setdefault("dataset", row.get("dataset", dataset))
+                yield flat, line_number, index
+
+
+def load_jsonl(path: str | Path, dataset: str) -> list[ICLExample]:
+    """Load an evaluation file, skipping questions that have no gold answer.
+
+    The aggregated files are SQuAD v2.0-shaped, i.e. they also carry the unanswerable
+    questions; the training pipeline drops those (`filter_no_qa`), so scoring them here would
+    compare the baseline against a different question set. Skipping them keeps the two
+    harnesses on exactly the same questions.
+    """
+    records = []
+    for row, line_number, index in iter_examples(path, dataset):
+        example = _from_row(row, dataset, line_number, index)
+        if not example.references:
+            continue
+        records.append(example)
     return records
 
 
@@ -42,34 +73,35 @@ def sample_jsonl(path: str | Path, dataset: str, count: int, seed: int) -> list[
     rng = random.Random(seed)
     reservoir: list[ICLExample] = []
     seen = 0
-    with Path(path).open(encoding="utf-8") as handle:
-        for line_number, line in enumerate(handle, 1):
-            if not line.strip():
-                continue
-            example = _from_row(json.loads(line), dataset, line_number)
-            if not example.references or (dataset == "race" and not example.answer_letter):
-                continue
-            seen += 1
-            if len(reservoir) < count:
-                reservoir.append(example)
-            else:
-                position = rng.randrange(seen)
-                if position < count:
-                    reservoir[position] = example
+    for row, line_number, index in iter_examples(path, dataset):
+        example = _from_row(row, dataset, line_number, index)
+        if not example.references or (dataset == "race" and not example.answer_letter):
+            continue
+        seen += 1
+        if len(reservoir) < count:
+            reservoir.append(example)
+        else:
+            position = rng.randrange(seen)
+            if position < count:
+                reservoir[position] = example
     if len(reservoir) < count:
         raise ValueError(f"Requested {count} demonstrations from {path}, found {len(reservoir)}")
     return reservoir
 
 
-def _from_row(row: dict, dataset: str, line_number: int) -> ICLExample:
+def _from_row(row: dict, dataset: str, line_number: int, index: int = 0) -> ICLExample:
     references = row.get("answers", [])
     if isinstance(references, str):
         references = [references]
-    references = tuple(str(value).strip() for value in references if value is not None)
+    references = tuple(
+        str(value).strip() for value in references
+        if value is not None and str(value).strip()
+    )
     metadata = row.get("metadata") or {}
     options = tuple(str(value).strip() for value in metadata.get("options", []))
     letter = str(metadata.get("answer_letter", "")).strip().upper()
-    identifier = str(row.get("id", f"{dataset}-{line_number}"))
+    # ``index`` disambiguates the several questions that share one aggregated context line.
+    identifier = str(row.get("id") or f"{dataset}-{line_number}-{index}")
     return ICLExample(
         id=identifier, dataset=dataset, context=str(row["context"]).strip(),
         question=str(row["question"]).strip(), references=references,

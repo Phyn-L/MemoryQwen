@@ -211,12 +211,26 @@ counts as a hit. `tests/test_references.py` covers the end-to-end path
 (jsonl -> dataset -> HF cache -> reload), which is where a missed `CACHE_VERSION` bump would
 show up.
 
-One difference remains, and it is a property of the inputs rather than of the code:
+Both harnesses now read the same file by default: `scripts/test_icl_baseline.py` points at
+`<data.root>/squad/validation.jsonl` from the aggregated tree and reads it through
+`src.icl_baseline.iter_examples`, which handles the aggregated (context-nested) schema. The
+standardized tree is a subset of it, so one tree removes any chance of the two evaluation
+sets drifting apart. `tests/test_icl_data.py` asserts the parity on the real files.
 
-- The harnesses read different files. The evaluator uses `data.root/squad/<split>.jsonl`
-  from the aggregated tree, while `scripts/test_icl_baseline.py` defaults to
-  `/data/lz/contexts/standardized/squad/validation-v1.1.jsonl` (10570 questions). Compare
-  the two only when both point at the same split.
+Two properties of that file are worth knowing before quoting a number from it:
+
+1. It is **v1.1 dev (10570 rows) concatenated with v2.0 dev (5928 rows)** per context, and
+   the two versions annotate the same paragraphs. The 16498 answered rows therefore cover
+   only **10531 distinct (context, question) pairs**: 36% of rows are repeats (up to 4x the
+   same question), and for 17 questions the repeated rows even disagree on the gold answers.
+   Both harnesses weight these identically, so the comparison between them is fair, but the
+   row count is not an effective sample size -- and a mean over the file silently gives those
+   questions ~1.6x the weight of the others.
+2. `<data.root>/squad/test.jsonl` is empty (0 bytes), so `--split test` for squad has nothing
+   to evaluate; use the validation split.
+
+The 5945 unanswerable v2.0 questions are dropped on both sides -- `filter_no_qa` for training,
+`load_jsonl` for the baseline -- so the two harnesses score exactly the same rows.
 
 ### Regression check for the two target-format fixes
 

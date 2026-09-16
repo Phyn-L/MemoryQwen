@@ -29,7 +29,11 @@ from utils.config import dtype_from_name
 from utils.ddp import barrier, init_distributed, is_main_process
 
 DEFAULT_MODEL = "/data/lz/hf_cache/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
-DEFAULT_DATA = Path("/data/lz/contexts/standardized")
+# Same tree the training pipeline uses (data.root in configs/*/train.yaml). The
+# standardized tree is a subset of it -- aggregated/squad/validation.jsonl is SQuAD
+# v2.0-shaped, whose answerable subset is exactly SQuAD v1.1 dev -- so reading one tree for
+# both harnesses removes any chance of the two evaluation sets drifting apart.
+DEFAULT_DATA = Path("/data/lz/contexts/aggregated")
 
 
 def parse_args():
@@ -42,10 +46,10 @@ def parse_args():
     )
     parser.add_argument(
         "--squad-validation-file",
-        default=str(DEFAULT_DATA / "squad/validation-v1.1.jsonl"),
+        default=str(DEFAULT_DATA / "squad/validation.jsonl"),
     )
     parser.add_argument(
-        "--squad-train-file", default=str(DEFAULT_DATA / "squad/train-v1.1.jsonl")
+        "--squad-train-file", default=str(DEFAULT_DATA / "squad/train.jsonl")
     )
     parser.add_argument(
         "--race-test-file", default=str(DEFAULT_DATA / "race/test.jsonl")
