@@ -132,6 +132,22 @@ def test_tied_mode_trains_only_the_adapter():
     assert embedding.grad is None
 
 
+def test_tied_head_materialises_in_its_own_dtype_under_autocast():
+    """Regression: under bf16 autocast a float32 matmul comes back bfloat16.
+
+    ``W = E @ adapter`` must stay float32 (the trainable dtype) even though the whole
+    training forward runs inside accelerate's autocast; otherwise the fp32 chunk in the
+    loss meets a bf16 weight matrix and raises a dtype error.
+    """
+    embedding, head = _tied_head()
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        weight = head.materialized_weight()
+        logits = head(torch.randn(3, 8))
+    assert weight.dtype == torch.float32, f"materialised W came back {weight.dtype}"
+    assert logits.dtype == torch.float32, f"logits came back {logits.dtype}"
+    assert torch.allclose(weight, embedding @ head.adapter.weight, atol=1e-6)
+
+
 def test_tied_head_mixes_backbone_and_trainable_dtypes():
     """The real case: bfloat16 embedding times a float32 adapter."""
     torch.manual_seed(3)

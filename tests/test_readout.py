@@ -66,6 +66,24 @@ def test_readout_bottleneck_keeps_the_parameter_count_small():
     assert total > 500_000
 
 
+def test_readout_keeps_its_own_dtype_under_bf16_autocast():
+    """Regression: accelerate runs the whole training forward under bf16 autocast.
+
+    A float32 Linear still returns bfloat16 under autocast, so a projection computed
+    outside ``no_autocast`` met the float32 LayerNorms and raised "expected scalar type
+    BFloat16 but found Float". The module owns its dtype: everything inside stays float32.
+    """
+    module, question, mask, memory = _resampler()
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        out = module(question, mask, memory)
+    assert out.dtype == torch.float32, f"read-out came back {out.dtype} under autocast"
+    assert torch.isfinite(out).all()
+    # and the value is the same as with autocast off, because nothing was downcast
+    with torch.no_grad():
+        plain = module(question, mask, memory)
+    assert torch.allclose(out.detach(), plain, atol=1e-5)
+
+
 def test_readout_is_conditioned_on_the_question_and_the_memory():
     module, question, mask, memory = _resampler()
     base = module(question, mask, memory).detach()

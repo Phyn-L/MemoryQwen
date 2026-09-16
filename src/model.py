@@ -100,7 +100,8 @@ class TiedUnembedding(nn.Module):
         return self._embedding_getter()
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        return F.linear(hidden, self.materialized_weight())
+        with no_autocast(hidden.device):
+            return F.linear(hidden, self.materialized_weight())
 
 
 class VocabularyHead(nn.Module):
@@ -175,16 +176,19 @@ class VocabularyHead(nn.Module):
         if self._cached_weight is None or self._cache_key != key:
             # The backbone embedding is bfloat16 while the adapter is float32 (the
             # trainable dtype), so the product needs one common dtype. Compute it in the
-            # adapter's dtype: that keeps the fp32 contract the trainable dtype exists
-            # for, and the bfloat16 -> float32 copy is a transient the caching allocator
-            # reuses (1.2 GB for Qwen3-1.7B, once per step).
+            # adapter's dtype *with autocast disabled*: under accelerate's bf16 autocast a
+            # float32 matmul would silently come back bfloat16 and then meet the float32
+            # chunk in the loss. The bfloat16 -> float32 copy is a transient the caching
+            # allocator reuses (1.2 GB for Qwen3-1.7B, once per step).
             embedding = self._embedding_getter()
-            self._cached_weight = embedding.to(weight.dtype) @ weight
+            with no_autocast(weight.device):
+                self._cached_weight = embedding.to(weight.dtype) @ weight
             self._cache_key = key
         return self._cached_weight
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        return F.linear(hidden, self.materialized_weight())
+        with no_autocast(hidden.device):
+            return F.linear(hidden, self.materialized_weight())
 
 
 class StaticLoRALinear(nn.Module):

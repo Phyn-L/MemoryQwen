@@ -101,13 +101,6 @@ class QuestionResampler(nn.Module):
         if question_embeds.size(0) != memory.size(0):
             raise ValueError("question and memory must share the batch dimension")
         dtype = self.latents.dtype
-        context = torch.cat(
-            [
-                self.query_projection(question_embeds.to(dtype)),
-                self.memory_projection(memory.to(dtype)),
-            ],
-            dim=1,
-        )
         padding = torch.cat(
             [
                 ~question_mask.bool(),
@@ -116,7 +109,18 @@ class QuestionResampler(nn.Module):
             dim=1,
         )
         latents = self.latents.unsqueeze(0).expand(memory.size(0), -1, -1)
+        # Everything runs with autocast disabled -- including the input projections. Under
+        # accelerate's bf16 autocast a Linear whose *weights* are float32 still returns
+        # bfloat16, which then meets the float32 LayerNorms below and raises
+        # "expected scalar type BFloat16 but found Float". The module owns its dtype.
         with no_autocast(memory.device):
+            context = torch.cat(
+                [
+                    self.query_projection(question_embeds.to(dtype)),
+                    self.memory_projection(memory.to(dtype)),
+                ],
+                dim=1,
+            )
             latents = self.input_norm(latents)
             for block in self.blocks:
                 latents = block(latents, context, padding)
