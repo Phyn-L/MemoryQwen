@@ -62,12 +62,41 @@ def test_expansion_walks_nested_structures():
         os.environ.pop("MEMORYQWEN_TEST_ROOT")
 
 
+MACHINE_VARIABLES = ("MODEL_ROOT", "DATA_ROOT", "WANDB_MODE")
+
+
+def _without_machine_variables():
+    """Context manager: hide this machine's overrides so the defaults can be asserted.
+
+    Without this the test only passes where the variables happen to be unset -- on the H200,
+    where scripts/env.local.sh exports them, the shipped defaults are correctly overridden and
+    the assertion failed. A test must not depend on the ambient environment.
+    """
+    saved = {name: os.environ.pop(name, None) for name in MACHINE_VARIABLES}
+
+    class _Restore:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+            return False
+
+    return _Restore()
+
+
 def test_cloud_defaults_resolve_without_any_environment():
-    for config in CONFIGS:
-        cfg = TrainConfig.from_file(config)
-        cfg.validate()
-        assert cfg.model.name_or_path.startswith("/data/lz/hf_cache/hub/models--Qwen--"), config
-        assert cfg.data.root == "/data/lz/contexts/aggregated", config
+    with _without_machine_variables():
+        for config in CONFIGS:
+            cfg = TrainConfig.from_file(config)
+            cfg.validate()
+            assert cfg.model.name_or_path.startswith("/data/lz/hf_cache/hub/models--Qwen--"), config
+            assert cfg.data.root == "/data/lz/contexts/aggregated", config
+            assert cfg.logging.wandb_mode == "online", config
 
 
 def test_the_same_config_files_resolve_to_another_machine():
@@ -84,7 +113,7 @@ def test_the_same_config_files_resolve_to_another_machine():
             assert cfg.data.root == "/home/lijie/proj2/xmu/lz/aggregated", config
             assert cfg.logging.wandb_mode == "offline", config
     finally:
-        for name in ("MODEL_ROOT", "DATA_ROOT", "WANDB_MODE"):
+        for name in MACHINE_VARIABLES:
             os.environ.pop(name)
 
 
