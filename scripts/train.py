@@ -45,22 +45,47 @@ ANSWER_METRIC_KEYS = (*METRIC_KEYS, "first_token_em")
 LOSS_KEYS = ("loss", "qa_loss", "ppl", "reconstruction_loss", "ae_loss", "distill_loss")
 
 
-def eval_log_payloads(teacher_metrics=None, autoregressive_metrics=None):
+def eval_log_payloads(teacher_metrics=None, autoregressive_metrics=None, train_metrics=None):
     """Group evaluation scalars into their W&B sections.
 
     Two sections, each carrying the same answer-quality keys, so the two evaluation modes
     line up panel for panel. Loss-like scalars appear in the teacher-forced section only:
     when `teacher_metrics` is None the autoregressive pass computed them internally, but
     they are still that pass's numbers and must not be duplicated under the other section.
+
+    ``train_metrics`` carries losses that exist only during training (``ae_loss``,
+    ``distill_loss``): the evaluator never computes them, so without this they would be
+    invisible in the dashboard. They join the teacher-forced loss panel and never overwrite
+    that pass's own numbers.
     """
     payloads = []
+    teacher_payload: dict[str, float] = {}
     if teacher_metrics is not None:
-        payloads.append(
+        teacher_payload.update(
             {
                 f"{TEACHER_FORCED_SECTION}/{key}": value
                 for key, value in teacher_metrics.items()
             }
         )
+    elif autoregressive_metrics is not None:
+        teacher_payload.update(
+            {
+                f"{TEACHER_FORCED_SECTION}/{key}": value
+                for key, value in autoregressive_metrics.items()
+                if key in LOSS_KEYS
+            }
+        )
+    if train_metrics is not None:
+        teacher_payload.update(
+            {
+                f"{TEACHER_FORCED_SECTION}/{key}": value
+                for key, value in train_metrics.items()
+                if key in LOSS_KEYS
+                and f"{TEACHER_FORCED_SECTION}/{key}" not in teacher_payload
+            }
+        )
+    if teacher_payload:
+        payloads.append(teacher_payload)
     if autoregressive_metrics is not None:
         payloads.append(
             {
@@ -69,19 +94,6 @@ def eval_log_payloads(teacher_metrics=None, autoregressive_metrics=None):
                 if key in autoregressive_metrics
             }
         )
-        if teacher_metrics is None:
-            loss_only = {
-                key: value
-                for key, value in autoregressive_metrics.items()
-                if key in LOSS_KEYS
-            }
-            if loss_only:
-                payloads.append(
-                    {
-                        f"{TEACHER_FORCED_SECTION}/{key}": value
-                        for key, value in loss_only.items()
-                    }
-                )
     return payloads
 
 
@@ -332,6 +344,9 @@ def main() -> None:
                 accelerator.backward(total)
             else:
                 total.backward()
+            # Training-side loss terms (including ae_loss/distill_loss, which the evaluator
+            # never computes) so they can be logged at the next evaluation point.
+            train_terms = {key: float(value.detach()) for key, value in terms.items()}
             torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
                 cfg.training.max_grad_norm,
@@ -385,7 +400,7 @@ def main() -> None:
             if run and is_main:
                 # Both evaluations are logged together; the step is explicit, so the two
                 # sections share a step whether or not both ran.
-                for payload in eval_log_payloads(teacher_metrics, metrics):
+                for payload in eval_log_payloads(teacher_metrics, metrics, train_terms):
                     run.log(payload, step=step)
             if accelerator is not None:
                 # Resynchronise explicitly so a rank whose shard finished early cannot
