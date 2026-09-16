@@ -30,6 +30,43 @@ from src.pipeline import (
 from utils import CheckpointManager, build_optimizer, build_scheduler
 
 
+# W&B groups panels by the FIRST path component of a logged key, so the two evaluation
+# modes must lead the key to become two sections. Logging `val/teacher_forced/...` and
+# `val/autoregressive/...` instead puts both under a single crowded `val` section.
+TEACHER_FORCED_SECTION = "val_teacher_forced"
+AUTOREGRESSIVE_SECTION = "val_autoregressive"
+# Answer-quality metrics, reported with identical keys by both modes so the two sections
+# line up panel for panel.
+ANSWER_METRIC_KEYS = (*METRIC_KEYS, "first_token_em")
+# Loss-like scalars only exist on the teacher-forced pass (the autoregressive pass can run
+# one internally to obtain them, but they are still that pass's numbers).
+LOSS_KEYS = ("loss", "qa_loss", "ppl", "reconstruction_loss")
+
+
+def eval_log_payloads(teacher_metrics=None, autoregressive_metrics=None):
+    """Group evaluation scalars into their W&B sections.
+
+    Two sections, each carrying the same answer-quality keys, so the two evaluation modes
+    line up panel for panel. Loss-like scalars appear in the teacher-forced section only:
+    when `teacher_metrics` is None the autoregressive pass computed them internally, but
+    they are still that pass's numbers and must not be duplicated under the other section.
+    """
+    payloads = []
+    if teacher_metrics is not None:
+        payloads.append({f"{TEACHER_FORCED_SECTION}/{key}": value for key, value in teacher_metrics.items()})
+    if autoregressive_metrics is not None:
+        payloads.append({
+            f"{AUTOREGRESSIVE_SECTION}/{key}": autoregressive_metrics[key]
+            for key in ANSWER_METRIC_KEYS
+            if key in autoregressive_metrics
+        })
+        if teacher_metrics is None:
+            loss_only = {key: value for key, value in autoregressive_metrics.items() if key in LOSS_KEYS}
+            if loss_only:
+                payloads.append({f"{TEACHER_FORCED_SECTION}/{key}": value for key, value in loss_only.items()})
+    return payloads
+
+
 def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> None:
     if resume:
         run_dir = Path(resume).resolve().parent
@@ -216,24 +253,18 @@ def main() -> None:
             teacher_metrics = None
             if len(validation_loader) and step % cfg.evaluation.teacher_forced_every == 0:
                 teacher_metrics = evaluator.teacher_forced(base_model, validation_loader, device)
-                if run and is_main:
-                    run.log({f"val/teacher_forced/{k}": v for k, v in teacher_metrics.items()}, step=step)
+            metrics = None
             if len(validation_loader) and step % cfg.evaluation.autoregressive_every == 0:
                 metrics = evaluator.autoregressive(
                     base_model, validation_loader, device,
                     include_teacher_metrics=teacher_metrics is None,
                     max_qa=cfg.evaluation.autoregressive_max_qa,
                 )
-                if run and is_main:
-                    run.log({f"val/autoregressive/{k}": v for k, v in metrics.items()}, step=step)
-                    # Headline scalars: the *_official keys are the ones to compare with an
-                    # ICL baseline; first_token_em is the retrieval diagnostic.
-                    run.log(
-                        {f"val/primary/{k}": metrics[k]
-                         for k in (*METRIC_KEYS, "first_token_em")
-                         if k in metrics},
-                        step=step,
-                    )
+            if run and is_main:
+                # Both evaluations are logged together; the step is explicit, so the two
+                # sections share a step whether or not both ran.
+                for payload in eval_log_payloads(teacher_metrics, metrics):
+                    run.log(payload, step=step)
             if accelerator is not None:
                 # Resynchronise explicitly so a rank whose shard finished early cannot
                 # race ahead into the next training step.

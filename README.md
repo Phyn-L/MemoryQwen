@@ -161,12 +161,26 @@ include_teacher_metrics=False)` skips the extra teacher-forced pass when the cal
 already runs it.
 
 Because the autoregressive number is the only one that is comparable with an ICL
-baseline, training must actually measure it: `evaluation.autoregressive_every` also
-writes a `val/primary/<metric>` mirror of the autoregressive result for every key in
-`src.metrics.METRIC_KEYS` plus `first_token_em`, and `evaluation.max_new_tokens` is 32 to
-match `scripts/test_icl_baseline.py --squad-max-new-tokens 32`. Setting
-`autoregressive_every` to a huge number is how the `pgw1382s` run ended up with no
-trustworthy score at all.
+baseline, training must actually measure it: `evaluation.autoregressive_every` controls how
+often it runs, and `evaluation.max_new_tokens` is 32 to match
+`scripts/test_icl_baseline.py --squad-max-new-tokens 32`. Setting `autoregressive_every` to
+a huge number is how the `pgw1382s` run ended up with no trustworthy score at all.
+
+Both evaluation modes are logged into their own W&B section, with identical metric keys so
+the panels line up:
+
+| section | contents |
+| --- | --- |
+| `val_teacher_forced/*` | `em` `f1` `rouge_l` `precision` `first_token_em` (lexical-continuation flavoured — a diagnostic) plus the loss scalars `loss` `qa_loss` `ppl` `reconstruction_loss` |
+| `val_autoregressive/*` | the same five answer-quality metrics, produced without feeding the gold answer back — the headline numbers |
+
+W&B groups panels by the first path component, so the section has to lead the key. The two
+prefixes are the `TEACHER_FORCED_SECTION` / `AUTOREGRESSIVE_SECTION` constants at the top of
+`scripts/train.py`; this replaces the earlier `val/teacher_forced/*` + `val/autoregressive/*`
+layout, which put everything in one `val` section, and the `val/primary/*` mirror of the
+autoregressive numbers, whose name made the headline result look like it was called
+"primary". Loss scalars stay under the teacher-forced section even when the autoregressive
+pass computed them internally, and `tests/test_eval_logging.py` pins the whole layout.
 
 ### Metric semantics
 
