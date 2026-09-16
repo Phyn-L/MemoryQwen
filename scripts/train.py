@@ -14,6 +14,7 @@ from src.evaluator import Evaluator
 from src.losses import (
     combine_losses,
     context_lm_loss,
+    kl_distill_loss,
     memory_contrastive_loss,
     qa_loss,
     reconstruction_loss,
@@ -41,7 +42,7 @@ AUTOREGRESSIVE_SECTION = "val_autoregressive"
 ANSWER_METRIC_KEYS = (*METRIC_KEYS, "first_token_em")
 # Loss-like scalars only exist on the teacher-forced pass (the autoregressive pass can run
 # one internally to obtain them, but they are still that pass's numbers).
-LOSS_KEYS = ("loss", "qa_loss", "ppl", "reconstruction_loss", "ae_loss")
+LOSS_KEYS = ("loss", "qa_loss", "ppl", "reconstruction_loss", "ae_loss", "distill_loss")
 
 
 def eval_log_payloads(teacher_metrics=None, autoregressive_metrics=None):
@@ -296,6 +297,25 @@ def main() -> None:
                     output.ae_mask,
                     positions=positions,
                 )
+            # Distribution-level distillation of the full-context model into the
+            # memory-conditioned one. The teacher is the encoder pass's own context rows
+            # (plain causal LM, no extra forward), so this costs one vocabulary pass per
+            # scored position and no additional backbone pass.
+            distill = None
+            if cfg.memory.distill_weight and output.ae_teacher_hidden is not None:
+                positions = None
+                if cfg.memory.distill_positions > 0:
+                    positions = sample_positions(output.ae_mask, cfg.memory.distill_positions)[0]
+                distill = kl_distill_loss(
+                    output.ae_hidden,
+                    output.ae_teacher_hidden,
+                    base_model.ae_head,
+                    output.ae_mask,
+                    cfg.memory.distill_temperature,
+                    positions=positions,
+                    topk=cfg.memory.distill_topk,
+                    entropy_weight=cfg.memory.distill_entropy_weight,
+                )
             total, terms = combine_losses(
                 qa,
                 reconstruction,
@@ -305,6 +325,8 @@ def main() -> None:
                 cfg.memory.contrastive_weight,
                 ae,
                 cfg.memory.ae_lm_weight,
+                distill,
+                cfg.memory.distill_weight,
             )
             if accelerator is not None:
                 accelerator.backward(total)

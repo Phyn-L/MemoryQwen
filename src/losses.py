@@ -210,6 +210,90 @@ def sequence_lm_loss(hidden, labels, head, mask=None, positions=None, max_logits
     return total / count
 
 
+def kl_distill_loss(student_hidden, teacher_hidden, head, mask=None, temperature=1.0,
+                    positions=None, max_logits_rows=256, topk=0, entropy_weight=False):
+    """Distil the full-context distribution into the memory-conditioned one.
+
+    ``teacher_hidden`` is the plain causal-LM state at the same token positions (the encoder
+    pass's context rows, i.e. the full-context bypass), ``student_hidden`` is the
+    memory-conditioned state (:meth:`MetaLoRA.autoencode_with_memory`), and both are scored
+    by the same unembedding. The loss is ``T^2 * KL(p_teacher || p_student)`` -- forward KL,
+    so the student is pushed to cover the teacher's mass -- averaged over the scored
+    positions. The teacher never receives gradient.
+
+    Why not cross entropy on the hard label: most context tokens are predictable from the
+    language-model prior alone, so a one-hot target spends memory capacity on content the
+    frozen model already knows (ICAE measures normal text at BLEU 99.3 versus 3.5 for
+    patterned-random and 0.2 for random text). A distribution target preserves the *residual*
+    uncertainty, which is exactly what the memory has to carry. ``entropy_weight`` weights
+    each position by the teacher's own entropy; ``topk`` truncates the teacher to its k most
+    likely tokens to bound the softmax cost.
+
+    Memory note: the scored positions' logits stay alive for the backward pass (one fp32
+    ``[rows, vocab]`` chunk per active chunk), so keep ``max_logits_rows`` and the position
+    budget modest -- 256 positions at 256 rows/step is ~155 MB per row of the batch.
+    """
+    if student_hidden.ndim != 3:
+        raise ValueError("kl_distill student hidden must have shape [B, S, H]")
+    if student_hidden.shape != teacher_hidden.shape:
+        raise ValueError(
+            f"kl_distill needs matching hidden states, got {tuple(student_hidden.shape)} "
+            f"and {tuple(teacher_hidden.shape)}"
+        )
+    if temperature <= 0:
+        raise ValueError("kl_distill temperature must be positive")
+    if topk < 0:
+        raise ValueError("kl_distill topk must be >= 0")
+    if mask is None:
+        mask = torch.ones(student_hidden.shape[:2], dtype=torch.bool, device=student_hidden.device)
+    else:
+        mask = mask.bool()
+    head_dtype = getattr(head, "compute_dtype", None) or head.weight.dtype
+    weight = (
+        head.materialized_weight()
+        if hasattr(head, "materialized_weight") else head.weight
+    )
+    if positions is not None:
+        index = positions.unsqueeze(-1).expand(-1, -1, student_hidden.size(-1))
+        student_hidden = student_hidden.gather(1, index)
+        teacher_hidden = teacher_hidden.gather(1, index)
+        mask = mask.gather(1, positions)
+    width = student_hidden.size(-1)
+    flat_student = student_hidden.reshape(-1, width).to(head_dtype)
+    flat_teacher = teacher_hidden.reshape(-1, width).to(head_dtype)
+    flat_mask = mask.reshape(-1)
+    rows = flat_student.size(0)
+    step = max(1, min(int(max_logits_rows), rows)) if rows else 1
+    scale = float(temperature) ** 2
+    total = None
+    weight_sum = 0.0
+    with no_autocast(student_hidden.device):
+        for start in range(0, rows, step):
+            active = flat_mask[start:start + step]
+            if not bool(active.any()):
+                continue
+            student_logits = F.linear(flat_student[start:start + step], weight).float()
+            with torch.no_grad():
+                teacher_logits = F.linear(flat_teacher[start:start + step], weight).float()
+                if topk and topk < teacher_logits.size(-1):
+                    threshold = teacher_logits.topk(topk, dim=-1).values[:, -1:]
+                    teacher_logits = teacher_logits.masked_fill(teacher_logits < threshold, float("-inf"))
+                teacher_prob = F.softmax(teacher_logits / temperature, dim=-1)
+                if entropy_weight:
+                    entropy = -(teacher_prob * torch.log(teacher_prob.clamp_min(1e-9))).sum(-1)
+                    per_row_weight = entropy * active.to(entropy.dtype)
+                else:
+                    per_row_weight = active.to(teacher_prob.dtype)
+            student_log_prob = F.log_softmax(student_logits / temperature, dim=-1)
+            per_row = F.kl_div(student_log_prob, teacher_prob, reduction="none").sum(-1) * scale
+            contribution = (per_row * per_row_weight).sum()
+            total = contribution if total is None else total + contribution
+            weight_sum += float(per_row_weight.sum())
+    if total is None or weight_sum == 0.0:
+        return student_hidden.sum() * 0.0
+    return total / weight_sum
+
+
 def memory_contrastive_loss(memory, negative_memory=None, temperature=0.07, margin=0.2):
     """Optional batch memory separation loss.
 
@@ -227,11 +311,13 @@ def memory_contrastive_loss(memory, negative_memory=None, temperature=0.07, marg
     positive = (z * z).sum(-1) / temperature
     negative = (z * target).sum(-1) / temperature
     return torch.relu(margin + negative - positive).mean()
-def combine_losses(qa, reconstruction, qa_weight=1., reconstruction_weight=1., contrastive=None, contrastive_weight=0., ae=None, ae_weight=0.):
+def combine_losses(qa, reconstruction, qa_weight=1., reconstruction_weight=1., contrastive=None, contrastive_weight=0., ae=None, ae_weight=0., distill=None, distill_weight=0.):
     total=qa_weight*qa+reconstruction_weight*reconstruction
     terms={"loss":total,"qa_loss":qa,"reconstruction_loss":reconstruction}
     if ae is not None and ae_weight:
         total=total+ae_weight*ae; terms["ae_loss"]=ae
+    if distill is not None and distill_weight:
+        total=total+distill_weight*distill; terms["distill_loss"]=distill
     if contrastive is not None and contrastive_weight:
         total=total+contrastive_weight*contrastive; terms["contrastive_loss"]=contrastive
     terms["loss"]=total

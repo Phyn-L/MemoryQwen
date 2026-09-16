@@ -121,6 +121,18 @@ class MemoryConfig:
     ae_lm_weight: float = 0.0
     # Context targets scored by the autoencoding objective; <= 0 scores every position.
     ae_lm_positions: int = 0
+    # Distil the *full-context* distribution into the memory-conditioned one:
+    # T^2 * KL(p_teacher || p_student) where the teacher is the plain causal LM over the
+    # context (free: the encoder pass's context rows) and the student is the memory-prefixed
+    # autoencoding pass. 0 = off. Requires ae_lm_weight > 0.
+    distill_weight: float = 0.0
+    distill_temperature: float = 1.0
+    # Positions scored by the distillation objective; <= 0 scores every position.
+    distill_positions: int = 256
+    # Weight each position by the teacher's own entropy instead of uniformly.
+    distill_entropy_weight: bool = False
+    # Truncate the teacher distribution to its k most likely tokens (0 = keep all).
+    distill_topk: int = 0
     # context_lm: number of context positions scored per context per step. The shared
     # vocabulary head is applied to num_layers * context_lm_positions rows, so this is
     # the knob that bounds the auxiliary objective's cost. <= 0 means "all positions".
@@ -294,6 +306,19 @@ class TrainConfig:
             raise ValueError("memory.ae_lm_weight must be non-negative")
         if m.ae_lm_positions < 0:
             raise ValueError("memory.ae_lm_positions must be >= 0 (0 scores every position)")
+        if m.distill_weight < 0:
+            raise ValueError("memory.distill_weight must be non-negative")
+        if m.distill_temperature <= 0:
+            raise ValueError("memory.distill_temperature must be positive")
+        if m.distill_positions < 0:
+            raise ValueError("memory.distill_positions must be >= 0 (0 scores every position)")
+        if m.distill_topk < 0:
+            raise ValueError("memory.distill_topk must be >= 0")
+        if m.distill_weight > 0 and m.ae_lm_weight <= 0:
+            raise ValueError(
+                "memory.distill_weight needs the memory-prefixed autoencoding pass to "
+                "distil into: set memory.ae_lm_weight > 0 as well"
+            )
         if m.context_lm_positions < 0:
             raise ValueError("memory.context_lm_positions must be >= 0 (0 scores every position)")
         if m.qa_weight < 0 or m.reconstruction_weight < 0:

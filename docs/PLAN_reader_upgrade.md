@@ -172,17 +172,17 @@ class VocabularyHead(nn.Module):
 
 **为什么**：复述硬标签里大部分是 LM 先验（ICAE：正常文本 BLEU 99.3 vs 完全随机 0.2），让 memory 去背这些是浪费；而"逐字命中答案"的任务更需要**分布级**对齐。最贴下游的形式是：teacher = 看到完整 context 的分布（就是 0.6847 的 bypass 路径），student = memory + question —— 即把 full-context 能力蒸馏进 memory 路径。
 
-**怎么改**：
-- `kl_distill_loss(student_logits, teacher_logits, mask, temperature=1.0, positions=None)` → `T² · mean(KL(p_tea ‖ p_stu))`。**position 选择按 teacher surprisal**（`-log p_tea(label)`）top-k，免费得到，无需离线缓存。
-- `memory.distill_scope: "context" | "answer"`（默认 `"context"`）：
-  - `context`：teacher = 融合前向里 context 行的 tied logits（免费），student = AE pass 在同一位置、同一词表头的 logits；
-  - `answer`：teacher 需要一次**额外前向** `[context | question | answer]` 全因果（`torch.no_grad`），student = memory+question 的 QA logits。成本高，默认关闭（`memory.distill_answer_teacher: false`）。
-- 配置：`memory.distill_weight: float = 0.0`、`memory.distill_temperature: float = 1.0`、`memory.distill_positions: int = 256`、`memory.distill_topk_logits: int = 0`（0 = 全词表；>0 时对 teacher 做 top-k 截断以省显存）。
-- 合成：`combine_losses` 增加可选 `distill/ae` 项与权重；`LOSS_KEYS` 增 `"distill_loss"`。
+**怎么改（已实现）**：
+- `src/losses.py::kl_distill_loss(student_hidden, teacher_hidden, head, mask, temperature, positions, max_logits_rows, topk, entropy_weight)` → `T² · KL(p_tea ‖ p_stu)`（forward KL，覆盖式），按位置取均值；teacher 侧 `no_grad`，永不接收梯度。
+- **teacher 来源 = encoder pass 的 context 行**（B2 顺带拿到的 `ae_teacher_hidden`，零额外前向）：context 行只 attend 更早的 context，本身就是纯因果 LM，也就是 full-context bypass 分布。
+- 位置选择：`sample_positions`（均匀采样）；`entropy_weight=True` 时按 teacher 自身熵加权（免费，不需要额外前向）；`topk>0` 时截断 teacher 到 top-k。
+- 配置：`memory.distill_weight`（默认 0）、`distill_temperature`、`distill_positions`（默认 256）、`distill_entropy_weight`、`distill_topk`；`validate()` 要求 `distill_weight > 0` 时必须 `ae_lm_weight > 0`。
+- **未实现（有意留作后续）**：answer 位置的蒸馏需要一次额外的 `[context | question | answer]` 全因果 teacher 前向（`build_block_causal_mask` 禁止 QA 看 context，所以拿不到免费 teacher），步时约 ×2。当前只做 context 位置版本；若日后要做，先加 `distill_every_n_steps` 控制频率。
 
 **怎么验证**：
 - `tests/test_distill.py`：student==teacher → loss ≈ 0；`student_logits` 需要梯度时 `grad` 非空、`teacher` 不建图；`T` 缩放（T=2 与手算一致）；surprisal 采样在构造的分布上选出预期位置；`weight=0` 时 `forward` 与改动前逐位一致。
 - 冒烟：512 token、M=16，`distill_weight` ∈ {0, 0.3} 对照，看 AR F1（squad 子集）与 memory-only 复述指标。
+- **已完成的实测（真实 1.7B、真实英文文本、memory 尚未训练，CPU 冒烟）**：plain KL = 2.352 nats，`entropy_weight` = 3.500，`topk=64` = 2.348，`T=2` = 5.907；`memory_tokens` 梯度范数 590（远大于 AE CE 的 28，说明分布级目标的梯度更强），冻结参数梯度为 0。
 
 **风险/回退**：KL 与 CE 的权重平衡（`qa_weight`/`reconstruction_weight` 已存在）；teacher/student 词表不一致会直接报错（同模型，无此风险）。回退 = `distill_weight: 0`。
 

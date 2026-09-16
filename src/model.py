@@ -32,6 +32,9 @@ class MetaLoRAOutput:
     ae_hidden: torch.Tensor | None = None
     ae_labels: torch.LongTensor | None = None
     ae_mask: torch.Tensor | None = None
+    # The same positions scored by the *plain causal LM* (no memory): the distillation
+    # target, and the honest reference for "what does the memory actually add".
+    ae_teacher_hidden: torch.Tensor | None = None
 
 
 @dataclass
@@ -791,6 +794,11 @@ class MetaLoRA(nn.Module):
             output.ae_hidden = hidden[:, :-1]
             output.ae_labels = context_ids[:, 1:]
             output.ae_mask = context_mask[:, 1:]
+            # The encoder pass already computed the plain causal-LM states for the same
+            # positions (its context rows attend only to earlier context), so the
+            # distillation target costs nothing extra. Sliced the same way as ae_hidden.
+            if prefix.context_hidden is not None:
+                output.ae_teacher_hidden = prefix.context_hidden[:, :-1]
         return output
 
     @torch.no_grad()
