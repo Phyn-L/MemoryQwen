@@ -4,11 +4,12 @@ import json
 import math
 import random
 import re
-import string
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
+
+from .metrics import exact_match, normalize_official, rouge_l, token_f1
 
 
 @dataclass(frozen=True)
@@ -133,9 +134,9 @@ def parse_prediction(example: ICLExample, raw_prediction: str) -> tuple[str, str
         return first_line, ""
     match = re.search(r"(?:^|[\s(\[])s*([A-D])(?:[\s).:\]]|$)", raw.upper())
     if not match:
-        normalized = normalize_answer(raw)
+        normalized = normalize_official(raw)
         for index, option in enumerate(example.options):
-            if normalized == normalize_answer(option):
+            if normalized == normalize_official(option):
                 letter = "ABCD"[index]
                 return option, letter
         return raw, ""
@@ -143,52 +144,18 @@ def parse_prediction(example: ICLExample, raw_prediction: str) -> tuple[str, str
     return example.options["ABCD".index(letter)], letter
 
 
-def normalize_answer(text: str) -> str:
-    """Official SQuAD-style lowercase/punctuation/article normalization."""
-    text = str(text).lower()
-    text = "".join(character for character in text if character not in string.punctuation)
-    text = re.sub(r"\b(a|an|the)\b", " ", text)
-    return " ".join(text.split())
-
-
-def exact_match(prediction: str, reference: str) -> float:
-    return float(normalize_answer(prediction) == normalize_answer(reference))
-
-
-def token_f1(prediction: str, reference: str) -> float:
-    predicted = normalize_answer(prediction).split()
-    expected = normalize_answer(reference).split()
-    common = sum((Counter(predicted) & Counter(expected)).values())
-    if not predicted or not expected:
-        return float(predicted == expected)
-    if common == 0:
-        return 0.0
-    precision, recall = common / len(predicted), common / len(expected)
-    return 2 * precision * recall / (precision + recall)
-
-
-def rouge_l(prediction: str, reference: str) -> float:
-    predicted = normalize_answer(prediction).split()
-    expected = normalize_answer(reference).split()
-    if not predicted or not expected:
-        return float(predicted == expected)
-    row = [0] * (len(expected) + 1)
-    for token in predicted:
-        previous_diagonal = 0
-        for index, other in enumerate(expected, 1):
-            old = row[index]
-            row[index] = previous_diagonal + 1 if token == other else max(row[index], row[index - 1])
-            previous_diagonal = old
-    precision, recall = row[-1] / len(predicted), row[-1] / len(expected)
-    return 2 * precision * recall / (precision + recall) if row[-1] else 0.0
-
-
 def example_metrics(prediction: str, references: Sequence[str]) -> dict[str, float]:
+    """Official SQuAD normalization, best reference per example.
+
+    The arithmetic lives in :mod:`src.metrics`; only the normalizer differs from
+    the training-time evaluator, and it is passed explicitly so the two numbers
+    are comparable by construction.
+    """
     references = tuple(references) or ("",)
     return {
-        "em": max(exact_match(prediction, reference) for reference in references),
-        "f1": max(token_f1(prediction, reference) for reference in references),
-        "rouge_l": max(rouge_l(prediction, reference) for reference in references),
+        "em": max(exact_match(prediction, reference, normalize_official) for reference in references),
+        "f1": max(token_f1(prediction, reference, normalize_official) for reference in references),
+        "rouge_l": max(rouge_l(prediction, reference, normalize_official) for reference in references),
     }
 
 
@@ -198,8 +165,8 @@ def corpus_bleu(predictions: Sequence[str], references: Sequence[Sequence[str]],
     totals = [0] * max_order
     predicted_length = reference_length = 0
     for prediction, sample_references in zip(predictions, references):
-        prediction_tokens = normalize_answer(prediction).split()
-        reference_tokens = [normalize_answer(value).split() for value in (sample_references or [""])]
+        prediction_tokens = normalize_official(prediction).split()
+        reference_tokens = [normalize_official(value).split() for value in (sample_references or [""])]
         predicted_length += len(prediction_tokens)
         reference_length += min(
             (len(value) for value in reference_tokens),

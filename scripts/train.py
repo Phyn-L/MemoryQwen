@@ -264,7 +264,7 @@ def main() -> None:
                     # ICL baseline; first_token_em is the retrieval diagnostic.
                     run.log(
                         {f"val/primary/{k}": metrics[k]
-                         for k in ("em", "f1", "rouge_l", "bleu", "first_token_em")
+                         for k in ("em", "f1", "rouge_l", "precision", "first_token_em")
                          if k in metrics},
                         step=step,
                     )

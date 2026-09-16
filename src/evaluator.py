@@ -85,7 +85,7 @@ class Evaluator:
     def teacher_forced(self, model, loader, device):
         model.eval()
         qa_sum = reconstruction_sum = 0.0
-        em = f1 = rouge_l = bleu = 0.0
+        em = f1 = rouge_l = precision = 0.0
         samples = 0
         first_token_hits = 0
         qa_weight = context_weight = 0
@@ -142,15 +142,15 @@ class Evaluator:
                     em += metrics["em"]
                     f1 += metrics["f1"]
                     rouge_l += metrics["rouge_l"]
-                    bleu += metrics["bleu"]
+                    precision += metrics["precision"]
                     samples += 1
         model.train()
         (
-            qa_sum, reconstruction_sum, em, f1, rouge_l, bleu, first_token_hits,
+            qa_sum, reconstruction_sum, em, f1, rouge_l, precision, first_token_hits,
             qa_weight, context_weight, samples,
         ) = _distributed_sum(
             [
-                qa_sum, reconstruction_sum, em, f1, rouge_l, bleu, first_token_hits,
+                qa_sum, reconstruction_sum, em, f1, rouge_l, precision, first_token_hits,
                 qa_weight, context_weight, samples,
             ],
             device,
@@ -169,9 +169,9 @@ class Evaluator:
             "em": em / max(1, samples),
             "f1": f1 / max(1, samples),
             "rouge_l": rouge_l / max(1, samples),
-            "bleu": bleu / max(1, samples),
+            "precision": precision / max(1, samples),
             # Not an answer-quality score: teacher forcing feeds the gold answer
-            # prefix, so em/f1/rouge_l/bleu here mostly measure lexical continuation.
+            # prefix, so em/f1/rouge_l/precision here mostly measure lexical continuation.
             # Treat first_token_em as the retrieval signal and prefer the
             # autoregressive numbers as the headline result.
             "first_token_em": first_token_hits / max(1, samples),
@@ -182,7 +182,7 @@ class Evaluator:
         """Headline evaluation: every answer token is produced by the model itself.
 
         Unlike :meth:`teacher_forced` this never feeds the gold answer back, so the
-        em/f1/rouge_l/bleu returned here are the numbers that should be compared
+        em/f1/rouge_l/precision returned here are the numbers that should be compared
         with an ICL baseline.  ``include_teacher_metrics`` additionally reports the
         teacher-forced ppl/qa_loss/reconstruction_loss at the cost of a second pass.
 
@@ -194,7 +194,7 @@ class Evaluator:
         ``max_qa * world_size``.
         """
         model.eval()
-        sums = {"em": 0.0, "f1": 0.0, "rouge_l": 0.0, "bleu": 0.0}
+        sums = {"em": 0.0, "f1": 0.0, "rouge_l": 0.0, "precision": 0.0}
         samples = 0
         first_token_hit = 0
         enabled = os.environ.get("RANK", "0") in {"0", "-1"}
@@ -256,9 +256,9 @@ class Evaluator:
                     sums[key] += metrics[key]
                 samples += 1
         model.train()
-        sums["em"], sums["f1"], sums["rouge_l"], sums["bleu"], first_token_hit, samples = (
+        sums["em"], sums["f1"], sums["rouge_l"], sums["precision"], first_token_hit, samples = (
             _distributed_sum(
-                [sums["em"], sums["f1"], sums["rouge_l"], sums["bleu"],
+                [sums["em"], sums["f1"], sums["rouge_l"], sums["precision"],
                  first_token_hit, samples],
                 device,
             )
