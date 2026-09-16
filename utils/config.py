@@ -33,14 +33,11 @@ class ModelConfig:
         "q_proj", "k_proj", "v_proj", "o_proj",
         "gate_proj", "up_proj", "down_proj",
     )
-    freeze_backbone: bool = True
-    gradient_checkpointing: bool = False
 
 
 @dataclass
 class MemoryConfig:
     memory_length: int = 8
-    encoder_heads: int = 8
     decoder_hidden_size: int = 256
     decoder_ffn_ratio: int = 2
     decoder_heads: int = 8
@@ -73,7 +70,6 @@ class DataConfig:
     max_samples: int | None = None
     train_max_samples: int | None = None
     validation_max_samples: int | None = None
-    test_max_samples: int | None = None
     filter_long_context: bool = True
     filter_no_qa: bool = True
     sortish_bucket_multiplier: int = 50
@@ -188,15 +184,6 @@ class TrainConfig:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    def save(self, path: str | Path) -> None:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if path.suffix.lower() not in {".yaml", ".yml"}:
-            raise ValueError(f"configuration must be saved as YAML (.yaml/.yml), got: {path}")
-        values = self.to_dict()
-        values = _yaml_safe_values(values)
-        path.write_text(yaml.safe_dump(values, sort_keys=False), encoding="utf-8")
-
     def validate(self) -> None:
         d, m = self.data, self.memory
         if not 0 < d.max_context_tokens <= 2048:
@@ -248,11 +235,3 @@ def dtype_from_name(name: str):
         return {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}[name.lower()]
     except KeyError as exc:
         raise ValueError(f"unsupported torch dtype: {name}") from exc
-
-
-def _yaml_safe_values(value):
-    if isinstance(value, dict):
-        return {key: _yaml_safe_values(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_yaml_safe_values(item) for item in value]
-    return value

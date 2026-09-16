@@ -34,7 +34,6 @@ class ContextLMTerms:
     hidden: torch.Tensor          # [B, num_layers, P, D] decoder hidden states
     labels: torch.LongTensor      # [B, P] target context token ids (-100 = ignore)
     mask: torch.Tensor            # [B, P] which of the P positions are real
-    positions: torch.LongTensor   # [B, P] the context positions that were sampled
 
 
 @dataclass
@@ -122,20 +121,6 @@ def disable_autocast_for_peft_lora(model: nn.Module) -> int:
         module._autocast_disabled = True
         wrapped += 1
     return wrapped
-
-
-class LayerReconstructionDecoder(nn.Module):
-    """Decode one Qwen layer's memory slots into every original context embedding."""
-    def __init__(self, dim: int, heads: int, max_positions: int = 2048):
-        super().__init__()
-        self.position = nn.Embedding(max_positions, dim)
-        self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
-        self.norm = nn.LayerNorm(dim)
-        self.ff = nn.Sequential(nn.Linear(dim, 4 * dim), nn.GELU(), nn.Linear(4 * dim, dim))
-    def forward(self, memory: torch.Tensor, length: int) -> torch.Tensor:
-        q = self.position(torch.arange(length, device=memory.device))[None].expand(memory.size(0), -1, -1)
-        h, _ = self.attn(q, memory, memory, need_weights=False)
-        return self.norm(q + h + self.ff(q + h))
 
 
 def build_block_causal_mask(
@@ -344,10 +329,6 @@ class MetaLoRA(nn.Module):
         return qwen
 
     @property
-    def base_model(self):
-        return self.qwen
-
-    @property
     def dtype(self) -> torch.dtype:
         return self.qwen.get_input_embeddings().weight.dtype
 
@@ -357,7 +338,7 @@ class MetaLoRA(nn.Module):
     def _reconstruction(self, layer_memory, context_embeds, context_mask):
         return torch.stack([decoder(layer_memory[:, i], context_embeds.size(1)) for i, decoder in enumerate(self.decoders)], dim=1)
 
-    def sample_context_targets(self, context_ids, context_mask, positions_per_context=None, generator=None):
+    def sample_context_targets(self, context_ids, context_mask, positions_per_context=None):
         """Draw the context positions that the next-token objective will score.
 
         A context position ``t`` is a valid target when ``t >= 1`` (query ``t - 1`` must
@@ -381,14 +362,14 @@ class MetaLoRA(nn.Module):
         budget = length - 1 if not positions_per_context or positions_per_context <= 0 else int(positions_per_context)
         budget = max(1, min(budget, max(1, length - 1)))
         scores = torch.rand(
-            context_ids.size(0), length, device=device, generator=generator,
+            context_ids.size(0), length, device=device,
         ).masked_fill(~candidates, float("-inf"))
         positions = scores.topk(budget, dim=1).indices
         keep = candidates.gather(1, positions)
         positions = positions.masked_fill(~keep, 0)
         return positions, keep
 
-    def context_lm_terms(self, context_ids, context_mask, layer_memory, positions_per_context=None, generator=None, targets=None):
+    def context_lm_terms(self, context_ids, context_mask, layer_memory, positions_per_context=None):
         """Build the context next-token prediction terms from the memory.
 
         The query for target position ``t`` sits at ``t - 1``, so the decoder has to
@@ -398,17 +379,14 @@ class MetaLoRA(nn.Module):
         """
         if layer_memory is None:
             raise ValueError("context_lm requires the prefix layer_memory")
-        if targets is None:
-            positions, keep = self.sample_context_targets(context_ids, context_mask, positions_per_context, generator)
-        else:
-            positions, keep = targets
+        positions, keep = self.sample_context_targets(context_ids, context_mask, positions_per_context)
         query_positions = (positions - 1).clamp_min(0)
         labels = context_ids.gather(1, positions).masked_fill(~keep, -100)
         hidden = torch.stack(
             [decoder.decode(layer_memory[:, i], query_positions) for i, decoder in enumerate(self.decoders)],
             dim=1,
         )
-        return ContextLMTerms(hidden, labels, keep, positions)
+        return ContextLMTerms(hidden, labels, keep)
 
     @property
     def _transformer_body(self):
@@ -494,7 +472,7 @@ class MetaLoRA(nn.Module):
             context_mask=prefix.context_mask,
         )
 
-    def forward(self, context_embeds, context_mask, question_embeds, question_mask, answer_embeds, answer_mask, labels, qa_context_indices=None, context_ids=None, context_lm_positions=None, context_lm_generator=None):
+    def forward(self, context_embeds, context_mask, question_embeds, question_mask, answer_embeds, answer_mask, labels, qa_context_indices=None, context_ids=None, context_lm_positions=None):
         """Training path.
 
         ``context_ids`` is required when the auxiliary objective is ``context_lm``: the
@@ -509,7 +487,7 @@ class MetaLoRA(nn.Module):
                 raise ValueError("context_lm needs context_ids, but forward() received none")
             terms = self.context_lm_terms(
                 context_ids.to(context_embeds.device), context_mask.to(context_embeds.device),
-                prefix.layer_memory, context_lm_positions, context_lm_generator,
+                prefix.layer_memory, context_lm_positions,
             )
             output.context_lm_hidden = terms.hidden
             output.context_lm_labels = terms.labels
@@ -658,12 +636,10 @@ def load_model(cfg):
     return tok, model
 
 
-QwenMemoryModel = MetaLoRA
-ModelOutput = MetaLoRAOutput
-
 __all__ = [
-    "MetaLoRA", "MetaLoRAOutput", "QwenMemoryModel", "ModelOutput",
+    "MetaLoRA", "MetaLoRAOutput",
     "StaticLoRALinear", "MemoryDecoder", "ContextPrefix", "ContextLMTerms",
     "build_block_causal_mask", "build_continuation_mask",
     "is_trainable_parameter_name", "load_model",
+    "disable_autocast_for_peft_lora",
 ]

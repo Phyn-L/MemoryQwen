@@ -28,7 +28,6 @@ def reconstruction_loss(predicted,target,mask=None,cosine_weight=0.1,mode="mse_c
     if mask.ndim == 2: mask=mask.unsqueeze(1).expand_as(e)
     mask=mask.to(e.device,dtype=e.dtype)
     # Reduce token/layer loss per context first, then average contexts.
-    context_mask = mask.any(dim=1) if mask.ndim == 3 else mask
     mse_per_context = (e * mask).sum(dim=tuple(range(1, e.ndim))) / mask.sum(dim=tuple(range(1, e.ndim))).clamp_min(1)
     mse = mse_per_context.mean()
     cosine=1-F.cosine_similarity(predicted,target,dim=-1)

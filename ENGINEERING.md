@@ -9,7 +9,7 @@
 | 问题 | 状态 |
 | --- | --- |
 | §1 O(B·T²) Python mask | **已修**（`src/model.py` 已换成向量化实现，`torch.equal` 与旧实现逐元素相等） |
-| §2 gradient_checkpointing 未接线 | **不改**：prefix KV 复用是 context-level 聚合的设计前提，与 HF checkpointing 天然冲突（见下） |
+| §2 gradient_checkpointing 未接线 | **不改**（配置键已删除，不再有"设了不生效"的陷阱）：prefix KV 复用是 context-level 聚合的设计前提，与 HF checkpointing 天然冲突（见下） |
 | §3 checkpoint `strict=False` | **已修**：保留 `strict=False`（冻结 backbone 本来就不存），补上「可训练子集必须完整加载」的校验 |
 | §4 AR 重复跑 TF | **已修**：不再重复跑 TF，且同一 context 的多个 QA 已合并成一个 batch 做 prefill |
 | §5 Accelerator 与 grad_accumulation 不一致 | **已修**：gradient accumulation 机制整体切除，每个 DataLoader batch 一次 optimizer step |
@@ -175,8 +175,10 @@ def build_continuation_mask(question_mask, answer_mask, memory_length, dtype):
 
 ### 现象
 
-- `ModelConfig.gradient_checkpointing: bool = False` 定义在 `utils/config.py:25`，
+- `ModelConfig.gradient_checkpointing: bool = False` 曾经定义在 `utils/config.py`，
   **`load_model` 从来没有读过它**，代码里也没有任何 `gradient_checkpointing_enable()`。
+  该配置键已在死配置清理中删除（`encoder_heads` / `freeze_backbone` / `test_max_samples`
+  同样是没有任何读取方的残留），所以现在连"设了却不生效"的陷阱也不存在了。
 - 但直接打开会直接报错。实测：
 
   ```

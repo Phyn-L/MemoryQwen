@@ -7,7 +7,6 @@ model:
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 memory:
   memory_length: 8
-  encoder_heads: 8
   decoder_hidden_size: 256
   decoder_ffn_ratio: 2
   decoder_heads: 8

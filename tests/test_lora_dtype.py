@@ -190,6 +190,16 @@ def test_trainable_parameters_are_fp32_and_flagged():
     assert any(name.startswith("decoders.") for name in trainable)
 
 
+def test_trainable_parameter_dtypes_counts_by_requires_grad():
+    """The introspector must agree with the single trainable-name rule."""
+    model = _fake_metaloRA()
+    for name, parameter in model.named_parameters():
+        parameter.requires_grad = is_trainable_parameter_name(name)
+    counts = model.trainable_parameter_dtypes()
+    assert set(counts) == {"torch.float32"}, counts
+    assert sum(counts.values()) == len([p for p in model.parameters() if p.requires_grad])
+
+
 def test_use_peft_true_without_peft_raises_or_uses_peft():
     try:
         import peft  # noqa: F401

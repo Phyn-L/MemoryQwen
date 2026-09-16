@@ -8,7 +8,6 @@ model:
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 memory:
   memory_length: 8
-  encoder_heads: 8
   decoder_hidden_size: 256
   decoder_ffn_ratio: 2
   decoder_heads: 8
@@ -36,7 +35,6 @@ data:
   max_answer_tokens: 128
   train_max_samples: null
   validation_max_samples: 2000
-  test_max_samples: 1000
   filter_long_context: true
   filter_no_qa: true
   sortish_bucket_multiplier: 50

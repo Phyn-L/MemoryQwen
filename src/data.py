@@ -37,10 +37,6 @@ class ContextRecord:
     context_token_length: int | None = None
 
 
-# Compatibility alias for callers that imported the old flat record.
-Record = QARecord
-
-
 def render_question(tokenizer, question: str, use_chat_template: bool = False, enable_thinking: bool = False) -> str:
     if not use_chat_template or not getattr(tokenizer, "apply_chat_template", None):
         return question
@@ -129,9 +125,6 @@ class AggregatedContextDataset(Dataset):
         row = self.dataset[index]
         pairs = tuple(QARecord(str(q["question"]), str(q["answer"]), str(q.get("dataset", row.get("dataset", ""))), str(q.get("context_id", row.get("context_id", "")))) for q in row["qa_pairs"])
         return ContextRecord(str(row["context"]), pairs, str(row.get("dataset", "")), str(row.get("context_id", "")))
-
-
-AggregatedQADataset = AggregatedContextDataset
 
 
 class SortishSampler(Sampler[int]):
