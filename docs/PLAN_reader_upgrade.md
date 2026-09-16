@@ -225,6 +225,24 @@ C3 (resampler)  ← 独立，但建议放在 reader 修好之后（否则分不�
 
 计划提交序列：`docs(plan)` → `A1` → `C2` → `B2` → `B1` → `C3`（可选：`chore(smoke)` 冒烟脚本收尾）。
 
+**实际提交（全部落在 4x4090 的 `/data/lz/MemoryQwen`，基线 `9d62f53`，用户未提交的 config 改动全程保持未暂存）**：
+
+| commit | 内容 | 测试数 |
+|---|---|---|
+| `0074080` | docs(plan) 本文件 | 46 |
+| `4565919` | A1 tied 词表头（VocabularyHead + config + 两个测试文件） | 65 |
+| `5ccfbda` | C2 slot 初始化 + memory↔memory 因果注意力 | 75 |
+| `b00add4` | B2 memory 前缀 AE（=500x eq.1）+ 免费 teacher logits | 87 |
+| `8d1aa1d` | B1 KL 蒸馏（context 位置，teacher 来自 encoder pass 的 context 行） | 97 |
+| `7286c85` | C3 问题期 resampler（256 维瓶颈，2.63M 参数） | 108 |
+| `7558cae` | logging：训练侧 ae_loss/distill_loss 进 teacher-forced 损失面板 | 109 |
+
+**实现完成后新增/修正的两处计划外内容**：
+1. `docs/PLAN_reader_upgrade.md` B2 节记录的"融合前向"约束（collate 展平 QA 行 → 单次前向省不掉，改为免费拿 teacher logits）。
+2. `7558cae`：B1/B2 的损失只在训练时计算，evaluator 不产生它们，所以仅改 `LOSS_KEYS` 永远不会被记录（端到端冒烟实测发现）；`eval_log_payloads` 增加可选 `train_metrics` 后，wandb 里可见 `val_teacher_forced/ae_loss` 与 `val_teacher_forced/distill_loss`。
+
+**仍未完成（阻塞于资源）**：GPU 上的端到端训练冒烟（真数据、真 1.7B、小 batch、约 30 步）。4x4090 四张卡在实现期间被其他任务占满（每卡 ~20/24 GB、利用率 40–100%），未打扰；已用"真实 1.7B + 真实文本的 CPU 冒烟"和"tiny Qwen3 + 完整 `scripts/train.py` 的端到端 CPU 冒烟（五项功能全开、TF+AR 评测各一次）"代替。等有空闲卡时补跑。
+
 ## 5. 端到端冒烟方案（每项之后都跑）
 
 - 只用 1 张空闲卡：`CUDA_VISIBLE_DEVICES=0 NUM_PROCESSES=1`（先用 `nvidia-smi` 确认该卡空闲，避免干扰他人任务）。
