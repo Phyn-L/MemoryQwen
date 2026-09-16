@@ -8,16 +8,18 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-import fcntl
 import torch
 from torch.utils.data import Dataset, Sampler
 from tqdm.auto import tqdm
+
+from utils.ddp import is_main_process
 
 from . import dataset_cache
 
 
 def _progress_enabled() -> bool:
-    return os.environ.get("RANK", "0") in {"0", "-1"}
+    """Only the main process draws progress bars; one shared rank check, not a second one."""
+    return is_main_process()
 
 
 @dataclass(frozen=True)
@@ -149,16 +151,13 @@ class SortishSampler(Sampler[int]):
     def _load_or_build_lengths(self, tokenizer, use_chat_template, enable_thinking, cache_dir, metadata):
         if cache_dir is None: return self._build_lengths(tokenizer, use_chat_template, enable_thinking)
         cache_dir.mkdir(parents=True, exist_ok=True); path = cache_dir / "sortish_lengths.json"
-        with (cache_dir / "sortish_lengths.lock").open("w") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                if path.exists():
-                    try:
-                        cached = json.loads(path.read_text()); lengths = cached.get("lengths")
-                        if cached.get("metadata", {}).get("fingerprint") == metadata["fingerprint"] and isinstance(lengths, list) and len(lengths) == len(self.dataset): return lengths
-                    except (OSError, ValueError, TypeError, json.JSONDecodeError): pass
-                lengths = self._build_lengths(tokenizer, use_chat_template, enable_thinking); tmp = path.with_suffix(".tmp"); tmp.write_text(json.dumps({"metadata": metadata, "lengths": lengths})); os.replace(tmp, path); return lengths
-            finally: fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        with dataset_cache.file_lock(cache_dir / "sortish_lengths.lock"):
+            if path.exists():
+                try:
+                    cached = json.loads(path.read_text()); lengths = cached.get("lengths")
+                    if cached.get("metadata", {}).get("fingerprint") == metadata["fingerprint"] and isinstance(lengths, list) and len(lengths) == len(self.dataset): return lengths
+                except (OSError, ValueError, TypeError, json.JSONDecodeError): pass
+            lengths = self._build_lengths(tokenizer, use_chat_template, enable_thinking); tmp = path.with_suffix(".tmp"); tmp.write_text(json.dumps({"metadata": metadata, "lengths": lengths})); os.replace(tmp, path); return lengths
 
     def _rebuild(self):
         size = max(self.batch_size, self.batch_size * self.bucket_multiplier); order = sorted(range(len(self.lengths)), key=self.lengths.__getitem__); self.buckets = []
@@ -217,5 +216,8 @@ def collate_context_records(rows, tokenizer, max_context_tokens=2048, max_questi
     return {"context_ids": c.input_ids, "context_mask": c.attention_mask.bool(), "question_ids": q.input_ids, "question_mask": q.attention_mask.bool(), "answer_ids": a.input_ids, "answer_mask": a.attention_mask.bool(), "labels": labels, "qa_context_indices": torch.tensor(mapping, dtype=torch.long), "records": sampled}
 
 
-def collate_fn(rows, tokenizer, max_context_tokens=2048, max_question_tokens=128, max_answer_tokens=128, append_eos=True, use_chat_template=False, chat_template_enable_thinking=False, qa_per_context=4, sample_qa=True, question_padding_side="right", eos_mode="overwrite"):
-    return collate_context_records(rows, tokenizer, max_context_tokens, max_question_tokens, max_answer_tokens, append_eos, use_chat_template, chat_template_enable_thinking, qa_per_context, sample_qa, question_padding_side, eos_mode)
+# Public name for the collate. It used to be a pass-through wrapper that re-declared all
+# twelve parameters and defaults -- which is exactly how a default silently drifts away
+# from the real signature (the wrapper still said question_padding_side="right" /
+# eos_mode="overwrite" long after the real defaults became "left" / "append").
+collate_fn = collate_context_records

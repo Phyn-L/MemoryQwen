@@ -21,7 +21,13 @@ def build_metadata(files, *, split, max_context_tokens, filter_long_context, fil
     return payload
 
 @contextmanager
-def _lock(path: Path) -> Iterator[None]:
+def file_lock(path: Path) -> Iterator[None]:
+    """Exclusive advisory lock on ``path`` (the file is created if missing).
+
+    Shared by both cache writers (the dataset cache here and the sortish-length cache in
+    ``src/data.py``) so they use one locking protocol instead of two copies of the same
+    three ``fcntl`` calls.
+    """
     with path.open("w") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         try: yield
@@ -53,7 +59,7 @@ def save_records(cache_dir: Path, metadata: dict[str, Any], records) -> None:
 
 def cached_load(cache_dir: Path, metadata: dict[str, Any], build, *, verbose=True) -> Dataset:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    with _lock(cache_dir / "records.lock"):
+    with file_lock(cache_dir / "records.lock"):
         ds = load_records(cache_dir, metadata)
         if ds is not None:
             if verbose:

@@ -144,6 +144,11 @@ def build_block_causal_mask(
     synchronisation and a separate kernel launch per row; at context length 2048
     that cost ~490 ms per call, more than a whole training step. Both forms produce
     identical masks.
+
+    With an empty context this builder's question/answer rows are exactly
+    :func:`build_continuation_mask`. The two are kept separate (deriving one from the
+    other measured ~30% slower on the per-step hot path) and pinned together by
+    ``tests/test_masks.py``.
     """
     context_mask = context_mask.bool(); question_mask = question_mask.bool(); answer_mask = answer_mask.bool()
     bsz, context_len = context_mask.shape
@@ -190,6 +195,9 @@ def build_continuation_mask(
     """Mask for question/answer tokens attending to a memory-only cache.
 
     Vectorised form of the original row-by-row builder; both produce identical masks.
+    This is exactly :func:`build_block_causal_mask` with an empty context, sliced to drop
+    the memory query rows -- ``tests/test_masks.py`` asserts that equivalence so the two
+    cannot drift apart.
     """
     question_mask, answer_mask = question_mask.bool(), answer_mask.bool()
     bsz, question_length = question_mask.shape
@@ -316,7 +324,9 @@ class MetaLoRA(nn.Module):
             cfg = LoraConfig(r=rank, lora_alpha=alpha, lora_dropout=dropout, bias="none", target_modules=list(self.target_modules), task_type="CAUSAL_LM")
             model = get_peft_model(qwen, cfg)
             for name, p in model.named_parameters():
-                p.requires_grad = ("lora_A" in name or "lora_B" in name)
+                # Same rule as everywhere else: is_trainable_parameter_name is the single
+                # source of truth, so adding a trainable module cannot miss this branch.
+                p.requires_grad = is_trainable_parameter_name(name)
             disable_autocast_for_peft_lora(model)
             return model
         for p in qwen.parameters():

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import math
-import os
 
 import torch
 import torch.distributed as dist
 from tqdm.auto import tqdm
+
+from utils.ddp import is_main_process
 
 from .losses import combine_losses, context_lm_loss, qa_loss, reconstruction_loss
 from .metrics import qa_metrics
@@ -89,7 +90,7 @@ class Evaluator:
         samples = 0
         first_token_hits = 0
         qa_weight = context_weight = 0
-        enabled = os.environ.get("RANK", "0") in {"0", "-1"}
+        enabled = is_main_process()
         for batch in tqdm(
             loader,
             total=len(loader),
@@ -197,7 +198,7 @@ class Evaluator:
         sums = {"em": 0.0, "f1": 0.0, "rouge_l": 0.0, "precision": 0.0}
         samples = 0
         first_token_hit = 0
-        enabled = os.environ.get("RANK", "0") in {"0", "-1"}
+        enabled = is_main_process()
         for batch in tqdm(
             loader,
             total=len(loader),

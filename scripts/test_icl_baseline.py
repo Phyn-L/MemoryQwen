@@ -25,6 +25,7 @@ from src.icl_baseline import (
     render_prompt,
     sample_jsonl,
 )
+from utils.config import dtype_from_name
 from utils.ddp import barrier, init_distributed, is_main_process
 
 DEFAULT_MODEL = "/data/lz/hf_cache/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
@@ -98,11 +99,8 @@ def seed_everything(seed: int, rank: int):
 
 
 def load_model(args, device):
-    dtype = {
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-        "float32": torch.float32,
-    }[args.dtype]
+    # One name->torch.dtype map for the whole repo (utils.config.dtype_from_name).
+    dtype = dtype_from_name(args.dtype)
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     tokenizer.padding_side = "left"
     tokenizer.truncation_side = "left"

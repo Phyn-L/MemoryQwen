@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
 from pathlib import Path
-import re
 import random
 
 import torch
@@ -11,7 +9,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from utils.config import TrainConfig, dtype_from_name
-from src.data import AggregatedContextDataset, SortishSampler, collate_fn
+from src.data import SortishSampler
 from src.evaluator import Evaluator
 from src.losses import (
     combine_losses,
@@ -21,22 +19,14 @@ from src.losses import (
     reconstruction_loss,
 )
 from src.model import load_model
+from src.pipeline import (
+    make_collate,
+    make_context_dataset,
+    model_cache_dir,
+    new_run_name,
+    resolve_split_limit,
+)
 from utils import CheckpointManager, build_optimizer, build_scheduler
-
-
-def _model_run_label(model_path: str) -> str:
-    match = re.search(r"Qwen(?:3)?[-_]?([0-9]+(?:\.[0-9]+)?)[Bb]", model_path, re.IGNORECASE)
-    if match:
-        return f"Qwen{match.group(1)}B"
-    return "Qwen"
-
-
-def _new_run_name(model_path: str) -> str:
-    return f"{_model_run_label(model_path)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-
-def _model_cache_dir(model_path: str) -> Path:
-    return Path("outputs") / _model_run_label(model_path)
 
 
 def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> None:
@@ -46,7 +36,7 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
         cfg.logging.wandb_run_name = cfg.logging.wandb_run_name or run_dir.name
         return
     is_main = accelerator is None or accelerator.is_main_process
-    run_name = _new_run_name(cfg.model.name_or_path) if is_main else None
+    run_name = new_run_name(cfg.model.name_or_path) if is_main else None
     num_processes = accelerator.num_processes if accelerator is not None else 1
     if num_processes > 1:
         names = [run_name]
@@ -88,53 +78,28 @@ def main() -> None:
         model.to(device)
 
     _configure_run_paths(cfg, accelerator, args.resume)
-    model_cache_dir = _model_cache_dir(cfg.model.name_or_path)
+    cache_dir = model_cache_dir(cfg.model.name_or_path)
 
-    def make_dataset(split: str):
-        names = getattr(cfg.data, f"{split}_datasets") or cfg.data.dataset
-        split_name = getattr(cfg.data, f"{split}_split")
-        limit = getattr(cfg.data, f"{split}_max_samples")
-        if limit is None and split == "train":
-            limit = cfg.data.max_samples
-        return AggregatedContextDataset(
-            cfg.data.root, names, split_name, tokenizer,
-            cfg.data.max_context_tokens, limit,
-            cfg.data.filter_long_context, cfg.data.filter_no_qa, allow_empty=(split != "train"),
-            cache_dir=model_cache_dir if cfg.data.cache_dataset else None,
-        )
-
-    # Keyword arguments only: the collate signature grew, and silently shifted
-    # positional arguments would change the target format without any error.
-    def make_collate(sample_qa):
-        return lambda rows: collate_fn(
-            rows, tokenizer,
-            max_context_tokens=cfg.data.max_context_tokens,
-            max_question_tokens=cfg.data.max_question_tokens,
-            max_answer_tokens=cfg.data.max_answer_tokens,
-            append_eos=cfg.data.append_eos,
-            use_chat_template=cfg.data.use_chat_template,
-            chat_template_enable_thinking=cfg.data.chat_template_enable_thinking,
-            qa_per_context=cfg.data.qa_per_context,
-            sample_qa=sample_qa,
-            question_padding_side=cfg.data.question_padding_side,
-            eos_mode=cfg.data.eos_mode,
-        )
-
-    train_collate = make_collate(True)
-    train_dataset = make_dataset("train")
+    train_collate = make_collate(cfg, tokenizer, sample_qa=True)
+    train_dataset = make_context_dataset(
+        cfg, "train", tokenizer, limit=resolve_split_limit(cfg, "train"),
+    )
     sampler = SortishSampler(
         train_dataset, tokenizer, cfg.training.batch_size,
         cfg.data.sortish_bucket_multiplier, cfg.training.seed, cfg.data.use_chat_template,
         cfg.data.chat_template_enable_thinking,
-        model_cache_dir if cfg.data.cache_sortish_lengths else None,
+        cache_dir if cfg.data.cache_sortish_lengths else None,
     )
     train_loader = DataLoader(
         train_dataset, batch_size=cfg.training.batch_size, sampler=sampler, collate_fn=train_collate,
     )
-    validation_dataset = make_dataset("validation")
+    validation_dataset = make_context_dataset(
+        cfg, "validation", tokenizer, limit=resolve_split_limit(cfg, "validation"),
+        allow_empty=True,
+    )
     validation_loader = DataLoader(
         validation_dataset, batch_size=cfg.training.batch_size,
-        shuffle=False, collate_fn=make_collate(False),
+        shuffle=False, collate_fn=make_collate(cfg, tokenizer, sample_qa=False),
     )
     evaluator = Evaluator(tokenizer, cfg)
     effective_loader_len = len(train_loader)
