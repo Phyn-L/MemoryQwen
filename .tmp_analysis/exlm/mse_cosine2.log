@@ -1,17 +1,0 @@
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 6908.02it/s]
-Reusing Hugging Face dataset cache: outputs/Qwen1.7B/dataset_cache/train-cd236eef3c14c676/hf_dataset (contexts=18891, qa_pairs=174420)
-mode=mse_cosine trainable=67.58M head=no
-  step    0 qa= 8.5762 aux= 0.8360 (1s)
-  step   10 qa=13.6792 aux= 0.7544 (6s)
-  step   20 qa= 6.8457 aux= 0.6767 (11s)
-  step   30 qa= 5.9392 aux= 0.6082 (16s)
-  step   40 qa= 8.1119 aux= 0.5364 (22s)
-  step   50 qa= 5.5923 aux= 0.4920 (27s)
-  step   60 qa= 4.9575 aux= 0.4183 (32s)
-  step   70 qa= 1.5168 aux= 0.4043 (37s)
-  step   80 qa= 4.9062 aux= 0.3998 (42s)
-  step   90 qa= 3.3949 aux= 0.3666 (47s)
-  step  100 qa= 2.9413 aux= 0.3631 (52s)
-  step  110 qa= 1.9254 aux= 0.4067 (57s)
-  step  119 qa= 2.9793 aux= 0.3579 (62s)
-RESULT mode=mse_cosine steps=13 time=62.1s per_step=4.780s peak_gib=6.88 first_aux=0.8360 last_aux=0.3579 first_qa=8.5762 last_qa=2.9793

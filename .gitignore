@@ -11,3 +11,6 @@ wandb/
 *.safetensors
 .idea/
 .vscode/
+
+# scratch/experiment artifacts: kept on disk, never versioned
+.tmp_analysis/

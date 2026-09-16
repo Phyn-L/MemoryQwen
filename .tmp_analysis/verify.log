@@ -1,18 +1,0 @@
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 8596.58it/s]
-ckpt step 20000
-==========================================================================================
-BUG 1: question padding
-batch of 8 (questions right-padded)        project F1=0.2906 official F1=0.3056 first-token acc=0.030  (rows with padded question=170/200)  8s
-batch of 1 (no question padding)           project F1=0.4626 official F1=0.4742 first-token acc=0.320  (rows with padded question=0/200)  29s
-------------------------------------------------------------------------------------------
-controlled test: identical row, only the batch composition changes
-short-question row: q_tokens=6   long-question row: q_tokens=26
-  batched ALONE      -> first answer token pred='in' gold='inf' hit=False
-  batched WITH long  -> first answer token pred='No' gold='inf' hit=False
-  (the row itself is identical; only the batch padding changed)
-  autoregressive     -> generated='infinite'
-==========================================================================================
-BUG 2: evaluation.max_new_tokens vs autoregressive F1
-max_new_tokens= 32  project F1=0.3483 official F1=0.3806  mean generated tokens=5.4  57s
-max_new_tokens= 64  project F1=0.3483 official F1=0.3806  mean generated tokens=5.5  59s
-max_new_tokens=128  project F1=0.3483 official F1=0.3806  mean generated tokens=5.8  62s

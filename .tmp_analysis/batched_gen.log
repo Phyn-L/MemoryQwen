@@ -1,26 +1,0 @@
-Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 7314.28it/s]
-checkpoint step 20000
-contexts=60 qa_rows=505 max_new=32
-row_by_row   162.1s   official F1=0.3034  EM=0.1861
-grouped       48.9s   official F1=0.2980  EM=0.1782
-identical outputs: 459/505 (90.9%)
-  row 7
-    row_by_row='152'
-    grouped   ='1546'
-    gold      ='2:45 a.m'
-  row 85
-    row_by_row='Gender'
-    grouped   ='High school education'
-    gold      ='period of compression'
-  row 105
-    row_by_row='Because Jochi was a Muslim'
-    grouped   ='Because Jochi was in league with the Muslims'
-    gold      ='Sultan Muhammad was already dead in 1223'
-  row 108
-    row_by_row='Poznań'
-    grouped   ='Poznańsk'
-    gold      ='Pole Mokotowskie'
-  row 113
-    row_by_row='Poznań'
-    grouped   ='Poznańsk'
-    gold      ='Pole Mokotowskie'
