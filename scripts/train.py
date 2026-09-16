@@ -19,6 +19,7 @@ from src.losses import (
     reconstruction_loss,
 )
 from src.model import load_model
+from src.metrics import METRIC_KEYS
 from src.pipeline import (
     make_collate,
     make_context_dataset,
@@ -225,11 +226,11 @@ def main() -> None:
                 )
                 if run and is_main:
                     run.log({f"val/autoregressive/{k}": v for k, v in metrics.items()}, step=step)
-                    # Headline scalars: autoregressive F1 is the number to compare with an
+                    # Headline scalars: the *_official keys are the ones to compare with an
                     # ICL baseline; first_token_em is the retrieval diagnostic.
                     run.log(
                         {f"val/primary/{k}": metrics[k]
-                         for k in ("em", "f1", "rouge_l", "precision", "first_token_em")
+                         for k in (*METRIC_KEYS, "first_token_em")
                          if k in metrics},
                         step=step,
                     )

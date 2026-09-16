@@ -20,6 +20,17 @@ import re
 import string
 
 
+# The four answer-level metrics, in the order every consumer must use them. The
+# distributed reduction flattens them into a list, so a key appearing in a different
+# order on different ranks would silently mix values up; keeping the canonical order here
+# (and asserting it in tests/test_metrics.py) is what makes that impossible.
+LEGACY_METRIC_KEYS: tuple[str, ...] = ("em", "f1", "rouge_l", "precision")
+OFFICIAL_SUFFIX = "_official"
+METRIC_KEYS: tuple[str, ...] = LEGACY_METRIC_KEYS + tuple(
+    f"{key}{OFFICIAL_SUFFIX}" for key in LEGACY_METRIC_KEYS
+)
+
+
 def normalize_text(value) -> str:
     """Lowercase, replace non-alphanumerics with spaces, collapse whitespace."""
     return " ".join(re.sub(r"[^a-z0-9 ]", " ", str(value).lower()).split())
@@ -95,3 +106,26 @@ def qa_metrics(prediction, reference, normalize=normalize_text) -> dict[str, flo
         "rouge_l": rouge_l(prediction, reference, normalize),
         "precision": unigram_precision(prediction, reference, normalize),
     }
+
+
+def qa_metrics_official(prediction, reference) -> dict[str, float]:
+    """The same metrics under the official SQuAD normalizer, suffixed ``_official``."""
+    return {
+        f"{key}{OFFICIAL_SUFFIX}": value
+        for key, value in qa_metrics(prediction, reference, normalize_official).items()
+    }
+
+
+def qa_metrics_all(prediction, reference) -> dict[str, float]:
+    """Both normalizations at once, in :data:`METRIC_KEYS` order.
+
+    The training-time evaluator has always scored with :func:`normalize_text` (which keeps
+    articles), while the published ICL baseline scores with :func:`normalize_official`.
+    Reporting both means existing run metrics keep their meaning *and* the baseline
+    comparison is exact, instead of asking the reader to assume the two rulers agree --
+    they do not: ``prediction="a cat", reference="cat"`` is ``em=0, f1=0.667`` under the
+    legacy ruler and ``em=1, f1=1`` under the official one.
+    """
+    values = qa_metrics(prediction, reference)
+    values.update(qa_metrics_official(prediction, reference))
+    return {key: values[key] for key in METRIC_KEYS}

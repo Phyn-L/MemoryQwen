@@ -136,7 +136,7 @@ after the last real answer token. `overwrite` remains available to reproduce old
 
 `Evaluator.teacher_forced` feeds the gold answer tokens as *inputs*, so every answer
 position after the first can be produced by continuing the gold prefix it already
-attends to. Its `em`/`f1`/`rouge_l`/`bleu` therefore reward lexical continuation more
+attends to. Its `em`/`f1`/`rouge_l`/`precision` therefore reward lexical continuation more
 than retrieval, and can even come out below the autoregressive score. Predictions from a
 trained checkpoint:
 
@@ -162,18 +162,44 @@ already runs it.
 
 Because the autoregressive number is the only one that is comparable with an ICL
 baseline, training must actually measure it: `evaluation.autoregressive_every` also
-writes a `val/primary/{em,f1,rouge_l,bleu,first_token_em}` mirror of the autoregressive
-result, and `evaluation.max_new_tokens` is 32 to match
-`scripts/test_icl_baseline.py --squad-max-new-tokens 32`. Setting
+writes a `val/primary/<metric>` mirror of the autoregressive result for every key in
+`src.metrics.METRIC_KEYS` plus `first_token_em`, and `evaluation.max_new_tokens` is 32 to
+match `scripts/test_icl_baseline.py --squad-max-new-tokens 32`. Setting
 `autoregressive_every` to a huge number is how the `pgw1382s` run ended up with no
 trustworthy score at all.
 
-Note that `_answer()` keeps only the first non-empty reference answer while the ICL
-baseline reduces over all references with official SQuAD normalization; comparing the two
-without aligning the metric overstates the gap by roughly 6 F1 points on SQuAD dev.
-Scoring the ICL baseline with `src/metrics.qa_metrics(prediction, references[0])` gives
-0.6810 instead of the 0.7451 reported by `src/icl_baseline.example_metrics`, which
-reduces with `max` over all references.
+### Two rulers: which keys to compare with the ICL baseline
+
+Every metric is reported twice, in `src.metrics.METRIC_KEYS` order:
+
+| key | normalizer | use |
+| --- | --- | --- |
+| `em` `f1` `rouge_l` `precision` | `normalize_text` (lowercase, non-alphanumerics to spaces, **articles kept**) | the training-time ruler, unchanged since the first run, so historical numbers stay comparable |
+| `em_official` `f1_official` `rouge_l_official` `precision_official` | `normalize_official` (lowercase, punctuation stripped, **articles dropped**) | the official SQuAD ruler — **these are the ones to compare against `scripts/test_icl_baseline.py`** |
+
+The distinction is not cosmetic: for `prediction="a cat"`, `reference="cat"` the legacy
+ruler gives `em=0`, `f1=0.667`, the official ruler `em=1`, `f1=1`. `tests/test_metrics.py`
+pins both directions — the `_official` keys equal `src.icl_baseline.example_metrics` for a
+single reference, and the unsuffixed keys are bit-identical to what they were before the
+official keys existed.
+
+Three differences between the two harnesses matter, and only the first is closed:
+
+1. **Normalization** — closed by the `_official` keys above.
+2. **Reference reduction.** The evaluator scores against `QARecord.answer`, which
+   `src/data.py:_answer()` fills with the *first non-empty* reference, while
+   `src/icl_baseline.example_metrics` takes `max` over all references. The aggregated data
+   really does carry several: `aggregated/squad/validation.jsonl` holds 16498 answered QA
+   pairs, of which 12728 have 3 references, 2092 have 5 and 1384 have 4 (a further 5945
+   pairs have none and are dropped by `filter_no_qa`). On this split the evaluator sees one
+   reference where the baseline sees up to six, which is the ~6 F1 gap previously noted
+   here. Closing it means carrying every reference through the cached dataset
+   (`QARecord`, a `dataset_cache.CACHE_VERSION` bump, the collate, the evaluator) — a
+   data-pipeline change rather than a scoring change, so it is left as a separate decision.
+3. The harnesses also read different files: the evaluator uses
+   `data.root/squad/<split>.jsonl` from the aggregated tree, while the baseline defaults to
+   `/data/lz/contexts/standardized/squad/validation-v1.1.jsonl` (10570 questions). Compare
+   `_official` keys only when both point at the same split.
 
 ### Regression check for the two target-format fixes
 

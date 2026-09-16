@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 from utils.ddp import is_main_process
 
 from .losses import combine_losses, context_lm_loss, qa_loss, reconstruction_loss
-from .metrics import qa_metrics
+from .metrics import METRIC_KEYS, qa_metrics_all
 
 
 def _distributed_sum(values, device):
@@ -86,7 +86,7 @@ class Evaluator:
     def teacher_forced(self, model, loader, device):
         model.eval()
         qa_sum = reconstruction_sum = 0.0
-        em = f1 = rouge_l = precision = 0.0
+        totals = {key: 0.0 for key in METRIC_KEYS}
         samples = 0
         first_token_hits = 0
         qa_weight = context_weight = 0
@@ -139,22 +139,19 @@ class Evaluator:
                     text = self.tokenizer.decode(
                         predictions[i][active].tolist(), skip_special_tokens=True
                     )
-                    metrics = qa_metrics(text, record.answer)
-                    em += metrics["em"]
-                    f1 += metrics["f1"]
-                    rouge_l += metrics["rouge_l"]
-                    precision += metrics["precision"]
+                    metrics = qa_metrics_all(text, record.answer)
+                    for key, value in metrics.items():
+                        totals[key] += value
                     samples += 1
         model.train()
-        (
-            qa_sum, reconstruction_sum, em, f1, rouge_l, precision, first_token_hits,
-            qa_weight, context_weight, samples,
-        ) = _distributed_sum(
-            [
-                qa_sum, reconstruction_sum, em, f1, rouge_l, precision, first_token_hits,
-                qa_weight, context_weight, samples,
-            ],
-            device,
+        qa_sum, reconstruction_sum, first_token_hits, qa_weight, context_weight, samples = (
+            _distributed_sum(
+                [qa_sum, reconstruction_sum, first_token_hits, qa_weight, context_weight, samples],
+                device,
+            )
+        )
+        metric_totals = dict(
+            zip(METRIC_KEYS, _distributed_sum([totals[key] for key in METRIC_KEYS], device))
         )
         qa_value = qa_sum / max(1, qa_weight)
         reconstruction_value = reconstruction_sum / max(1, context_weight)
@@ -167,12 +164,9 @@ class Evaluator:
             "ppl": math.exp(min(qa_value, 20)),
             "reconstruction_loss": reconstruction_value,
             "loss": total_value,
-            "em": em / max(1, samples),
-            "f1": f1 / max(1, samples),
-            "rouge_l": rouge_l / max(1, samples),
-            "precision": precision / max(1, samples),
+            **{key: value / max(1, samples) for key, value in metric_totals.items()},
             # Not an answer-quality score: teacher forcing feeds the gold answer
-            # prefix, so em/f1/rouge_l/precision here mostly measure lexical continuation.
+            # prefix, so every metric here mostly measures lexical continuation.
             # Treat first_token_em as the retrieval signal and prefer the
             # autoregressive numbers as the headline result.
             "first_token_em": first_token_hits / max(1, samples),
@@ -182,10 +176,13 @@ class Evaluator:
     def autoregressive(self, model, loader, device, include_teacher_metrics=True, max_qa=None):
         """Headline evaluation: every answer token is produced by the model itself.
 
-        Unlike :meth:`teacher_forced` this never feeds the gold answer back, so the
-        em/f1/rouge_l/precision returned here are the numbers that should be compared
-        with an ICL baseline.  ``include_teacher_metrics`` additionally reports the
-        teacher-forced ppl/qa_loss/reconstruction_loss at the cost of a second pass.
+        Unlike :meth:`teacher_forced` this never feeds the gold answer back, so these are
+        the numbers to quote. Each metric is reported twice: the unsuffixed key keeps the
+        training-time normalizer (articles preserved) so historical runs stay comparable,
+        and the ``_official`` key uses the official SQuAD normalizer -- that is the one to
+        compare against ``scripts/test_icl_baseline.py``, which scores the same way.
+        ``include_teacher_metrics`` additionally reports the teacher-forced
+        ppl/qa_loss/reconstruction_loss at the cost of a second pass.
 
         ``max_qa`` caps how many QA rows *this rank* decodes.  Decoding is orders of
         magnitude more expensive than one teacher-forced forward, and a rank that stays
@@ -195,7 +192,7 @@ class Evaluator:
         ``max_qa * world_size``.
         """
         model.eval()
-        sums = {"em": 0.0, "f1": 0.0, "rouge_l": 0.0, "precision": 0.0}
+        sums = {key: 0.0 for key in METRIC_KEYS}
         samples = 0
         first_token_hit = 0
         enabled = is_main_process()
@@ -247,22 +244,19 @@ class Evaluator:
                     and row[0] == gold_token
                     and row[0] != self.tokenizer.pad_token_id
                 )
-                metrics = qa_metrics(
+                metrics = qa_metrics_all(
                     self.tokenizer.decode(
                         generated[i].tolist(), skip_special_tokens=True
                     ),
                     record.answer,
                 )
-                for key in sums:
-                    sums[key] += metrics[key]
+                for key, value in metrics.items():
+                    sums[key] += value
                 samples += 1
         model.train()
-        sums["em"], sums["f1"], sums["rouge_l"], sums["precision"], first_token_hit, samples = (
-            _distributed_sum(
-                [sums["em"], sums["f1"], sums["rouge_l"], sums["precision"],
-                 first_token_hit, samples],
-                device,
-            )
+        first_token_hit, samples = _distributed_sum([first_token_hit, samples], device)
+        sums = dict(
+            zip(METRIC_KEYS, _distributed_sum([sums[key] for key in METRIC_KEYS], device))
         )
         result = {key: value / max(1, samples) for key, value in sums.items()}
         # Same retrieval diagnostic as in teacher_forced, but measured on tokens the
