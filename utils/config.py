@@ -21,6 +21,14 @@ class ModelConfig:
     lora_rank: int = 8
     lora_alpha: float = 16.0
     lora_dropout: float = 0.0
+    # LoRA implementation. "false" (default) uses the in-repo StaticLoRALinear,
+    # which disables autocast at the module boundary so float32 adapters really
+    # compute in float32. "true" uses PEFT instead; it is opt-in because it is a
+    # second implementation that needs its own autocast handling
+    # (see src/model.py:disable_autocast_for_peft_lora) and is not covered by the
+    # same tests. Leaving it unset keeps a run independent of whether peft is
+    # installed.
+    use_peft: bool = False
     target_modules: tuple[str, ...] = (
         "q_proj", "k_proj", "v_proj", "o_proj",
         "gate_proj", "up_proj", "down_proj",

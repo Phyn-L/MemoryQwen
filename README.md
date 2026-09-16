@@ -25,6 +25,10 @@ pip install -e '.[train]'
 PYTHONPATH=. bash scripts/train.sh
 ```
 
+`.[train]` installs `peft`, but whether `peft` is present no longer decides which LoRA
+implementation runs: `model.use_peft` does, and it defaults to `false`. See
+[LoRA backend](#lora-backend).
+
 Each fresh run is named like `Qwen1.7B_20260915_173045`. This name is used for
 the W&B run and checkpoint directory `outputs/<run-name>/`. Reusable dataset and
 sortish caches are stored separately by model under `outputs/Qwen1.7B/`, so new
@@ -269,14 +273,37 @@ the KV cache and `memory_cache` are always bfloat16. Only the parameter dtype ch
    return base_out + delta.to(base_dtype)
    ```
 
-   This is the pattern PEFT uses (`previous_dtype = x.dtype` … cast back), so the two LoRA
-   implementations stay behaviourally equivalent.
+   This is the same dtype bookkeeping PEFT performs (`previous_dtype = x.dtype` … cast
+   back), but PEFT does *not* disable autocast around its LoRA matmuls, so the two
+   implementations are equivalent only when autocast is off. See
+   [LoRA backend](#lora-backend).
 
 3. **Reconstruction decoders.** `MemoryDecoder` casts `memory_embedding` to its own
    parameter dtype on entry and returns that dtype. `reconstruction_loss` then upcasts
    prediction and target to float32 before reducing, because the context target is the
    backbone's bfloat16 input embedding. `qa_loss` likewise reduces the answer-only cross
    entropy in float32 instead of in the logits' dtype.
+
+### LoRA backend
+
+There are two implementations of the same adapter, selected by `model.use_peft`
+(default `false`):
+
+| `model.use_peft` | implementation | autocast around the LoRA matmuls |
+| --- | --- | --- |
+| `false` (default) | in-repo `StaticLoRALinear` | disabled, so float32 stays float32 |
+| `true` | `peft.get_peft_model` | disabled by `disable_autocast_for_peft_lora` |
+
+Both are kept, but the static one is the default because it is the one the float32
+measurements in `IMPROVEMENTS.md` were taken with, and because the choice must not depend
+on whether `peft` happens to be installed — installing the `[train]` extra is not a
+statement about numerics. `use_peft: true` without `peft` installed raises instead of
+silently falling back.
+
+Regression coverage for the dtype contract lives in `tests/test_lora_dtype.py`: that the
+static delta is computed in float32 under bf16 autocast (with a discriminating check that
+the autocast path really is worse), that the default backend is static, and that the PEFT
+wrapper turns autocast off inside a `lora_A`/`lora_B` layer without changing its result.
 
 ### Autocast
 

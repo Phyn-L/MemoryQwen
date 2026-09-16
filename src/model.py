@@ -88,6 +88,42 @@ class StaticLoRALinear(nn.Module):
         return base_out + delta.to(base_dtype)
 
 
+def disable_autocast_for_peft_lora(model: nn.Module) -> int:
+    """Run every PEFT LoRA layer's forward with autocast disabled.
+
+    ``StaticLoRALinear`` disables autocast at its own module boundary, which is what
+    keeps its float32 ``lora_A``/``lora_B`` matmuls in float32. PEFT does the dtype
+    casts itself but leaves autocast on, so under Accelerate's bf16 autocast its
+    float32 LoRA weights are silently downcast again -- the precision the float32
+    parameters exist for is lost.
+
+    Wrapping the layer is safe for the frozen base matmul: its weights are already
+    bf16, so with autocast off it runs in bf16, exactly as autocast would have run
+    it. Only the float32 LoRA branch changes behaviour.
+
+    Returns the number of wrapped modules (0 when no PEFT layer is present).
+    """
+    wrapped = 0
+    for module in model.modules():
+        if not (hasattr(module, "lora_A") and hasattr(module, "lora_B")):
+            continue
+        if getattr(module, "_autocast_disabled", False):
+            continue
+        original = module.forward
+
+        def forward_without_autocast(*args, __original=original, **kwargs):
+            device = args[0].device if args and torch.is_tensor(args[0]) else "cpu"
+            with no_autocast(device):
+                return __original(*args, **kwargs)
+
+        # Plain function, not a bound method: ``nn.Module.__call__`` reads
+        # ``self.forward`` and invokes it with the caller's arguments only.
+        module.forward = forward_without_autocast
+        module._autocast_disabled = True
+        wrapped += 1
+    return wrapped
+
+
 class LayerReconstructionDecoder(nn.Module):
     """Decode one Qwen layer's memory slots into every original context embedding."""
     def __init__(self, dim: int, heads: int, max_positions: int = 2048):
@@ -207,16 +243,18 @@ class MetaLoRA(nn.Module):
     ``StaticLoRALinear``/``MemoryDecoder`` cast on entry and exit, and the losses
     upcast before reducing.
     """
-    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, context_lm=False):
+    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, context_lm=False, use_peft=False):
         super().__init__()
         self.rank, self.alpha = rank, alpha
         self.target_modules = tuple(target_modules or ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"))
         self.trainable_dtype = trainable_dtype
+        # Which LoRA implementation is active, recorded so a run is reproducible.
+        self.lora_backend = "peft" if use_peft else "static"
         # Only one of the two auxiliary objectives is active at a time.
         #   context_lm=True  -> decoder hidden states are classified into context tokens
         #   context_lm=False -> decoder outputs are regressed onto context input embeddings
         self.context_lm = bool(context_lm)
-        self.qwen = self._add_peft_lora(qwen, rank, alpha, dropout)
+        self.qwen = self._add_peft_lora(qwen, rank, alpha, dropout, bool(use_peft))
         self.qwen_hidden_size = self.qwen.config.hidden_size
         qwen_dtype = self.qwen.get_input_embeddings().weight.dtype
         # Global learnable memory tokens are added to the pooled Qwen context
@@ -271,23 +309,39 @@ class MetaLoRA(nn.Module):
                 dtypes[str(parameter.dtype)] = dtypes.get(str(parameter.dtype), 0) + 1
         return dtypes
 
-    def _add_peft_lora(self, qwen, rank, alpha, dropout):
-        try:
-            from peft import LoraConfig, get_peft_model
+    def _add_peft_lora(self, qwen, rank, alpha, dropout, use_peft):
+        """Attach LoRA. Defaults to the static implementation, which is the audited one.
+
+        The PEFT branch is opt-in (``model.use_peft: true``) because it is a
+        different implementation of the same adapter: it needs
+        :func:`disable_autocast_for_peft_lora` to honour the float32 contract, and
+        the two paths are not covered by the same tests. Choosing it must be a
+        deliberate act, not a side effect of whether ``peft`` happens to be
+        installed -- ``peft`` is in the ``[train]`` extra, so following the README
+        install command used to flip the implementation silently.
+        """
+        if use_peft:
+            try:
+                from peft import LoraConfig, get_peft_model
+            except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover
+                raise RuntimeError(
+                    "model.use_peft=true but peft is not importable; install it "
+                    "(pip install peft) or leave model.use_peft unset"
+                ) from exc
             cfg = LoraConfig(r=rank, lora_alpha=alpha, lora_dropout=dropout, bias="none", target_modules=list(self.target_modules), task_type="CAUSAL_LM")
             model = get_peft_model(qwen, cfg)
             for name, p in model.named_parameters():
                 p.requires_grad = ("lora_A" in name or "lora_B" in name)
+            disable_autocast_for_peft_lora(model)
             return model
-        except (ImportError, ModuleNotFoundError):
-            for p in qwen.parameters():
-                p.requires_grad = False
-            for name, module in list(qwen.named_modules()):
-                if not isinstance(module, nn.Linear) or not any(name.endswith(x) for x in self.target_modules): continue
-                parent=qwen
-                for part in name.split('.')[:-1]: parent=getattr(parent, part)
-                setattr(parent, name.split('.')[-1], StaticLoRALinear(module, rank, alpha, dropout, dtype=self.trainable_dtype))
-            return qwen
+        for p in qwen.parameters():
+            p.requires_grad = False
+        for name, module in list(qwen.named_modules()):
+            if not isinstance(module, nn.Linear) or not any(name.endswith(x) for x in self.target_modules): continue
+            parent=qwen
+            for part in name.split('.')[:-1]: parent=getattr(parent, part)
+            setattr(parent, name.split('.')[-1], StaticLoRALinear(module, rank, alpha, dropout, dtype=self.trainable_dtype))
+        return qwen
 
     @property
     def base_model(self):
@@ -597,6 +651,7 @@ def load_model(cfg):
         max_context_tokens=cfg.data.max_context_tokens,
         trainable_dtype=dtype_from_name(cfg.model.trainable_dtype),
         context_lm=cfg.memory.reconstruction_loss == "context_lm",
+        use_peft=cfg.model.use_peft,
     )
     for name,p in model.named_parameters():
         p.requires_grad=is_trainable_parameter_name(name)
