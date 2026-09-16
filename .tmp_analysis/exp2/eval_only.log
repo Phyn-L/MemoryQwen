@@ -1,0 +1,12 @@
+armE_fp32_M8 -> /data/lz/MemoryQwen/.tmp_analysis/exp2/run/armE_fp32_M8/outputs/Qwen1.7B_20260916_143848/last.pt
+armF_bf16_M8 -> /data/lz/MemoryQwen/.tmp_analysis/exp2/run/armF_bf16_M8/outputs/Qwen1.7B_20260916_143853/last.pt
+armH_fp32_norecon -> /data/lz/MemoryQwen/.tmp_analysis/exp2/run/armH_fp32_norecon/outputs/Qwen1.7B_20260916_143904/last.pt
+TF first-token exact accuracy = 0.323
+RESULT TF step=6000 projectF1=0.4457 officialF1=0.4364 officialEM=0.1700 firstWord=0.253
+RESULT AR step=6000 projectF1=0.3301 officialF1=0.3497 officialEM=0.2267 firstWord=0.250
+TF first-token exact accuracy = 0.297
+RESULT TF step=6000 projectF1=0.3765 officialF1=0.3683 officialEM=0.1200 firstWord=0.203
+RESULT AR step=6000 projectF1=0.2796 officialF1=0.2863 officialEM=0.1700 firstWord=0.220
+TF first-token exact accuracy = 0.293
+RESULT TF step=6000 projectF1=0.4171 officialF1=0.4047 officialEM=0.1567 firstWord=0.223
+RESULT AR step=6000 projectF1=0.2949 officialF1=0.2996 officialEM=0.1867 firstWord=0.223

@@ -14,6 +14,10 @@ class ModelConfig:
         "snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
     )
     torch_dtype: str = "bfloat16"
+    # Dtype of the trainable pieces (memory tokens, LoRA, reconstruction decoders).
+    # Kept separate from torch_dtype so that AdamW keeps float32 parameters and
+    # moments while the frozen backbone stays at its checkpoint dtype.
+    trainable_dtype: str = "float32"
     lora_rank: int = 8
     lora_alpha: float = 16.0
     lora_dropout: float = 0.0
@@ -36,6 +40,10 @@ class MemoryConfig:
     qa_weight: float = 1.0
     reconstruction_loss: str = "mse_cosine"
     reconstruction_cosine_weight: float = 0.1
+    # context_lm: number of context positions scored per context per step. The shared
+    # vocabulary head is applied to num_layers * context_lm_positions rows, so this is
+    # the knob that bounds the auxiliary objective's cost. <= 0 means "all positions".
+    context_lm_positions: int = 256
     contrastive_weight: float = 0.0
     contrastive_temperature: float = 0.07
     contrastive_margin: float = 1.0
@@ -67,6 +75,13 @@ class DataConfig:
     use_chat_template: bool = False
     chat_template_enable_thinking: bool = False
     qa_per_context: int = 4
+    # Left-padding keeps the question's real tokens adjacent to the answer; right
+    # padding inserts pad positions between them, so the first answer token would be
+    # supervised from a padding hidden state.  Set to "right" only to reproduce old runs.
+    question_padding_side: str = "left"
+    # "append" writes EOS after the last answer token; the legacy "overwrite" mode
+    # overwrites that token whenever the answer is the longest in the batch.
+    eos_mode: str = "append"
 
 
 @dataclass
@@ -90,13 +105,18 @@ class EvaluationConfig:
     autoregressive_every: int = 4000
     max_new_tokens: int = 128
     qa_batch_size: int = 4
+    # QA rows each rank decodes during an autoregressive evaluation. Decoding is far
+    # more expensive than a teacher-forced forward, and a rank that spends longer than
+    # the NCCL watchdog timeout (10 minutes) inside an evaluation makes the other ranks
+    # abort with "Watchdog caught collective operation timeout". The global number of
+    # decoded rows is autoregressive_max_qa * world_size.
+    autoregressive_max_qa: int = 256
 
 
 @dataclass
 class TrainingConfig:
     batch_size: int = 2
     epochs: int = 1
-    grad_accumulation: int = 1
     max_grad_norm: float = 1.0
     seed: int = 42
 
@@ -179,21 +199,29 @@ class TrainConfig:
             raise ValueError("sortish_bucket_multiplier must be positive")
         if d.qa_per_context <= 0:
             raise ValueError("data.qa_per_context must be positive")
+        if d.question_padding_side not in {"left", "right"}:
+            raise ValueError("data.question_padding_side must be left or right")
+        if d.eos_mode not in {"overwrite", "append"}:
+            raise ValueError("data.eos_mode must be overwrite or append")
+        if self.model.trainable_dtype not in {"float32", "float16", "bfloat16"}:
+            raise ValueError("model.trainable_dtype must be float32, float16 or bfloat16")
         if self.model.lora_rank <= 0 or m.memory_length <= 0:
             raise ValueError("lora_rank and memory_length must be positive")
         if m.decoder_hidden_size <= 0 or m.decoder_ffn_ratio <= 0 or m.decoder_heads <= 0:
             raise ValueError("decoder_hidden_size, decoder_ffn_ratio and decoder_heads must be positive")
         if m.decoder_hidden_size % m.decoder_heads:
             raise ValueError("memory.decoder_hidden_size must be divisible by memory.decoder_heads")
-        if m.reconstruction_loss not in {"mse", "cosine", "mse_cosine"}:
-            raise ValueError("reconstruction_loss must be mse, cosine, or mse_cosine")
+        if m.reconstruction_loss not in {"mse", "cosine", "mse_cosine", "context_lm"}:
+            raise ValueError("reconstruction_loss must be mse, cosine, mse_cosine, or context_lm")
+        if m.context_lm_positions < 0:
+            raise ValueError("memory.context_lm_positions must be >= 0 (0 scores every position)")
         if m.qa_weight < 0 or m.reconstruction_weight < 0:
             raise ValueError("loss weights must be non-negative")
         if m.qa_weight == 0 and m.reconstruction_weight == 0:
             raise ValueError("at least one main loss weight must be positive")
         t = self.training
-        if t.batch_size <= 0 or t.epochs <= 0 or t.grad_accumulation <= 0:
-            raise ValueError("batch_size, epochs and grad_accumulation must be positive")
+        if t.batch_size <= 0 or t.epochs <= 0:
+            raise ValueError("batch_size and epochs must be positive")
         if t.max_grad_norm <= 0:
             raise ValueError("training.max_grad_norm must be positive")
         if self.checkpoint.save_every_steps <= 0:
@@ -202,6 +230,8 @@ class TrainConfig:
             raise ValueError("evaluation intervals must be positive")
         if self.evaluation.qa_batch_size <= 0:
             raise ValueError("evaluation.qa_batch_size must be positive")
+        if self.evaluation.autoregressive_max_qa <= 0:
+            raise ValueError("evaluation.autoregressive_max_qa must be positive")
 
 
 def dtype_from_name(name: str):

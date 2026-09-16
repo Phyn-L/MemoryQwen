@@ -1,13 +1,27 @@
 model:
   name_or_path: /data/lz/hf_cache/hub/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
   torch_dtype: bfloat16
+  trainable_dtype: float32
   lora_rank: 8
   lora_alpha: 16.0
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
-memory: {memory_length: 8, encoder_heads: 8, decoder_heads: 8, reconstruction_weight: 1.0, qa_weight: 1.0}
+memory:
+  memory_length: 8
+  encoder_heads: 8
+  decoder_hidden_size: 256
+  decoder_ffn_ratio: 2
+  decoder_heads: 8
+  qa_weight: 1.0
+  reconstruction_weight: 1.0
+  # Context next-token prediction (see the README section "Context next-token
+  # prediction objective"). Switch to mse_cosine for the embedding regression.
+  reconstruction_loss: context_lm
+  context_lm_positions: 256
+  reconstruction_cosine_weight: 0.5
+  contrastive_weight: 0.0
 data: {root: /data/lz/contexts/aggregated, train_datasets: [squad, coqa, drop], validation_datasets: [squad], test_datasets: [squad], max_context_tokens: 2048, max_question_tokens: 128, max_answer_tokens: 128, cache_sortish_lengths: true, cache_dataset: true, use_chat_template: false, chat_template_enable_thinking: false, qa_per_context: 4}
-evaluation: {teacher_forced_every: 2000, autoregressive_every: 4000, max_new_tokens: 128, qa_batch_size: 4}
-training: {batch_size: 1, epochs: 1, grad_accumulation: 1, max_grad_norm: 1.0, seed: 42}
+evaluation: {teacher_forced_every: 2000, autoregressive_every: 4000, max_new_tokens: 32, qa_batch_size: 4, autoregressive_max_qa: 256}
+training: {batch_size: 1, epochs: 1, max_grad_norm: 1.0, seed: 42}
 optimizer: {name: adamw, lr: 1.0e-4, weight_decay: 0.01}
 scheduler: {name: cosine, warmup_steps: 500}
 checkpoint: {output_dir: outputs/qwen-4b, save_every_steps: 1000}

@@ -80,6 +80,7 @@ class AggregatedContextDataset(Dataset):
 
     def _build_records(self, files, tokenizer, max_context_tokens, filter_long_context, filter_no_qa):
         records = []
+        empty_context = dropped_long = dropped_no_qa = 0
         with tqdm(files, total=len(files), desc="Loading data", unit="file", disable=not _progress_enabled()) as file_bar:
             for name, path in file_bar:
                 for line in path.open(encoding="utf-8"):
@@ -88,10 +89,12 @@ class AggregatedContextDataset(Dataset):
                     row = json.loads(line)
                     context = str(row.get("context", "")).strip()
                     if not context:
+                        empty_context += 1
                         continue
                     if filter_long_context and tokenizer is not None:
                         ids = tokenizer(context, add_special_tokens=False, truncation=True, max_length=max_context_tokens + 1).input_ids
                         if len(ids) > max_context_tokens:
+                            dropped_long += 1
                             continue
                     pairs = []
                     for qa in row.get("qa_pairs", []) or []:
@@ -102,7 +105,18 @@ class AggregatedContextDataset(Dataset):
                             pairs.append(QARecord(question, answer, name, str(row.get("context_id", ""))))
                     if pairs:
                         records.append(ContextRecord(context, tuple(pairs), name, str(row.get("context_id", ""))))
+                    else:
+                        dropped_no_qa += 1
                 file_bar.set_postfix(contexts=len(records), qa_pairs=sum(len(r.qa_pairs) for r in records))
+        # The filters drop rows silently otherwise, which makes a shrinking dataset look
+        # like a data problem. Report the counts so a change of max_context_tokens or
+        # dataset mix is visible in the log.
+        if _progress_enabled():
+            print(
+                f"Loaded {len(records)} contexts from {len(files)} file(s) "
+                f"(dropped: {dropped_long} longer than {max_context_tokens} tokens, "
+                f"{dropped_no_qa} without a usable QA pair, {empty_context} with an empty context)"
+            )
         return dataset_cache.Dataset.from_list([
             {"context": r.context, "qa_pairs": [asdict(q) for q in r.qa_pairs], "dataset": r.dataset, "context_id": r.context_id}
             for r in records
@@ -164,11 +178,17 @@ class SortishSampler(Sampler[int]):
     def set_epoch(self, epoch): self.epoch = epoch; self._rebuild()
 
 
-def _encode(tokenizer, texts, max_length):
-    return tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=max_length, add_special_tokens=False)
+def _encode(tokenizer, texts, max_length, padding_side=None):
+    previous = tokenizer.padding_side
+    if padding_side is not None:
+        tokenizer.padding_side = padding_side
+    try:
+        return tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=max_length, add_special_tokens=False)
+    finally:
+        tokenizer.padding_side = previous
 
 
-def collate_context_records(rows, tokenizer, max_context_tokens=2048, max_question_tokens=128, max_answer_tokens=128, append_eos=True, use_chat_template=False, chat_template_enable_thinking=False, qa_per_context=4, sample_qa=True):
+def collate_context_records(rows, tokenizer, max_context_tokens=2048, max_question_tokens=128, max_answer_tokens=128, append_eos=True, use_chat_template=False, chat_template_enable_thinking=False, qa_per_context=4, sample_qa=True, question_padding_side="right", eos_mode="overwrite"):
     contexts = [r.context for r in rows]; c = _encode(tokenizer, contexts, max_context_tokens)
     sampled, mapping = [], []
     for i, record in enumerate(rows):
@@ -177,16 +197,32 @@ def collate_context_records(rows, tokenizer, max_context_tokens=2048, max_questi
     if not sampled:
         raise ValueError("context batch contains no QA pairs")
     questions = [render_question(tokenizer, q.question, use_chat_template, chat_template_enable_thinking) for q in sampled]
-    q = _encode(tokenizer, questions, max_question_tokens); a = _encode(tokenizer, [x.answer for x in sampled], max_answer_tokens)
+    q = _encode(tokenizer, questions, max_question_tokens, padding_side=question_padding_side); a = _encode(tokenizer, [x.answer for x in sampled], max_answer_tokens)
     if append_eos and getattr(tokenizer, "eos_token_id", None) is not None:
         eos = int(tokenizer.eos_token_id)
-        for i in range(a.input_ids.size(0)):
-            valid = int(a.attention_mask[i].sum())
-            if valid < a.input_ids.size(1): a.input_ids[i, valid] = eos; a.attention_mask[i, valid] = True
-            elif valid: a.input_ids[i, valid - 1] = eos
+        if eos_mode == "append":
+            # Always append EOS after the last real answer token. The legacy
+            # "overwrite" path writes EOS over the final answer token whenever
+            # that row is the longest in the batch (valid == width), destroying it.
+            rows_n, width = a.input_ids.size(0), a.input_ids.size(1) + 1
+            ids = torch.full((rows_n, width), int(tokenizer.pad_token_id), dtype=a.input_ids.dtype)
+            mask = torch.zeros((rows_n, width), dtype=torch.long)
+            for i in range(rows_n):
+                valid = int(a.attention_mask[i].sum())
+                ids[i, :valid] = a.input_ids[i, :valid]
+                mask[i, :valid] = 1
+                ids[i, valid] = eos
+                mask[i, valid] = 1
+            a["input_ids"] = ids
+            a["attention_mask"] = mask
+        else:
+            for i in range(a.input_ids.size(0)):
+                valid = int(a.attention_mask[i].sum())
+                if valid < a.input_ids.size(1): a.input_ids[i, valid] = eos; a.attention_mask[i, valid] = True
+                elif valid: a.input_ids[i, valid - 1] = eos
     labels = torch.full_like(a.input_ids, -100); labels[a.attention_mask.bool()] = a.input_ids[a.attention_mask.bool()]
     return {"context_ids": c.input_ids, "context_mask": c.attention_mask.bool(), "question_ids": q.input_ids, "question_mask": q.attention_mask.bool(), "answer_ids": a.input_ids, "answer_mask": a.attention_mask.bool(), "labels": labels, "qa_context_indices": torch.tensor(mapping, dtype=torch.long), "records": sampled}
 
 
-def collate_fn(rows, tokenizer, max_context_tokens=2048, max_question_tokens=128, max_answer_tokens=128, append_eos=True, use_chat_template=False, chat_template_enable_thinking=False, qa_per_context=4, sample_qa=True):
-    return collate_context_records(rows, tokenizer, max_context_tokens, max_question_tokens, max_answer_tokens, append_eos, use_chat_template, chat_template_enable_thinking, qa_per_context, sample_qa)
+def collate_fn(rows, tokenizer, max_context_tokens=2048, max_question_tokens=128, max_answer_tokens=128, append_eos=True, use_chat_template=False, chat_template_enable_thinking=False, qa_per_context=4, sample_qa=True, question_padding_side="right", eos_mode="overwrite"):
+    return collate_context_records(rows, tokenizer, max_context_tokens, max_question_tokens, max_answer_tokens, append_eos, use_chat_template, chat_template_enable_thinking, qa_per_context, sample_qa, question_padding_side, eos_mode)

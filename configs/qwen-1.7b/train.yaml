@@ -1,6 +1,7 @@
 model:
   name_or_path: /data/lz/hf_cache/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
   torch_dtype: bfloat16
+  trainable_dtype: float32
   lora_rank: 8
   lora_alpha: 16.0
   lora_dropout: 0.0
@@ -13,8 +14,17 @@ memory:
   decoder_heads: 8
   reconstruction_weight: 1.0
   qa_weight: 1.0
-  reconstruction_loss: mse_cosine
-  reconstruction_cosine_weight: 0.1
+  # "context_lm" is the context next-token prediction objective: the per-layer memory
+  # decoders classify their hidden state into the context token id through a shared
+  # vocabulary head. Use "mse_cosine" (or "mse"/"cosine") to go back to the embedding
+  # regression. Both losses are nats per token now, so qa_weight and
+  # reconstruction_weight are directly comparable and 1.0/1.0 is a sane starting point.
+  reconstruction_loss: context_lm
+  # Context positions scored per context per step. The vocabulary head is applied to
+  # num_layers * context_lm_positions rows, so this bounds the extra cost. 0 = all.
+  context_lm_positions: 256
+  # Only read by the mse/cosine/mse_cosine objectives.
+  reconstruction_cosine_weight: 0.5
   contrastive_weight: 0.0
 data:
   root: /data/lz/contexts/aggregated
@@ -37,13 +47,20 @@ data:
   qa_per_context: 4
 evaluation:
   teacher_forced_every: 2000
+  # Autoregressive F1 is the headline metric; do not set this to a large value to
+  # "save time" -- that is how a run ends up with no trustworthy number at all.
   autoregressive_every: 4000
-  max_new_tokens: 128
+  # Matches scripts/test_icl_baseline.py (--squad-max-new-tokens 32) so the two
+  # numbers are produced under the same decoding budget.
+  max_new_tokens: 32
   qa_batch_size: 4
+  # QA rows each rank decodes per autoregressive evaluation; decoding is ~1000x a
+  # teacher-forced token and a rank stuck in an eval for >10 min kills the run via
+  # the NCCL watchdog. Global decoded rows = this * world_size.
+  autoregressive_max_qa: 256
 training:
-  batch_size: 4
+  batch_size: 1
   epochs: 1
-  grad_accumulation: 1
   max_grad_norm: 1.0
   seed: 42
 optimizer:
@@ -52,10 +69,10 @@ optimizer:
   weight_decay: 0.01
 scheduler:
   name: cosine
-  warmup_steps: 1000
+  warmup_steps: 2000
 checkpoint:
   output_dir: outputs/qwen-1.7b
-  save_every_steps: 1000
+  save_every_steps: 5000
 logging:
   wandb_project: MemoryQwen
   wandb_mode: online

@@ -1,0 +1,36 @@
+The following values were not passed to `accelerate launch` and had defaults used instead:
+		More than one GPU was found, enabling multi-GPU training.
+		If this was unintended please pass in `--num_processes=1`.
+	`--num_machines` was set to a value of `1`
+	`--dynamo_backend` was set to a value of `'no'`
+To avoid this warning pass in values for each of the problematic parameters or run `accelerate config`.
+Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 6112.74it/s]
+Loading weights: 100%|██████████| 311/311 [00:00<00:00, 5645.90it/s]
+[W916 18:09:10.777612400 CUDAAllocatorConfig.h:28] Warning: expandable_segments not supported on this platform (function operator())
+[W916 18:09:10.789162356 CUDAAllocatorConfig.h:28] Warning: expandable_segments not supported on this platform (function operator())
+Loading data:   0%|          | 0/1 [00:00<?, ?file/s]Loading data:   0%|          | 0/1 [00:09<?, ?file/s, contexts=18891, qa_pairs=174420]Loading data: 100%|██████████| 1/1 [00:09<00:00,  9.75s/file, contexts=18891, qa_pairs=174420]Loading data: 100%|██████████| 1/1 [00:09<00:00,  9.75s/file, contexts=18891, qa_pairs=174420]
+Loaded 18891 contexts from 1 file(s) (dropped: 0 longer than 2048 tokens, 139 without a usable QA pair, 0 with an empty context)
+Saving the dataset (0/1 shards):   0%|          | 0/18891 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 18891/18891 [00:00<00:00, 574655.12 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 18891/18891 [00:00<00:00, 571385.49 examples/s]
+Saved Hugging Face dataset cache: outputs/Qwen1.7B/dataset_cache/train-cd236eef3c14c676/hf_dataset (contexts=18891, qa_pairs=174420)
+Preparing sortish lengths:   0%|          | 0/8 [00:00<?, ?context/s]Preparing sortish lengths: 100%|██████████| 8/8 [00:00<00:00, 1189.03context/s]
+Loading data:   0%|          | 0/1 [00:00<?, ?file/s]Loading data:   0%|          | 0/1 [00:01<?, ?file/s, contexts=2067, qa_pairs=16498]Loading data: 100%|██████████| 1/1 [00:01<00:00,  1.07s/file, contexts=2067, qa_pairs=16498]Loading data: 100%|██████████| 1/1 [00:01<00:00,  1.07s/file, contexts=2067, qa_pairs=16498]
+Loaded 2067 contexts from 1 file(s) (dropped: 0 longer than 2048 tokens, 0 without a usable QA pair, 0 with an empty context)
+Saving the dataset (0/1 shards):   0%|          | 0/2067 [00:00<?, ? examples/s]Saving the dataset (1/1 shards): 100%|██████████| 2067/2067 [00:00<00:00, 330145.71 examples/s]Saving the dataset (1/1 shards): 100%|██████████| 2067/2067 [00:00<00:00, 322266.98 examples/s]
+Saved Hugging Face dataset cache: outputs/Qwen1.7B/dataset_cache/validation-b8c5c3ef537b49c5/hf_dataset (contexts=2067, qa_pairs=16498)
+Training:   0%|          | 0/4 [00:00<?, ?step/s]Training:  25%|██▌       | 1/4 [00:01<00:03,  1.29s/step]Training:  25%|██▌       | 1/4 [00:01<00:03,  1.29s/step, loss=24.6785, qa=12.5936, recon=12.0849]Training:  50%|█████     | 2/4 [00:01<00:01,  1.15step/s, loss=24.6785, qa=12.5936, recon=12.0849]Training:  50%|█████     | 2/4 [00:01<00:01,  1.15step/s, loss=32.9589, qa=20.8591, recon=12.0998]
+Validation (teacher-forced):   0%|          | 0/4 [00:00<?, ?batch/s][A
+Validation (teacher-forced):  25%|██▌       | 1/4 [00:00<00:00,  3.18batch/s][A
+Validation (teacher-forced):  50%|█████     | 2/4 [00:00<00:00,  3.17batch/s][A
+Validation (teacher-forced):  75%|███████▌  | 3/4 [00:01<00:00,  1.88batch/s][A
+Validation (teacher-forced): 100%|██████████| 4/4 [00:01<00:00,  2.40batch/s][A
+                                                                             [ATraining:  75%|███████▌  | 3/4 [00:04<00:01,  1.47s/step, loss=32.9589, qa=20.8591, recon=12.0998]Training:  75%|███████▌  | 3/4 [00:04<00:01,  1.47s/step, loss=25.8678, qa=13.8078, recon=12.0600]Training: 100%|██████████| 4/4 [00:04<00:00,  1.10s/step, loss=25.8678, qa=13.8078, recon=12.0600]Training: 100%|██████████| 4/4 [00:04<00:00,  1.10s/step, loss=22.6359, qa=10.5725, recon=12.0634]
+Validation (teacher-forced):   0%|          | 0/4 [00:00<?, ?batch/s][A
+Validation (teacher-forced):  25%|██▌       | 1/4 [00:00<00:00,  3.13batch/s][A
+Validation (teacher-forced):  50%|█████     | 2/4 [00:00<00:00,  3.15batch/s][A
+Validation (teacher-forced):  75%|███████▌  | 3/4 [00:01<00:00,  1.87batch/s][A
+Validation (teacher-forced): 100%|██████████| 4/4 [00:01<00:00,  2.40batch/s][A
+                                                                             [A
+Validation (autoregressive):   0%|          | 0/4 [00:00<?, ?batch/s][A
+Validation (autoregressive):  25%|██▌       | 1/4 [00:01<00:05,  1.68s/batch][A
+                                                                             [ATraining: 100%|██████████| 4/4 [00:09<00:00,  2.36s/step, loss=22.6359, qa=10.5725, recon=12.0634]
+[rank0]:[W916 18:09:40.440712453 ProcessGroupNCCL.cpp:1250] Warning: WARNING: process group has NOT been destroyed before we destruct ProcessGroupNCCL. On normal program exit, the application should call destroy_process_group to ensure that any pending NCCL operations have finished in this process. In rare cases this process can exit before this point and block the progress of another member of the process group. This constraint has always been present,  but this warning has only been added since PyTorch 2.4 (function operator())

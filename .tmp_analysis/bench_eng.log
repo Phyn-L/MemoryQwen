@@ -1,0 +1,32 @@
+=== mask correctness
+mask correctness (20 random batches, exact equality): PASS
+=== mask timing
+  block  B=2 L=2048 M=8 QL=64 AL=32        548.78 ms/call
+  block  B=2 L=2048 M=8 QL=64 AL=32  FAST  0.84 ms/call
+  cont   B=8 M=8 QL=64 AL=32               109.44 ms/call
+  cont   B=8 M=8 QL=64 AL=32  FAST         0.52 ms/call
+=== training-step peak memory
+Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 7601.08it/s]
+  ctx=2048 recon=True  ckpt=False OOM
+Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 6079.66it/s]
+[transformers] `use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.
+Traceback (most recent call last):
+  File "/data/lz/MemoryQwen/.tmp_analysis/bench_eng.py", line 199, in <module>
+    main()
+  File "/data/lz/MemoryQwen/.tmp_analysis/bench_eng.py", line 195, in main
+    step_memory(cfg, tokenizer, 2, ctx_tokens, use_recon, ckpt)
+  File "/data/lz/MemoryQwen/.tmp_analysis/bench_eng.py", line 160, in step_memory
+    out = model(emb(ids["context_ids"]), ids["context_mask"], emb(ids["question_ids"]),
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/lz/miniconda3/envs/shine/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1736, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/lz/miniconda3/envs/shine/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1747, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/lz/MemoryQwen/src/model.py", line 447, in forward
+    prefix = self.encode_context_prefix(context_embeds, context_mask)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/data/lz/MemoryQwen/src/model.py", line 398, in encode_context_prefix
+    raise RuntimeError("Qwen did not return a KV cache for prefix encoding")
+RuntimeError: Qwen did not return a KV cache for prefix encoding

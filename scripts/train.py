@@ -15,6 +15,7 @@ from src.data import AggregatedContextDataset, SortishSampler, collate_fn
 from src.evaluator import Evaluator
 from src.losses import (
     combine_losses,
+    context_lm_loss,
     memory_contrastive_loss,
     qa_loss,
     reconstruction_loss,
@@ -102,11 +103,24 @@ def main() -> None:
             cache_dir=model_cache_dir if cfg.data.cache_dataset else None,
         )
 
-    train_collate = lambda rows: collate_fn(
-        rows, tokenizer, cfg.data.max_context_tokens, cfg.data.max_question_tokens,
-        cfg.data.max_answer_tokens, cfg.data.append_eos, cfg.data.use_chat_template,
-        cfg.data.chat_template_enable_thinking, cfg.data.qa_per_context, True,
-    )
+    # Keyword arguments only: the collate signature grew, and silently shifted
+    # positional arguments would change the target format without any error.
+    def make_collate(sample_qa):
+        return lambda rows: collate_fn(
+            rows, tokenizer,
+            max_context_tokens=cfg.data.max_context_tokens,
+            max_question_tokens=cfg.data.max_question_tokens,
+            max_answer_tokens=cfg.data.max_answer_tokens,
+            append_eos=cfg.data.append_eos,
+            use_chat_template=cfg.data.use_chat_template,
+            chat_template_enable_thinking=cfg.data.chat_template_enable_thinking,
+            qa_per_context=cfg.data.qa_per_context,
+            sample_qa=sample_qa,
+            question_padding_side=cfg.data.question_padding_side,
+            eos_mode=cfg.data.eos_mode,
+        )
+
+    train_collate = make_collate(True)
     train_dataset = make_dataset("train")
     sampler = SortishSampler(
         train_dataset, tokenizer, cfg.training.batch_size,
@@ -120,13 +134,14 @@ def main() -> None:
     validation_dataset = make_dataset("validation")
     validation_loader = DataLoader(
         validation_dataset, batch_size=cfg.training.batch_size,
-        shuffle=False, collate_fn=lambda rows: collate_fn(rows, tokenizer, cfg.data.max_context_tokens, cfg.data.max_question_tokens, cfg.data.max_answer_tokens, cfg.data.append_eos, cfg.data.use_chat_template, cfg.data.chat_template_enable_thinking, cfg.data.qa_per_context, False),
+        shuffle=False, collate_fn=make_collate(False),
     )
     evaluator = Evaluator(tokenizer, cfg)
     effective_loader_len = len(train_loader)
     if accelerator is not None and accelerator.num_processes > 1:
         effective_loader_len = (effective_loader_len + accelerator.num_processes - 1) // accelerator.num_processes
-    total_steps = max(1, (effective_loader_len * cfg.training.epochs + cfg.training.grad_accumulation - 1) // cfg.training.grad_accumulation)
+    # One optimizer step per DataLoader batch: gradient accumulation is not used.
+    total_steps = max(1, effective_loader_len * cfg.training.epochs)
     optimizer = build_optimizer(model, cfg.optimizer)
     scheduler = build_scheduler(optimizer, cfg.scheduler, total_steps)
     manager = CheckpointManager(
@@ -175,13 +190,24 @@ def main() -> None:
                 embedding(ids["context_ids"]), ids["context_mask"],
                 embedding(ids["question_ids"]), ids["question_mask"],
                 embedding(ids["answer_ids"]), ids["answer_mask"], ids["labels"],
-                ids["qa_context_indices"],
+                ids["qa_context_indices"], context_ids=ids["context_ids"],
+                context_lm_positions=cfg.memory.context_lm_positions,
             )
             qa = qa_loss(output.logits, output.labels)
-            reconstruction = reconstruction_loss(
-                output.reconstruction, output.context_target, output.context_mask,
-                cfg.memory.reconstruction_cosine_weight, cfg.memory.reconstruction_loss,
-            )
+            if cfg.memory.reconstruction_loss == "context_lm":
+                # Context next-token prediction through the memory, in nats/token.
+                # Starts near ln(vocab_size) ~= 11.9, so reconstruction_weight may
+                # want to be smaller than for the embedding regression (which sits
+                # near 0.08) to keep the two terms on comparable gradient scales.
+                reconstruction = context_lm_loss(
+                    output.context_lm_hidden, output.context_lm_labels,
+                    base_model.context_lm_head, output.context_lm_mask,
+                )
+            else:
+                reconstruction = reconstruction_loss(
+                    output.reconstruction, output.context_target, output.context_mask,
+                    cfg.memory.reconstruction_cosine_weight, cfg.memory.reconstruction_loss,
+                )
             contrastive = (
                 memory_contrastive_loss(output.memory, torch.roll(output.memory, shifts=1, dims=0), cfg.memory.contrastive_temperature, cfg.memory.contrastive_margin)
                 if cfg.memory.contrastive_weight else None
@@ -192,16 +218,15 @@ def main() -> None:
                 cfg.memory.contrastive_weight,
             )
             if accelerator is not None:
-                accelerator.backward(total / cfg.training.grad_accumulation)
+                accelerator.backward(total)
             else:
-                (total / cfg.training.grad_accumulation).backward()
-            if (step + 1) % cfg.training.grad_accumulation == 0:
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), cfg.training.max_grad_norm,
-                )
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
+                total.backward()
+            torch.nn.utils.clip_grad_norm_(
+                model.parameters(), cfg.training.max_grad_norm,
+            )
+            optimizer.step()
+            scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
             step += 1
             progress.update(1)
             progress.set_postfix(
@@ -213,14 +238,40 @@ def main() -> None:
             if run and step % 10 == 0:
                 run.log({f"train/{k}": float(v.detach()) for k, v in terms.items()}, step=step)
             is_main = accelerator is None or accelerator.is_main_process
-            if is_main and len(validation_loader) and step % cfg.evaluation.teacher_forced_every == 0:
-                metrics = evaluator.teacher_forced(base_model, validation_loader, device)
-                if run:
-                    run.log({f"val/teacher_forced/{k}": v for k, v in metrics.items()}, step=step)
-            if is_main and len(validation_loader) and step % cfg.evaluation.autoregressive_every == 0:
-                metrics = evaluator.autoregressive(base_model, validation_loader, device)
-                if run:
+            # Validation runs on EVERY rank.  accelerator.prepare shards the validation
+            # loader, so evaluating only on the main process would (a) score one shard
+            # instead of the whole split and (b) leave the other ranks waiting in the next
+            # DDP collective for the entire evaluation, which the NCCL watchdog aborts
+            # after 10 minutes ("Watchdog caught collective operation timeout").  The
+            # evaluators all-reduce their accumulators, so every rank must call them.
+            # Teacher forcing feeds the gold answer prefix, so its em/f1 mostly reward
+            # lexical continuation.  Run it as a diagnostic, and reuse its scalars for the
+            # autoregressive block below when both happen to fire on the same step.
+            teacher_metrics = None
+            if len(validation_loader) and step % cfg.evaluation.teacher_forced_every == 0:
+                teacher_metrics = evaluator.teacher_forced(base_model, validation_loader, device)
+                if run and is_main:
+                    run.log({f"val/teacher_forced/{k}": v for k, v in teacher_metrics.items()}, step=step)
+            if len(validation_loader) and step % cfg.evaluation.autoregressive_every == 0:
+                metrics = evaluator.autoregressive(
+                    base_model, validation_loader, device,
+                    include_teacher_metrics=teacher_metrics is None,
+                    max_qa=cfg.evaluation.autoregressive_max_qa,
+                )
+                if run and is_main:
                     run.log({f"val/autoregressive/{k}": v for k, v in metrics.items()}, step=step)
+                    # Headline scalars: autoregressive F1 is the number to compare with an
+                    # ICL baseline; first_token_em is the retrieval diagnostic.
+                    run.log(
+                        {f"val/primary/{k}": metrics[k]
+                         for k in ("em", "f1", "rouge_l", "bleu", "first_token_em")
+                         if k in metrics},
+                        step=step,
+                    )
+            if accelerator is not None:
+                # Resynchronise explicitly so a rank whose shard finished early cannot
+                # race ahead into the next training step.
+                accelerator.wait_for_everyone()
             if step % cfg.checkpoint.save_every_steps == 0 and is_main:
                 checkpoint_model = accelerator.unwrap_model(model) if accelerator is not None else model
                 manager.save(checkpoint_model, optimizer, scheduler, step, cfg.to_dict(), wandb_run_id=getattr(run, "id", None))

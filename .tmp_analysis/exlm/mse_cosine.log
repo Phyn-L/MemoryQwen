@@ -1,0 +1,22 @@
+Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 5877.05it/s]
+Traceback (most recent call last):
+  File "/data/lz/MemoryQwen/.tmp_analysis/exlm/train_probe.py", line 30, in <module>
+    model.to(device).train()
+    ^^^^^^^^^^^^^^^^
+  File "/home/lz/miniconda3/envs/shine/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1340, in to
+    return self._apply(convert)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/lz/miniconda3/envs/shine/lib/python3.12/site-packages/torch/nn/modules/module.py", line 900, in _apply
+    module._apply(fn)
+  File "/home/lz/miniconda3/envs/shine/lib/python3.12/site-packages/torch/nn/modules/module.py", line 900, in _apply
+    module._apply(fn)
+  File "/home/lz/miniconda3/envs/shine/lib/python3.12/site-packages/torch/nn/modules/module.py", line 900, in _apply
+    module._apply(fn)
+  [Previous line repeated 4 more times]
+  File "/home/lz/miniconda3/envs/shine/lib/python3.12/site-packages/torch/nn/modules/module.py", line 927, in _apply
+    param_applied = fn(param)
+                    ^^^^^^^^^
+  File "/home/lz/miniconda3/envs/shine/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1326, in convert
+    return t.to(
+           ^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 24.00 MiB. GPU 0 has a total capacity of 23.54 GiB of which 13.88 MiB is free. Process 19306 has 7.12 GiB memory in use. Process 26771 has 14.73 GiB memory in use. Including non-PyTorch memory, this process has 1.66 GiB memory in use. Of the allocated memory 1.27 GiB is allocated by PyTorch, and 11.69 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

@@ -1,0 +1,75 @@
+model:
+  name_or_path: /data/lz/hf_cache/hub/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  torch_dtype: bfloat16
+  trainable_dtype: float32
+  lora_rank: 8
+  lora_alpha: 16.0
+  lora_dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+memory:
+  memory_length: 8
+  encoder_heads: 8
+  decoder_hidden_size: 256
+  decoder_ffn_ratio: 2
+  decoder_heads: 8
+  reconstruction_weight: 1.0
+  qa_weight: 1.0
+  # "context_lm" is the context next-token prediction objective: the per-layer memory
+  # decoders classify their hidden state into the context token id through a shared
+  # vocabulary head. Use "mse_cosine" (or "mse"/"cosine") to go back to the embedding
+  # regression. Both losses are nats per token now, so qa_weight and
+  # reconstruction_weight are directly comparable and 1.0/1.0 is a sane starting point.
+  reconstruction_loss: context_lm
+  # Context positions scored per context per step. The vocabulary head is applied to
+  # num_layers * context_lm_positions rows, so this bounds the extra cost. 0 = all.
+  context_lm_positions: 256
+  # Only read by the mse/cosine/mse_cosine objectives.
+  reconstruction_cosine_weight: 0.5
+  contrastive_weight: 0.0
+data:
+  root: /data/lz/contexts/aggregated
+  train_datasets: [squad]
+  validation_datasets: [squad]
+  test_datasets: [squad]
+  max_context_tokens: 2048
+  max_question_tokens: 128
+  max_answer_tokens: 128
+  train_max_samples: 12
+  validation_max_samples: 4
+  test_max_samples: 1000
+  filter_long_context: true
+  filter_no_qa: true
+  sortish_bucket_multiplier: 50
+  cache_sortish_lengths: true
+  cache_dataset: true
+  use_chat_template: false
+  chat_template_enable_thinking: false
+  qa_per_context: 4
+evaluation:
+  teacher_forced_every: 4
+  # Autoregressive F1 is the headline metric; do not set this to a large value to
+  # "save time" -- that is how a run ends up with no trustworthy number at all.
+  autoregressive_every: 4
+  # Matches scripts/test_icl_baseline.py (--squad-max-new-tokens 32) so the two
+  # numbers are produced under the same decoding budget.
+  max_new_tokens: 32
+  qa_batch_size: 4
+training:
+  batch_size: 1
+  epochs: 1
+  grad_accumulation: 1
+  max_grad_norm: 1.0
+  seed: 42
+optimizer:
+  name: adamw
+  lr: 1.0e-4
+  weight_decay: 0.01
+scheduler:
+  name: cosine
+  warmup_steps: 2
+checkpoint:
+  output_dir: outputs/qwen-1.7b
+  save_every_steps: 12
+logging:
+  wandb_project: MemoryQwen
+  wandb_mode: disabled

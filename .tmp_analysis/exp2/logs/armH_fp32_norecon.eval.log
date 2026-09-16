@@ -1,0 +1,4 @@
+Loading weights:   0%|          | 0/311 [00:00<?, ?it/s]Loading weights: 100%|██████████| 311/311 [00:00<00:00, 5295.26it/s]
+TF first-token exact accuracy = 0.293
+RESULT TF step=6000 projectF1=0.4171 officialF1=0.4047 officialEM=0.1567 firstWord=0.223
+RESULT AR step=6000 projectF1=0.2949 officialF1=0.2996 officialEM=0.1867 firstWord=0.223

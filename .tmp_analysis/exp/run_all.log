@@ -1,0 +1,33 @@
+=== phase 1: training 4 arms in parallel  2026-09-16T13:11:18+08:00
+gpu 2 free (used=1MiB) for armC_fixed_mem64 at 2026-09-16T13:11:29+08:00
+gpu 3 free (used=1MiB) for armD_fixed_norecon at 2026-09-16T13:11:34+08:00
+gpu 1 free (used=1MiB) for armB_fixed at 2026-09-16T13:12:44+08:00
+gpu 0 free (used=1MiB) for armA_control at 2026-09-16T13:13:19+08:00
+=== phase 1 done 2026-09-16T14:07:08+08:00
+Validation (teacher-forced): 100%|██████████| 400/400 [01:31<00:00,  3.93batch/s][A                                                                                  [ATraining
+  <- armA_control
+Validation (teacher-forced): 100%|██████████| 400/400 [01:31<00:00,  4.03batch/s][A                                                                                  [ATraining
+  <- armB_fixed
+Validation (teacher-forced): 100%|██████████| 400/400 [01:33<00:00,  3.91batch/s][A                                                                                  [ATraining
+  <- armC_fixed_mem64
+Validation (teacher-forced): 100%|██████████| 400/400 [01:32<00:00,  3.92batch/s][A                                                                                  [ATraining
+  <- armD_fixed_norecon
+=== phase 2: evaluating 4 arms in parallel  2026-09-16T14:07:08+08:00
+armA_control -> /data/lz/MemoryQwen/.tmp_analysis/exp/run/armA_control/outputs/Qwen1.7B_20260916_131327/last.pt
+armB_fixed -> /data/lz/MemoryQwen/.tmp_analysis/exp/run/armB_fixed/outputs/Qwen1.7B_20260916_131252/last.pt
+armC_fixed_mem64 -> /data/lz/MemoryQwen/.tmp_analysis/exp/run/armC_fixed_mem64/outputs/Qwen1.7B_20260916_131136/last.pt
+armD_fixed_norecon -> /data/lz/MemoryQwen/.tmp_analysis/exp/run/armD_fixed_norecon/outputs/Qwen1.7B_20260916_131141/last.pt
+=== phase 2 done 2026-09-16T14:09:10+08:00
+TF first-token exact accuracy = 0.100
+RESULT TF step=6000 projectF1=0.2489 officialF1=0.2466 officialEM=0.0267 firstWord=0.033
+RESULT AR step=6000 projectF1=0.2271 officialF1=0.2284 officialEM=0.1200 firstWord=0.177
+TF first-token exact accuracy = 0.300
+RESULT TF step=6000 projectF1=0.3899 officialF1=0.3750 officialEM=0.1200 firstWord=0.207
+RESULT AR step=6000 projectF1=0.2548 officialF1=0.2534 officialEM=0.1333 firstWord=0.190
+TF first-token exact accuracy = 0.363
+RESULT TF step=6000 projectF1=0.4353 officialF1=0.4321 officialEM=0.1767 firstWord=0.270
+RESULT AR step=6000 projectF1=0.3428 officialF1=0.3636 officialEM=0.2367 firstWord=0.273
+TF first-token exact accuracy = 0.300
+RESULT TF step=6000 projectF1=0.4031 officialF1=0.3824 officialEM=0.1267 firstWord=0.217
+RESULT AR step=6000 projectF1=0.2824 officialF1=0.2850 officialEM=0.1633 firstWord=0.213
+=== ALL DONE
