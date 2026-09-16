@@ -15,7 +15,6 @@ from src.losses import (
     combine_losses,
     context_lm_loss,
     kl_distill_loss,
-    memory_contrastive_loss,
     qa_loss,
     reconstruction_loss,
     sample_positions,
@@ -283,16 +282,6 @@ def main() -> None:
                     cfg.memory.reconstruction_cosine_weight,
                     cfg.memory.reconstruction_loss,
                 )
-            contrastive = (
-                memory_contrastive_loss(
-                    output.memory,
-                    torch.roll(output.memory, shifts=1, dims=0),
-                    cfg.memory.contrastive_temperature,
-                    cfg.memory.contrastive_margin,
-                )
-                if cfg.memory.contrastive_weight
-                else None
-            )
             # Memory-prefixed autoencoding: reconstruct the context through the frozen
             # backbone, scored by its own (tied) unembedding. This is the objective the
             # compression literature uses; it starts near the LM's own nats/token instead of
@@ -333,8 +322,6 @@ def main() -> None:
                 reconstruction,
                 cfg.memory.qa_weight,
                 cfg.memory.reconstruction_weight,
-                contrastive,
-                cfg.memory.contrastive_weight,
                 ae,
                 cfg.memory.ae_lm_weight,
                 distill,

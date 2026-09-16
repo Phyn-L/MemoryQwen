@@ -294,31 +294,12 @@ def kl_distill_loss(student_hidden, teacher_hidden, head, mask=None, temperature
     return total / weight_sum
 
 
-def memory_contrastive_loss(memory, negative_memory=None, temperature=0.07, margin=0.2):
-    """Optional batch memory separation loss.
-
-    A batch cyclic shift is used as the wrong-context memory when
-    ``negative_memory`` is omitted. The function is deliberately standalone so
-    a later QA-conditioned positive pair can replace it without changing the
-    main objective.
-    """
-    if memory.size(0) < 2:
-        return memory.sum() * 0.0
-    z=torch.nn.functional.normalize(memory.mean(1),dim=-1)
-    target = z if negative_memory is None else torch.nn.functional.normalize(negative_memory.mean(1), dim=-1)
-    if negative_memory is None:
-        target = torch.roll(z, shifts=1, dims=0)
-    positive = (z * z).sum(-1) / temperature
-    negative = (z * target).sum(-1) / temperature
-    return torch.relu(margin + negative - positive).mean()
-def combine_losses(qa, reconstruction, qa_weight=1., reconstruction_weight=1., contrastive=None, contrastive_weight=0., ae=None, ae_weight=0., distill=None, distill_weight=0.):
+def combine_losses(qa, reconstruction, qa_weight=1., reconstruction_weight=1., ae=None, ae_weight=0., distill=None, distill_weight=0.):
     total=qa_weight*qa+reconstruction_weight*reconstruction
     terms={"loss":total,"qa_loss":qa,"reconstruction_loss":reconstruction}
     if ae is not None and ae_weight:
         total=total+ae_weight*ae; terms["ae_loss"]=ae
     if distill is not None and distill_weight:
         total=total+distill_weight*distill; terms["distill_loss"]=distill
-    if contrastive is not None and contrastive_weight:
-        total=total+contrastive_weight*contrastive; terms["contrastive_loss"]=contrastive
     terms["loss"]=total
     return total,terms

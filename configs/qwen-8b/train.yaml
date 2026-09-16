@@ -17,7 +17,6 @@ memory:
   reconstruction_loss: context_lm
   context_lm_positions: 256
   reconstruction_cosine_weight: 0.5
-  contrastive_weight: 0.0
 data: {root: "${DATA_ROOT:-/data/lz/contexts/aggregated}", train_datasets: [squad, coqa, drop], validation_datasets: [squad], test_datasets: [squad], max_context_tokens: 2048, max_question_tokens: 128, max_answer_tokens: 128, cache_sortish_lengths: true, cache_dataset: true, use_chat_template: false, chat_template_enable_thinking: false, qa_per_context: 4}
 evaluation: {teacher_forced_every: 2000, autoregressive_every: 4000, max_new_tokens: 32, qa_batch_size: 4, autoregressive_max_qa: 256}
 training: {batch_size: 1, epochs: 1, max_grad_norm: 1.0, seed: 42}

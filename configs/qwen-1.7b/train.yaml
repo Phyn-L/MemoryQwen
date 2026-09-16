@@ -24,7 +24,6 @@ memory:
   context_lm_positions: 256
   # Only read by the mse/cosine/mse_cosine objectives.
   reconstruction_cosine_weight: 0.5
-  contrastive_weight: 0.0
 data:
   root: ${DATA_ROOT:-/data/lz/contexts/aggregated}
   train_datasets: all

@@ -146,9 +146,6 @@ class MemoryConfig:
     # vocabulary head is applied to num_layers * context_lm_positions rows, so this is
     # the knob that bounds the auxiliary objective's cost. <= 0 means "all positions".
     context_lm_positions: int = 256
-    contrastive_weight: float = 0.0
-    contrastive_temperature: float = 0.07
-    contrastive_margin: float = 1.0
 
 
 @dataclass

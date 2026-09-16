@@ -210,7 +210,7 @@ batch 内最长的答案 —— 这些样本的最后一个答案 token 被 EOS 
 | E5 | `src/model.py:243` | prefix 编码开 `output_hidden_states=True`，29 层 × 全 context 长度 的 hidden states 全部保留给 28 个 decoder | B×2048 时约 244MB/context；4 次 run 死于 OOM（峰值 21.7GB/23.5GB） |
 | E6 | `utils/checkpoint.py:18` | `load_state_dict(..., strict=False)` | checkpoint 与模型不匹配时静默通过 |
 | E7 | `src/evaluator.py:166` | `autoregressive()` 结尾又整跑一遍 `teacher_forced()` | 每次 AR 评测成本翻倍 |
-| E8 | `src/losses.py:44-50` | `memory_contrastive_loss` 的 positive 项 `(z*z).sum(-1)/T ≡ 1/T` 是常数，实际只剩一个阈值式排斥项 | 语义与注释不符（当前 weight=0 未启用） |
+| E8 | `src/losses.py:44-50` | `memory_contrastive_loss` 的 positive 项 `(z*z).sum(-1)/T ≡ 1/T` 是常数，实际只剩一个阈值式排斥项 | 语义与注释不符（weight=0 未启用）；该未启用目标随后已删除，见 `docs/READER_OPTIONS.md` |
 | E9 | 环境 | `peft` 未安装，实际走 `StaticLoRALinear` 回退路径 | 与 PEFT 生态不兼容，且要求复现时保持同一路径 |
 | E10 | `src/data.py:180` | answer 单独 tokenize 且 `add_special_tokens=False`，首 token 没有前导空格（`'Deabolis'→['De','abol','is']` vs `' Deabolis'→[' De','abol','is']`） | 训练目标形式不自然；影响有限但应统一 |
 
@@ -260,8 +260,10 @@ squad 只占 7.4%（`outputs/Qwen1.7B/dataset_cache/train-*/hf_dataset`）。
     实测代价 +16% 单步时间、+0.23 GiB 显存（见 README「Auxiliary memory objectives」）。
 11. **加检索/复制辅助损失**：让 memory 与 question 的 cross-attention 直接指向答案 span
     （answer-span 位置监督），这是把"检索"变成显式监督最直接的办法。
-12. 修 `memory_contrastive_loss` 的常数 positive 项，或换成 in-batch 对比（同 context 的
-    question 为正、其他 context 为负）。
+12. ~~修 `memory_contrastive_loss` 的常数 positive 项，或换成 in-batch 对比（同 context 的
+    question 为正、其他 context 为负）。~~ **该目标已删除**（未启用的死选项 + 语义有缺陷）；
+    若日后仍想做"同 context 为正、跨 context 为负"的对比，请按 `docs/READER_OPTIONS.md`
+    的口径重新加一个带测试的新目标，而不是复活这个实现。
 
 ### P3 —— 训练与工程
 
