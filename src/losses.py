@@ -37,9 +37,16 @@ def reconstruction_loss(predicted,target,mask=None,cosine_weight=0.1,mode="mse_c
     if mode == "cosine": return cosine
     return mse + cosine_weight*cosine
 
-def _chunk_cross_entropy(hidden_chunk, labels_chunk, head):
-    """Vocabulary cross entropy for one flat chunk. Separated so it can be checkpointed."""
-    logits = head(hidden_chunk).float()
+def _chunk_cross_entropy(hidden_chunk, labels_chunk, weight):
+    """Vocabulary cross entropy for one flat chunk. Separated so it can be checkpointed.
+
+    ``weight`` is the already materialised ``[vocab, D]`` unembedding, not the head
+    module: a tied head materialises its weight lazily, and letting that happen inside
+    the checkpointed function makes the recomputation save a different number of
+    tensors than the original forward (``CheckpointError``). Passing the weight in as an
+    input keeps the recomputation pure and the materialisation in the outer graph.
+    """
+    logits = F.linear(hidden_chunk, weight).float()
     return F.cross_entropy(logits, labels_chunk, ignore_index=-100, reduction="sum")
 
 
@@ -77,7 +84,16 @@ def context_lm_loss(hidden, labels, head, mask=None, max_logits_rows=256):
     else:
         mask = mask.bool() & labels.ne(-100)
     labels = labels.masked_fill(~mask, -100)
-    head_dtype = head.weight.dtype
+    # A plain nn.Linear exposes ``weight``; src.model.VocabularyHead in tied mode does
+    # not and reports the dtype its adapter computes in instead.
+    head_dtype = getattr(head, "compute_dtype", None) or head.weight.dtype
+    # Materialise the unembedding once per call, outside the checkpointed chunks: a tied
+    # head builds ``E @ adapter`` lazily, and doing that inside the checkpoint would make
+    # the recomputation save a different number of tensors than the forward.
+    weight = (
+        head.materialized_weight()
+        if hasattr(head, "materialized_weight") else head.weight
+    )
     total = None
     layers = hidden.size(1)
     for layer in range(layers):
@@ -97,11 +113,11 @@ def context_lm_loss(hidden, labels, head, mask=None, max_logits_rows=256):
                     continue
                 if torch.is_grad_enabled() and chunk_hidden.requires_grad:
                     chunk_sum = torch.utils.checkpoint.checkpoint(
-                        _chunk_cross_entropy, chunk_hidden, chunk_labels, head,
+                        _chunk_cross_entropy, chunk_hidden, chunk_labels, weight,
                         use_reentrant=False,
                     )
                 else:
-                    chunk_sum = _chunk_cross_entropy(chunk_hidden, chunk_labels, head)
+                    chunk_sum = _chunk_cross_entropy(chunk_hidden, chunk_labels, weight)
                 layer_sum = chunk_sum if layer_sum is None else layer_sum + chunk_sum
                 layer_count += int(count)
             if layer_sum is None:

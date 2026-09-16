@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import torch
 from torch import nn
+from torch.nn import functional as F
 from .MemoryDecoder import MemoryDecoder
 from .dtypes import no_autocast
 
@@ -60,6 +61,90 @@ def is_trainable_parameter_name(name: str) -> bool:
         or name == "memory_tokens"
         or name.startswith(("decoders.", "context_lm_head."))
     )
+
+
+class VocabularyHead(nn.Module):
+    """Shared unembedding for the context next-token objective.
+
+    ``mode="linear"`` (default) is the original behaviour: a from-scratch
+    ``[vocab, D]`` weight matrix trained by the loss. ``mode="tied"`` instead reuses
+    the backbone's own (frozen, tied) input embedding ``E`` and trains only a
+    ``D -> H`` adapter, so the classifier lives in the pretrained token geometry:
+
+        W = E @ adapter.weight            # [vocab, D]
+
+    This is the read-out the compression papers rely on ("score with the model's own
+    embedding"): a random 38.9M-parameter head is a cold start that has to learn the
+    whole vocabulary geometry from 256-dim bottleneck states, and its gradient noise
+    is what the memory tokens receive first.
+
+    ``W`` is materialised once per parameter version and cached: the naive two-step
+    form ``(h @ A.T) @ E.T`` costs ``H * vocab`` per row against ``D * vocab`` for the
+    materialised one (8x for Qwen3-1.7B), while the materialisation itself is one
+    ``vocab x H x D`` matmul (~3 ms) against ~86k scored rows per step -- the
+    break-even point is ~292 rows, so materialising always wins here. The cache key is
+    the adapter weight's version counter, so an optimizer step (an in-place update)
+    invalidates it automatically and a stale head can never score a later forward;
+    ``refresh()`` clears it explicitly. ``E`` is a frozen parameter of the backbone, so
+    only the adapter receives gradient.
+    """
+
+    def __init__(self, hidden_size, vocab_size, mode="linear", embedding_getter=None,
+                 backbone_hidden_size=None, init_adapter=None):
+        super().__init__()
+        if mode not in {"linear", "tied"}:
+            raise ValueError(f"VocabularyHead mode must be 'linear' or 'tied', got {mode!r}")
+        self.mode = mode
+        self.hidden_size = int(hidden_size)
+        self.vocab_size = int(vocab_size)
+        self._embedding_getter = embedding_getter
+        self._cached_weight = None
+        self._cache_key = None
+        if mode == "linear":
+            # Same shape and same init as the nn.Linear this replaces, so parameter
+            # names (context_lm_head.weight) and RNG consumption stay identical.
+            self.weight = nn.Parameter(torch.empty(self.vocab_size, self.hidden_size))
+            nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
+        else:
+            if embedding_getter is None or backbone_hidden_size is None:
+                raise ValueError("tied mode needs embedding_getter and backbone_hidden_size")
+            self.adapter = nn.Linear(self.hidden_size, int(backbone_hidden_size), bias=False)
+            if init_adapter is not None:
+                expected = (int(backbone_hidden_size), self.hidden_size)
+                if tuple(init_adapter.shape) != expected:
+                    raise ValueError(f"init_adapter must be {expected}, got {tuple(init_adapter.shape)}")
+                with torch.no_grad():
+                    self.adapter.weight.copy_(init_adapter)
+
+    @property
+    def compute_dtype(self) -> torch.dtype:
+        """dtype a chunk of hidden states must be cast to before scoring."""
+        return self.weight.dtype if self.mode == "linear" else self.adapter.weight.dtype
+
+    def refresh(self):
+        """Drop the materialised weight; the next call rebuilds it."""
+        self._cached_weight = None
+        self._cache_key = None
+        return self
+
+    def materialized_weight(self) -> torch.Tensor:
+        if self.mode == "linear":
+            return self.weight
+        weight = self.adapter.weight
+        key = (weight._version, weight.data_ptr())
+        if self._cached_weight is None or self._cache_key != key:
+            # The backbone embedding is bfloat16 while the adapter is float32 (the
+            # trainable dtype), so the product needs one common dtype. Compute it in the
+            # adapter's dtype: that keeps the fp32 contract the trainable dtype exists
+            # for, and the bfloat16 -> float32 copy is a transient the caching allocator
+            # reuses (1.2 GB for Qwen3-1.7B, once per step).
+            embedding = self._embedding_getter()
+            self._cached_weight = embedding.to(weight.dtype) @ weight
+            self._cache_key = key
+        return self._cached_weight
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        return F.linear(hidden, self.materialized_weight())
 
 
 class StaticLoRALinear(nn.Module):
@@ -247,7 +332,7 @@ class MetaLoRA(nn.Module):
     ``StaticLoRALinear``/``MemoryDecoder`` cast on entry and exit, and the losses
     upcast before reducing.
     """
-    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, context_lm=False, use_peft=False):
+    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, context_lm=False, use_peft=False, head_mode="linear", head_init="auto"):
         super().__init__()
         self.rank, self.alpha = rank, alpha
         self.target_modules = tuple(target_modules or ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"))
@@ -282,8 +367,22 @@ class MetaLoRA(nn.Module):
         # num_layers * D * vocab_size = 28 * 256 * 151936 ~= 1.09B parameters, while a
         # shared one costs D * vocab_size ~= 39M and still leaves each layer's decoder
         # free to produce its own hidden state.
+        #
+        # ``head_mode="tied"`` replaces those 39M from-scratch weights with a 0.5M
+        # adapter into the backbone's own frozen embedding geometry (VocabularyHead).
+        # ``head_init="auto"`` initialises that adapter from the decoders' memory
+        # projection, so the first logits already mean "the token whose embedding the
+        # memory points at" instead of a random direction.
+        self.head_mode = head_mode
         self.context_lm_head = (
-            nn.Linear(decoder_hidden_size, int(self.qwen.get_input_embeddings().weight.size(0)), bias=False)
+            VocabularyHead(
+                decoder_hidden_size,
+                int(self.qwen.get_input_embeddings().weight.size(0)),
+                mode=head_mode,
+                embedding_getter=lambda: self.qwen.get_input_embeddings().weight,
+                backbone_hidden_size=self.qwen_hidden_size,
+                init_adapter=self._head_adapter_init(head_init, decoder_hidden_size),
+            )
             if self.context_lm else None
         )
         # Qwen's embedding weight is the single source of truth for the frozen
@@ -352,6 +451,34 @@ class MetaLoRA(nn.Module):
     @property
     def dtype(self) -> torch.dtype:
         return self.qwen.get_input_embeddings().weight.dtype
+
+    def _head_adapter_init(self, head_init, decoder_hidden_size):
+        """Initial ``[H, D]`` adapter for a tied vocabulary head, or None for default.
+
+        ``memory_projection`` uses the decoders' own memory projection. The adapter maps
+        a decoder state back to the backbone width, so ``h @ W_mem`` is the up-projection
+        of that state; scoring it against the frozen embedding gives "the tokens whose
+        embeddings the memory already points at" at step 0. The head is shared by every
+        layer, so the mean projection over layers is the symmetric choice.
+        """
+        if head_init == "random":
+            return None
+        if head_init == "auto":
+            head_init = "memory_projection"
+        if head_init != "memory_projection":
+            raise ValueError(
+                f"memory.head_init must be auto, random or memory_projection, got {head_init!r}"
+            )
+        with torch.no_grad():
+            stacked = torch.stack(
+                [decoder.memory_projection.weight for decoder in self.decoders], dim=0
+            ).mean(dim=0)                       # [D, H]
+        if tuple(stacked.shape) != (decoder_hidden_size, self.qwen_hidden_size):
+            raise ValueError(
+                f"memory projection has shape {tuple(stacked.shape)}, expected "
+                f"({decoder_hidden_size}, {self.qwen_hidden_size})"
+            )
+        return stacked.t().detach().clone()     # [H, D]
 
     def _memory_prefix(self, layer_memory):
         return layer_memory[:, -1]  # final Qwen layer memory is the input prefix
@@ -651,6 +778,8 @@ def load_model(cfg):
         trainable_dtype=dtype_from_name(cfg.model.trainable_dtype),
         context_lm=cfg.memory.reconstruction_loss == "context_lm",
         use_peft=cfg.model.use_peft,
+        head_mode=cfg.memory.head_mode,
+        head_init=cfg.memory.head_init,
     )
     for name,p in model.named_parameters():
         p.requires_grad=is_trainable_parameter_name(name)
@@ -660,6 +789,7 @@ def load_model(cfg):
 __all__ = [
     "MetaLoRA", "MetaLoRAOutput",
     "StaticLoRALinear", "MemoryDecoder", "ContextPrefix", "ContextLMTerms",
+    "VocabularyHead",
     "build_block_causal_mask", "build_continuation_mask",
     "is_trainable_parameter_name", "load_model",
     "disable_autocast_for_peft_lora",

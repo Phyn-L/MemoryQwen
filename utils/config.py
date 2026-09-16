@@ -89,6 +89,19 @@ class MemoryConfig:
     qa_weight: float = 1.0
     reconstruction_loss: str = "mse_cosine"
     reconstruction_cosine_weight: float = 0.1
+    # How the shared context_lm unembedding is parameterised.
+    #   "linear" (default): a from-scratch [vocab, D] weight matrix -- the original
+    #                       behaviour, kept as the default so nothing changes silently.
+    #   "tied":             W = E @ adapter, with E the frozen (tied) input embedding of
+    #                       the backbone. Trains D*H ~= 0.5M instead of D*vocab ~= 39M
+    #                       and starts from the pretrained token geometry.
+    head_mode: str = "linear"
+    # Initialisation of the tied adapter (ignored in "linear" mode):
+    #   "auto"              -> "memory_projection" for tied, "random" otherwise
+    #   "random"            -> default nn.Linear init
+    #   "memory_projection" -> up-projection through the decoders' memory projection, so
+    #                          step-0 logits already score the tokens the memory points at
+    head_init: str = "auto"
     # context_lm: number of context positions scored per context per step. The shared
     # vocabulary head is applied to num_layers * context_lm_positions rows, so this is
     # the knob that bounds the auxiliary objective's cost. <= 0 means "all positions".
@@ -252,6 +265,10 @@ class TrainConfig:
             raise ValueError("memory.decoder_hidden_size must be divisible by memory.decoder_heads")
         if m.reconstruction_loss not in {"mse", "cosine", "mse_cosine", "context_lm"}:
             raise ValueError("reconstruction_loss must be mse, cosine, mse_cosine, or context_lm")
+        if m.head_mode not in {"linear", "tied"}:
+            raise ValueError("memory.head_mode must be linear or tied")
+        if m.head_init not in {"auto", "random", "memory_projection"}:
+            raise ValueError("memory.head_init must be auto, random or memory_projection")
         if m.context_lm_positions < 0:
             raise ValueError("memory.context_lm_positions must be >= 0 (0 scores every position)")
         if m.qa_weight < 0 or m.reconstruction_weight < 0:

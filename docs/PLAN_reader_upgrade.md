@@ -73,7 +73,8 @@ class VocabularyHead(nn.Module):
 - **必须物化**：`(h @ A.T) @ E.T` 每行 312M MACs，物化后每行 38.9M（与现在相同）；物化成本 `151936×2048×256 ≈ 1.6e11 FLOPs ≈ 3 ms/卡`，盈亏平衡点仅 292 行，而每步有 8.6 万行。
 - **初始化**（`head_init="memory_projection"`，tied 模式默认）：`A = decoders[0].memory_projection.weight.T`（[H,D]），此时 `logits = h @ W.T = (W_mem h) @ E.T`，即"预测与 memory 隐状态最对齐的 token"，比随机方向好得多。
 - 缓存生命周期：`MetaLoRA.forward()` 开头调 `self.context_lm_head.refresh()`；`torch.utils.checkpoint` 的反向重算会复用同一份物化结果（梯度仍正确）。
-- 配置：`memory.head_mode: "linear" | "tied"`（默认 `"linear"`）、`memory.head_init: "random" | "memory_projection"`（默认 `"random"`；tied 且未显式指定时用 `"memory_projection"`）。`validate()` 校验取值。
+- 配置：`memory.head_mode: "linear" | "tied"`（默认 `"linear"`）、`memory.head_init: "auto" | "random" | "memory_projection"`（默认 `"auto"`：tied → `memory_projection`，linear → `random`）。`validate()` 校验取值。
+- 实现细节（改动时踩到并修掉的两个坑，均有测试钉住）：物化权重必须**提到 `torch.utils.checkpoint` 之外作为输入传入**，否则重算时缓存命中会让"保存的张量数"不同（`CheckpointError`）；`E` 是 bf16 而 adapter 是 fp32，相乘要先把 `E` 转到 adapter 的 dtype（保持 fp32 精度，代价是一次性的 ~1.2 GB 转置拷贝，分配器会复用）。
 - `is_trainable_parameter_name` 已含前缀 `context_lm_head.`，tied 模式的参数名是 `context_lm_head.adapter.weight`，**无需改规则**（并有测试断言这一点）。
 
 **怎么验证**：
