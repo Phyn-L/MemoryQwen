@@ -214,15 +214,16 @@ def build_block_causal_mask(
     question_mask: torch.Tensor,
     answer_mask: torch.Tensor,
     dtype: torch.dtype,
+    allow_slot_attention: bool = False,
 ) -> torch.Tensor:
     """Build an additive mask for ``[context, memory, question, answer]``.
 
     Context positions attend only to valid, earlier context positions. Memory
     positions attend only to valid context positions (never to another memory
-    token). Question positions attend to memory and earlier question positions,
-    while answer positions attend to memory, question, and earlier answer
-    positions. Padding keys are blocked. Padded query rows keep a self edge to
-    avoid all-``-inf`` rows; their outputs are ignored by the loss.
+    token, unless ``allow_slot_attention``). Question positions attend to memory and
+    earlier question positions, while answer positions attend to memory, question, and
+    earlier answer positions. Padding keys are blocked. Padded query rows keep a self
+    edge to avoid all-``-inf`` rows; their outputs are ignored by the loss.
 
     The memory rows are the one kind of row that can end up fully blocked: they see
     nothing but the context, so a row whose context is entirely padding leaves them with
@@ -260,6 +261,15 @@ def build_block_causal_mask(
     allowed[:, :context_len, :context_len] = context_mask[:, None, :] & causal_context
     # memory rows: every valid context key, nothing else (no memory <-> memory)
     allowed[:, m0:q0, :context_len] = context_mask[:, None, :]
+    if allow_slot_attention:
+        # Let each memory token read the earlier memory tokens too, so the M slots can
+        # coordinate instead of being independent bottleneck channels. ICAE's memory
+        # tokens are ordinary causal positions and do see each other. Costs no memory
+        # and no parameters; it only changes what the memory rows attend to.
+        causal_memory = torch.tril(
+            torch.ones(memory_length, memory_length, dtype=torch.bool, device=device)
+        )
+        allowed[:, m0:q0, m0:q0] = causal_memory
     causal_qa = torch.tril(torch.ones(question_len + answer_len, question_len + answer_len, dtype=torch.bool, device=device))
     # question rows: all memory + causal over valid question keys
     allowed[:, q0:a0, m0:q0] = True
@@ -332,7 +342,7 @@ class MetaLoRA(nn.Module):
     ``StaticLoRALinear``/``MemoryDecoder`` cast on entry and exit, and the losses
     upcast before reducing.
     """
-    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, context_lm=False, use_peft=False, head_mode="linear", head_init="auto"):
+    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, context_lm=False, use_peft=False, head_mode="linear", head_init="auto", init_mode="randn", init_seed=0, allow_slot_attention=False):
         super().__init__()
         self.rank, self.alpha = rank, alpha
         self.target_modules = tuple(target_modules or ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"))
@@ -390,6 +400,51 @@ class MetaLoRA(nn.Module):
         # so the trainable dtype is restored immediately afterwards.
         self.to(dtype=qwen_dtype)
         self.set_trainable_dtype(trainable_dtype)
+        # Which memory-writer options are active, recorded for reproducibility. The
+        # slot embeddings are (re)initialised last so the copy lands in the trainable
+        # dtype and cannot be overwritten by the dtype casts above.
+        self.init_mode = init_mode
+        self.init_seed = int(init_seed)
+        self.allow_slot_attention = bool(allow_slot_attention)
+        self._init_memory_tokens(init_mode, init_seed)
+
+    def _init_memory_tokens(self, init_mode, init_seed):
+        """(Re)initialise the M slot embeddings. ``randn`` keeps the historical default.
+
+        The scale of ``randn * 0.02`` already matches a token embedding, but the
+        *directions* are a random subspace: the frozen backbone then sees memory
+        positions that are off the manifold of real tokens. ``token_embed`` draws M
+        distinct vocabulary entries instead, ``vocab_mean`` starts from the embedding
+        mean with the same 0.02 noise. Both are writer-side engineering hygiene, not a
+        mechanism from the compression papers.
+        """
+        if init_mode == "randn":
+            return
+        if init_mode not in {"token_embed", "vocab_mean"}:
+            raise ValueError(
+                f"memory.init_mode must be randn, token_embed or vocab_mean, got {init_mode!r}"
+            )
+        embedding = self.qwen.get_input_embeddings().weight
+        with torch.no_grad():
+            if init_mode == "token_embed":
+                vocab = embedding.size(0)
+                slots = self.memory_tokens.size(0)
+                if slots > vocab:
+                    raise ValueError(
+                        f"memory_length {slots} exceeds the vocabulary size {vocab}"
+                    )
+                generator = torch.Generator().manual_seed(int(init_seed))
+                ids = torch.randperm(vocab, generator=generator)[:slots]
+                self.memory_tokens.data.copy_(embedding[ids].to(self.memory_tokens.dtype))
+            else:
+                mean = embedding.mean(dim=0).to(self.memory_tokens.dtype)
+                noise = torch.randn(
+                    self.memory_tokens.shape,
+                    generator=torch.Generator().manual_seed(int(init_seed)),
+                )
+                self.memory_tokens.data.copy_(
+                    mean + noise.to(self.memory_tokens.dtype) * 0.02
+                )
 
     def set_trainable_dtype(self, dtype: torch.dtype):
         """Cast every trainable parameter to ``dtype`` (float32 by default).
@@ -566,7 +621,7 @@ class MetaLoRA(nn.Module):
         memory_inputs = self.memory_tokens.to(dtype=self.dtype).unsqueeze(0).expand(context_embeds.size(0), -1, -1)
         sequence = torch.cat([context_embeds, memory_inputs], dim=1)
         empty = context_mask.new_zeros(context_embeds.size(0), 0)
-        block_mask = build_block_causal_mask(context_mask, memory_inputs.size(1), empty, empty, sequence.dtype)
+        block_mask = build_block_causal_mask(context_mask, memory_inputs.size(1), empty, empty, sequence.dtype, allow_slot_attention=self.allow_slot_attention)
         # No logits are read from this pass, so skip the vocabulary head entirely.
         out = self._transformer_body(inputs_embeds=sequence, attention_mask=block_mask, output_hidden_states=True, use_cache=True, return_dict=True)
         states = out.hidden_states or (sequence, out.last_hidden_state)
@@ -780,6 +835,9 @@ def load_model(cfg):
         use_peft=cfg.model.use_peft,
         head_mode=cfg.memory.head_mode,
         head_init=cfg.memory.head_init,
+        init_mode=cfg.memory.init_mode,
+        init_seed=cfg.memory.init_seed,
+        allow_slot_attention=cfg.memory.allow_slot_attention,
     )
     for name,p in model.named_parameters():
         p.requires_grad=is_trainable_parameter_name(name)

@@ -102,6 +102,17 @@ class MemoryConfig:
     #   "memory_projection" -> up-projection through the decoders' memory projection, so
     #                          step-0 logits already score the tokens the memory points at
     head_init: str = "auto"
+    # How the M global memory slot embeddings are initialised.
+    #   "randn" (default): randn * 0.02 -- the historical behaviour.
+    #   "token_embed":     M distinct real vocabulary embeddings, i.e. the same manifold
+    #                      the frozen backbone was trained on.
+    #   "vocab_mean":      the embedding mean plus the same randn * 0.02 noise.
+    init_mode: str = "randn"
+    init_seed: int = 0
+    # Let memory slot i attend to slots <= i (causal) inside the encoder pass. ICAE's
+    # memory tokens are ordinary causal positions and do see each other; the default
+    # keeps the historical "each slot reads the context only" behaviour.
+    allow_slot_attention: bool = False
     # context_lm: number of context positions scored per context per step. The shared
     # vocabulary head is applied to num_layers * context_lm_positions rows, so this is
     # the knob that bounds the auxiliary objective's cost. <= 0 means "all positions".
@@ -269,6 +280,8 @@ class TrainConfig:
             raise ValueError("memory.head_mode must be linear or tied")
         if m.head_init not in {"auto", "random", "memory_projection"}:
             raise ValueError("memory.head_init must be auto, random or memory_projection")
+        if m.init_mode not in {"randn", "token_embed", "vocab_mean"}:
+            raise ValueError("memory.init_mode must be randn, token_embed or vocab_mean")
         if m.context_lm_positions < 0:
             raise ValueError("memory.context_lm_positions must be >= 0 (0 scores every position)")
         if m.qa_weight < 0 or m.reconstruction_weight < 0:

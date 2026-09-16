@@ -162,6 +162,34 @@ def test_linear_and_tied_heads_train_and_differ():
     assert losses["linear_trainable"] - losses["tied_trainable"] == 1024 - 512
 
 
+def test_slot_attention_changes_the_encoder_pass_deterministically():
+    """``allow_slot_attention`` must reach ``encode_context_prefix``, not just the model.
+
+    The rule itself is pinned by ``tests/test_masks.py``; here we check the plumbing on a
+    real backbone: with the flag off two calls agree bit for bit, and turning it on (which
+    lets slot k read slots <= k) changes the per-layer memory states.
+    """
+    if Qwen3ForCausalLM is None:
+        print("skip: transformers is not installed")
+        return
+    model = _build("linear")
+    batch = _batch()
+    embedding = model.qwen.get_input_embeddings()
+    context = embedding(batch["context_ids"])
+
+    model.allow_slot_attention = False
+    off_first = model.encode_context_prefix(context, batch["context_mask"])
+    off_second = model.encode_context_prefix(context, batch["context_mask"])
+    assert torch.equal(off_first.layer_memory, off_second.layer_memory)
+
+    model.allow_slot_attention = True
+    on = model.encode_context_prefix(context, batch["context_mask"])
+    assert off_first.layer_memory.shape == on.layer_memory.shape
+    assert not torch.allclose(off_first.layer_memory, on.layer_memory), (
+        "slot attention did not change the memory states"
+    )
+
+
 if __name__ == "__main__":
     for name, function in sorted(globals().items()):
         if name.startswith("test_") and callable(function):

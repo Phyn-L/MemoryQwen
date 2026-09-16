@@ -31,7 +31,8 @@ def _allowed(mask: torch.Tensor) -> torch.Tensor:
     return mask == 0
 
 
-def _block_oracle(context_mask, memory_length, question_mask, answer_mask):
+def _block_oracle(context_mask, memory_length, question_mask, answer_mask,
+                  allow_slot_attention=False):
     """Independent transcription of the block-mask rules. Returns [B, T, T] bool."""
     context_mask, question_mask, answer_mask = (
         context_mask.bool(), question_mask.bool(), answer_mask.bool()
@@ -52,6 +53,9 @@ def _block_oracle(context_mask, memory_length, question_mask, answer_mask):
         for k in range(memory_length):
             for j in range(context_len):
                 allowed[b, m0 + k, j] = bool(context_mask[b, j])
+            if allow_slot_attention:
+                for j in range(k + 1):
+                    allowed[b, m0 + k, m0 + j] = True
         for i in range(question_len):
             if question_mask[b, i]:
                 for j in range(m0, q0):
@@ -179,6 +183,43 @@ def test_only_memory_rows_can_be_fully_blocked_and_only_with_an_empty_context():
                     assert not fully_blocked, (
                         f"row {row} (batch {b}) is fully blocked; only memory rows may be"
                     )
+
+
+def test_slot_attention_only_adds_causal_memory_edges():
+    """``allow_slot_attention`` changes memory rows and nothing else.
+
+    Two things are pinned: the exact rule (slot k may read slots <= k), and that no
+    other row's allowed set moves -- a leak into the question/answer rows would let the
+    QA path see context, which is the invariant the whole memory design rests on.
+    """
+    for context_mask, question_mask, answer_mask, memory_length in _random_cases(seed=5):
+        off = build_block_causal_mask(
+            context_mask, memory_length, question_mask, answer_mask, torch.float32,
+        )
+        on = build_block_causal_mask(
+            context_mask, memory_length, question_mask, answer_mask, torch.float32,
+            allow_slot_attention=True,
+        )
+        got_off = _allowed(off)[0, 0]
+        got_on = _allowed(on)[0, 0]
+        assert torch.equal(got_off, _block_oracle(
+            context_mask, memory_length, question_mask, answer_mask
+        )[0]), "the default mask is no longer the documented one"
+        assert torch.equal(got_on, _block_oracle(
+            context_mask, memory_length, question_mask, answer_mask, allow_slot_attention=True
+        )[0]), "slot attention diverged from the documented rule"
+
+        context_len = context_mask.size(1)
+        m0, q0 = context_len, context_len + memory_length
+        outside_memory = torch.cat([
+            got_off[:m0], got_off[q0:],
+        ], dim=0)
+        outside_memory_on = torch.cat([
+            got_on[:m0], got_on[q0:],
+        ], dim=0)
+        assert torch.equal(outside_memory, outside_memory_on), (
+            "slot attention changed a context or QA row"
+        )
 
 
 def test_blocked_entries_are_finite_so_no_row_can_nan():
