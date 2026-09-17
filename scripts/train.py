@@ -270,11 +270,19 @@ def main() -> None:
         cfg.logging.wandb_run_id = args.wandb_run_id
 
     if accelerator is not None:
-        model, optimizer, scheduler, train_loader, validation_loader = (
+        # The scheduler is deliberately NOT prepared. `accelerator.prepare` wraps an
+        # LRScheduler in `AcceleratedScheduler`, whose `step()` advances the wrapped
+        # scheduler `num_processes` times per call when ``split_batches`` is False (the
+        # default): with 2 ranks a cosine built for 8 steps is finished after 4 loop
+        # steps, and 8 ranks consume the whole schedule in the first eighth of the run.
+        # HF's cosine keeps being evaluated past its end, so the LR then *oscillates*
+        # between zero and the peak instead of annealing. Every rank steps its own
+        # unwrapped scheduler once per optimizer step, which is the intended schedule and
+        # keeps the ranks identical.
+        model, optimizer, train_loader, validation_loader = (
             accelerator.prepare(
                 model,
                 optimizer,
-                scheduler,
                 train_loader,
                 validation_loader,
             )
@@ -414,8 +422,15 @@ def main() -> None:
             )
 
             if run and step % cfg.logging.log_every == 0:
+                # `train/lr` is logged next to the losses on purpose: the LR schedule is
+                # the one training-side scalar that silently went wrong before (accelerate
+                # stepping it once per rank, see the prepare() comment), and without this
+                # key a distorted schedule is invisible in the run history.
                 run.log(
-                    {f"train/{k}": float(v.detach()) for k, v in terms.items()},
+                    {
+                        **{f"train/{k}": float(v.detach()) for k, v in terms.items()},
+                        "train/lr": float(scheduler.get_last_lr()[0]),
+                    },
                     step=step,
                 )
             is_main = accelerator is None or accelerator.is_main_process

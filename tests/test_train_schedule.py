@@ -9,7 +9,10 @@ Four behaviours a single-epoch run depends on, and that are easy to lose in a re
    spends compute, so a batch-size or process-count mismatch is visible in one line;
 4. the allocator cache is handed back after an evaluation. The H200 ON arm died in the *next*
    training step's backward with "5.31 GiB reserved but unallocated" while asking for 3.40 GiB,
-   immediately after its first evaluation at step 500.
+   immediately after its first evaluation at step 500;
+5. the LR scheduler is *not* handed to ``accelerator.prepare`` (that wraps it and advances it
+   once per rank, which compressed every multi-GPU schedule by the rank count), and the LR is
+   logged so a distorted schedule is visible in the run history.
 """
 from __future__ import annotations
 
@@ -87,6 +90,41 @@ def test_the_allocator_cache_is_released_after_an_evaluation():
     )
     # It must be tied to an evaluation having happened, not run every step.
     assert "teacher_metrics is not None or metrics is not None" in source
+
+
+def _parenthesised_call(source: str, needle: str) -> str:
+    """The full text of the call starting at ``needle`` (balanced parentheses)."""
+    start = source.index(needle)
+    depth = 0
+    for index in range(start, len(source)):
+        if source[index] == "(":
+            depth += 1
+        elif source[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+    raise AssertionError(f"unbalanced call for {needle!r}")
+
+
+def test_the_scheduler_is_not_wrapped_by_accelerate():
+    """The LR schedule must advance once per optimizer step, not once per rank.
+
+    ``accelerator.prepare`` replaces an LRScheduler with ``AcceleratedScheduler``, whose
+    ``step()`` calls the wrapped scheduler ``num_processes`` times when ``split_batches``
+    is False -- the default. With 8 ranks that consumes a cosine built for the whole run
+    in the first eighth of it, and HF's cosine keeps being evaluated past its end, so the
+    LR then oscillates between zero and the peak instead of annealing. Measured on 2 ranks
+    with a cosine built for 8 steps: ``last_epoch`` went 2, 4, 6, 8 and the LR was 0 after
+    four loop steps. The scheduler therefore stays unwrapped and the loop steps it.
+    """
+    source = _train_source()
+    prepared = _parenthesised_call(source, "accelerator.prepare(")
+    assert "scheduler" not in prepared, (
+        "passing the scheduler to accelerator.prepare() compresses the LR schedule by the "
+        f"rank count; prepared call was: {prepared}"
+    )
+    assert source.count("scheduler.step()") == 1, "the loop owns the single scheduler step"
+    assert '"train/lr"' in source, "the LR must be logged, or a distorted schedule is invisible"
 
 
 if __name__ == "__main__":
