@@ -15,6 +15,9 @@ What is asserted
 4. ``head_init="memory_projection"`` starts from the decoders' memory projection, so
    the step-0 logits already score the tokens the memory points at.
 5. ``context_lm_loss`` runs end to end with a tied head and backpropagates into it.
+6. A materialisation performed under ``torch.no_grad()`` (every evaluation) never becomes
+   the cached weight a later training step scores with -- that is what made the ON arm die
+   on the first step after its first validation with DDP's "did not receive grad" error.
 """
 from __future__ import annotations
 
@@ -202,6 +205,41 @@ def test_optimizer_step_invalidates_the_cache():
     optimizer.step()                                    # in-place update
     logits_after = head(hidden).detach()
     assert not torch.allclose(logits_before, logits_after)
+
+
+def test_a_no_grad_materialisation_does_not_poison_the_next_training_step():
+    """An evaluation must not leave a grad-free weight behind for training to reuse.
+
+    Every evaluation runs inside ``torch.no_grad()``, and the optimizer step just before
+    it bumped the adapter's version, so the evaluation always materialises a fresh weight
+    -- without a graph. Caching that tensor under the current version made the *next*
+    training forward score with a weight the adapter is not part of: the adapter received
+    no gradient on that step and DDP aborted the run with
+
+        RuntimeError: Expected to have finished reduction in the prior iteration ...
+        Parameter indices which did not receive grad for rank 3: 757
+
+    757 is ``context_lm_head.adapter.weight`` in the 1.7B ON configuration. This test is
+    the single-process version of that failure: materialise under ``no_grad`` and check
+    that the very next grad-enabled forward still reaches the adapter.
+    """
+    _, head = _tied_head()
+    with torch.no_grad():
+        stale = head.materialized_weight()
+    assert not stale.requires_grad, "the no_grad product is only useful for the eval itself"
+
+    hidden = torch.randn(6, 8)
+    head(hidden).sum().backward()
+    assert head.adapter.weight.grad is not None, "the adapter got no gradient after an evaluation"
+    assert float(head.adapter.weight.grad.abs().sum()) > 0.0
+
+
+def test_a_grad_enabled_materialisation_is_still_cached():
+    """The perf property must survive the fix: one materialisation per step, not per call."""
+    _, head = _tied_head()
+    first = head.materialized_weight()
+    assert first.requires_grad
+    assert head.materialized_weight() is first
 
 
 # --- 4. memory-projection initialisation -------------------------------------------

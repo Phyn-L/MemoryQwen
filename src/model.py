@@ -182,8 +182,20 @@ class VocabularyHead(nn.Module):
             # allocator reuses (1.2 GB for Qwen3-1.7B, once per step).
             embedding = self._embedding_getter()
             with no_autocast(weight.device):
-                self._cached_weight = embedding.to(weight.dtype) @ weight
-            self._cache_key = key
+                materialized = embedding.to(weight.dtype) @ weight
+            if torch.is_grad_enabled() and weight.requires_grad:
+                self._cached_weight = materialized
+                self._cache_key = key
+                return self._cached_weight
+            # Under torch.no_grad() -- which is where every evaluation runs -- the product
+            # carries no edge back to the adapter. Caching it under the *current* version
+            # would make the next training forward score with a weight the adapter is not
+            # part of, so the adapter would receive no gradient at all and DDP would abort
+            # that step with "Expected to have finished reduction in the prior iteration
+            # ... Parameter indices which did not receive grad: 757" (that index is this
+            # adapter). Return the tensor without touching the cache instead: the next
+            # grad-enabled forward materialises a connected weight again.
+            return materialized
         return self._cached_weight
 
     def forward(self, hidden: torch.Tensor) -> torch.Tensor:
