@@ -44,6 +44,17 @@ ANSWER_METRIC_KEYS = (*METRIC_KEYS, "first_token_em")
 LOSS_KEYS = ("loss", "qa_loss", "ppl", "reconstruction_loss", "ae_loss", "distill_loss")
 
 
+def should_evaluate(step: int, every: int, total_steps: int) -> bool:
+    """Whether an evaluation runs at ``step``.
+
+    The cadences are modulo-based, so a cadence that does not divide the run -- every 1000
+    steps over a 7890-step single epoch, say -- would leave the last reported number 10%
+    short of the end of training, and that final number is the one a short run is read
+    for. The last step is therefore always evaluated, whatever the cadence says.
+    """
+    return step % every == 0 or step >= total_steps
+
+
 def eval_log_payloads(teacher_metrics=None, autoregressive_metrics=None):
     """Group evaluation scalars into their W&B sections.
 
@@ -53,7 +64,8 @@ def eval_log_payloads(teacher_metrics=None, autoregressive_metrics=None):
     they are still that pass's numbers and must not be duplicated under the other section.
 
     Training-side losses (including ``ae_loss``/``distill_loss``) are logged separately as
-    ``train/*`` every 10 steps by the training loop, so they must not be folded in here.
+    ``train/*`` every ``logging.log_every`` steps by the training loop, so they must not be
+    folded in here.
     """
     payloads = []
     if teacher_metrics is not None:
@@ -185,6 +197,23 @@ def main() -> None:
     total_steps = max(1, effective_loader_len * cfg.training.epochs)
     optimizer = build_optimizer(model, cfg.optimizer)
     scheduler = build_scheduler(optimizer, cfg.scheduler, total_steps)
+    # Echo the resolved schedule once. On a single-epoch run every cadence and the warm-up
+    # are read against the step budget, and a batch/process mismatch changes that budget
+    # silently: this line is the number the progress bar will show, printed before any
+    # compute is spent.
+    if accelerator is None or accelerator.is_main_process:
+        ranks = 1 if accelerator is None else accelerator.num_processes
+        print(
+            "schedule: "
+            f"steps={total_steps} (epochs={cfg.training.epochs}) "
+            f"batch={cfg.training.batch_size}x{ranks} ranks={cfg.training.batch_size * ranks} "
+            f"warmup={cfg.scheduler.warmup_steps} "
+            f"teacher_forced_every={cfg.evaluation.teacher_forced_every} "
+            f"autoregressive_every={cfg.evaluation.autoregressive_every} "
+            f"save_every_steps={cfg.checkpoint.save_every_steps} "
+            f"log_every={cfg.logging.log_every}",
+            flush=True,
+        )
     manager = CheckpointManager(
         cfg.checkpoint.output_dir,
         cfg.checkpoint.save_every_steps,
@@ -337,7 +366,7 @@ def main() -> None:
                 recon=f"{float(reconstruction.detach()):.4f}",
             )
 
-            if run and step % 10 == 0:
+            if run and step % cfg.logging.log_every == 0:
                 run.log(
                     {f"train/{k}": float(v.detach()) for k, v in terms.items()},
                     step=step,
@@ -353,17 +382,15 @@ def main() -> None:
             # lexical continuation.  Run it as a diagnostic, and reuse its scalars for the
             # autoregressive block below when both happen to fire on the same step.
             teacher_metrics = None
-            if (
-                len(validation_loader)
-                and step % cfg.evaluation.teacher_forced_every == 0
+            if len(validation_loader) and should_evaluate(
+                step, cfg.evaluation.teacher_forced_every, total_steps
             ):
                 teacher_metrics = evaluator.teacher_forced(
                     base_model, validation_loader, device
                 )
             metrics = None
-            if (
-                len(validation_loader)
-                and step % cfg.evaluation.autoregressive_every == 0
+            if len(validation_loader) and should_evaluate(
+                step, cfg.evaluation.autoregressive_every, total_steps
             ):
                 metrics = evaluator.autoregressive(
                     base_model,

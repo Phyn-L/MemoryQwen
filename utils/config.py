@@ -231,6 +231,11 @@ class LoggingConfig:
     wandb_run_name: str | None = None
     wandb_mode: str = "online"
     wandb_run_id: str | None = None
+    # Cadence of the training-loss scalars (``train/*``), in optimizer steps. The two
+    # evaluation sections keep their own cadence, so this only controls how densely the
+    # loss curves are sampled. 10 is the historical value; a single-epoch run can afford
+    # to be denser (or sparser) without touching any other schedule.
+    log_every: int = 10
 
 
 @dataclass
@@ -355,6 +360,8 @@ class TrainConfig:
             raise ValueError("evaluation.qa_batch_size must be positive")
         if self.evaluation.autoregressive_max_qa <= 0:
             raise ValueError("evaluation.autoregressive_max_qa must be positive")
+        if self.logging.log_every <= 0:
+            raise ValueError("logging.log_every must be positive")
 
 
 def dtype_from_name(name: str):
