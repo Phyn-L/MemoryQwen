@@ -65,11 +65,14 @@ v1 + v2(answerable) 这两列（它们现在是干净的）。
 
 ## 2. 【意外但不影响数字】实际跑的是 8 卡，不是 4 卡
 
-* 六份日志都是 `ranks=8`；v1 是 9 个 batch / 8 rank（rank0 两批），v2 是 5 个 batch / 8 rank。
-* `accelerate` 只会打印 `More than one GPU was found ... pass --num_processes=1` 这种警告
-  （条件是"没有显式传 `--multi_gpu`"），说明 `--num_processes` 是传了的；而
-  `scripts/env.local.sh` 里 `export NUM_PROCESSES=` 两行都是注释 → **是 shell 里继承的
-  `NUM_PROCESSES=8`**（训练那轮的 `export` 还在同一个 tmux 里），盖过了 `eval_squad_v1v2.sh` 的默认值 4。
+* 六份日志都是 `ranks=8`、`contexts/batch=256 qa_group=256`；v1 是 9 个 batch / 8 rank
+  （rank0 两批），v2 是 5 个 batch / 8 rank。
+* 原因（已核对）：H200 工作区里 `scripts/eval_squad_v1v2.sh` 有一份**未提交的本地修改**，把默认值
+  改成了 `NUM_PROCESSES=4 → 8`、`BATCH_SIZE/QA_BATCH_SIZE="" → 256`、`MACHINE=4090 → h200`、
+  `CUDA_VISIBLE_DEVICES` 默认 `0..7`。这几处正好解释日志里的 `ranks=8` 与 `contexts/batch=256`；
+  `scripts/env.local.sh` 里 `NUM_PROCESSES` 那两行仍然是注释，不是它。
+  （仓库里**已提交**的那份仍然是 4 / 空 / 自动检测，所以换台机器或换个人跑会得到不同的 rank 数 ——
+  要复现这批数字就得把这几行提交，或者在命令行显式写死。）
 * 为什么无害：这次 `max_qa=None`（全量评，没有 AR 行预算），解码是贪心（确定性），指标是逐行均值 ——
   `accelerate` 为了对齐 batch 数而复制的那些 batch 是**同样的行**，重复元素的均值不变；TF 的
   token/样本加权同样等比例。
