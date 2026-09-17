@@ -170,9 +170,9 @@ after the last real answer token. `overwrite` remains available to reproduce old
 
 ### Teacher-forced scores are a diagnostic, not the headline
 
-`Evaluator.teacher_forced` feeds the gold answer tokens as *inputs*, so every answer
-position after the first can be produced by continuing the gold prefix it already
-attends to. Its `em`/`f1`/`rouge_l`/`precision` therefore reward lexical continuation more
+`Evaluator.teacher_forced` feeds the answer tokens as *inputs* (teacher forcing), so
+every answer position after the first can be produced by continuing the prefix it
+already attends to. Its `em`/`f1`/`rouge_l`/`precision` therefore reward lexical continuation more
 than retrieval, and can even come out below the autoregressive score. Predictions from a
 trained checkpoint:
 

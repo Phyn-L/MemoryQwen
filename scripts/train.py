@@ -349,7 +349,7 @@ def main() -> None:
             # DDP collective for the entire evaluation, which the NCCL watchdog aborts
             # after 10 minutes ("Watchdog caught collective operation timeout").  The
             # evaluators all-reduce their accumulators, so every rank must call them.
-            # Teacher forcing feeds the gold answer prefix, so its em/f1 mostly reward
+            # Teacher forcing feeds the answer prefix back in, so its em/f1 mostly reward
             # lexical continuation.  Run it as a diagnostic, and reuse its scalars for the
             # autoregressive block below when both happen to fire on the same step.
             teacher_metrics = None

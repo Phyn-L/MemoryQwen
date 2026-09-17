@@ -34,7 +34,7 @@ memory:
   init_mode: randn                 # randn | token_embed | vocab_mean
   init_seed: 0
   allow_slot_attention: false      # true = 槽 k 可看到槽 <= k（ICAE 的 memory token 是普通因果位置）
-  # B2：memory 前缀自编码（冻结 backbone 当解码器 + gold prefix，即 500xCompressor eq.1）。
+  # B2：memory 前缀自编码（冻结 backbone 当解码器 + teacher forcing，即 500xCompressor eq.1）。
   #     起始 nats/token 会落在语言模型量级（实测 ~2.5），而不是 ln(vocab) ~11.9。
   ae_lm_weight: 0.0                # >0 开启
   ae_lm_positions: 0               # 0 = 全部 context 位置；想省算力可写 256

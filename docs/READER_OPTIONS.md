@@ -17,7 +17,7 @@
 | 目标 | nats/token |
 |---|---|
 | teacher：纯因果 LM（full-context bypass） | 2.103 |
-| **AE：memory 前缀 + gold prefix（B2 开启后）** | **2.472** |
+| **AE：memory 前缀 + teacher forcing（B2 开启后）** | **2.472** |
 | probe：memory-only（旧目标，默认仍在跑） | 12.140（≈ ln vocab = 11.931） |
 
 也就是说：把解码器换成冻结的 backbone（B2）之后，目标函数一开局就回到语言模型量级（与 teacher 只差 0.37 nats，
@@ -34,7 +34,7 @@
 | `init_mode` | `randn` | memory slot 初始化：`token_embed` 用真实 token embedding 行 | 无 | 打开 `token_embed` |
 | `init_seed` | `0` | `token_embed` 抽样种子（可复现） | 无 | 随意 |
 | `allow_slot_attention` | `false` | 槽 k 可看到槽 ≤ k（ICAE 的 memory token 是普通因果位置） | 无（只改 mask） | 打开，M 大时更值得 |
-| `ae_lm_weight` | `0.0` | memory 前缀自编码（冻结 backbone + gold prefix，500x eq.1） | +1 次 context 长度前向（算力/激活约 +50~100%） | 打开 `1.0` |
+| `ae_lm_weight` | `0.0` | memory 前缀自编码（冻结 backbone + teacher forcing，500x eq.1） | +1 次 context 长度前向（算力/激活约 +50~100%） | 打开 `1.0` |
 | `ae_lm_positions` | `0` | AE 打分的位置数；0 = 全部 | 位置越多越贵（tied 头单次应用 + 256 行分块） | 先 0，显存紧张写 256 |
 | `distill_weight` | `0.0` | 把 full-context 分布 KL 蒸馏进 memory 路径 | 每次打分位置一次词表头（teacher 免费） | 打开 `0.2~0.5` |
 | `distill_temperature` | `1.0` | 蒸馏温度（`T²·KL`） | 无 | 先 1.0，再试 2.0 |
@@ -109,7 +109,7 @@ memory:
 
 ### B2 `ae_lm_weight` / `ae_lm_positions`
 
-- **做什么**：新增「冻结 backbone + memory 逐层 KV 前缀 + gold prefix」的自编码目标
+- **做什么**：新增「冻结 backbone + memory 逐层 KV 前缀 + teacher forcing」的自编码目标
   `P(t_i | memory, t_<i)`，用 backbone 自己的 tied unembedding 打分（零新增参数），
   全 context 位置（或 `ae_lm_positions` 个采样位置）密集监督。
 - **为什么**：这是两篇论文的核心机制（500xCompressor eq.1 / ICAE 的 autoencoding + "decoder 就是那个冻结 LLM"）。
@@ -160,7 +160,7 @@ memory:
 
 1. **保留 `reconstruction_loss: context_lm` 当探针**：它是唯一 memory-only 的诚实指标。想省算力就把
    `context_lm_positions` 降到 64，而不是关掉。
-2. **不要用 BLEU/ROUGE 当主判据**：gold prefix 条件下大部分"复述得像"来自 LM 先验（ICAE 的随机文本实验：99.3 → 3.5 → 0.2）。
+2. **不要用 BLEU/ROUGE 当主判据**：teacher forcing 条件下大部分"复述得像"来自 LM 先验（ICAE 的随机文本实验：99.3 → 3.5 → 0.2）。
    用 `first_token_em`、逐位置 EM 曲线，以及**空 memory 基线**（把 memory 置零/置常数的对照）。
 3. **按 context 划分 held-out 问题**：SQuAD 的 16498 个 QA 行只覆盖 10531 个唯一 context，可以按 context 切分，
    用来判断 memory 是否把问题无关的内容真的装进去了。

@@ -172,7 +172,7 @@ batch 内最长的答案 —— 这些样本的最后一个答案 token 被 EOS 
   **当前代码 + 当前 checkpoint 重测 = official F1 0.3784。**
 - 我另外验证了 `evaluation.max_new_tokens`（32/64/128）对结果**完全没有影响**
   （平均生成长度 5.4/5.5/5.8，F1 都是 0.3483）—— 所以 0.0044 也不是"生成太长被截断"造成的。
-- `teacher_forced` 的语义问题：答案 token 是作为 **输入** 喂进去的，模型能从 gold 前缀续写词形。
+- `teacher_forced` 的语义问题：答案 token 是作为 **输入** 喂进去的（teacher forcing），模型能从该前缀续写词形。
   观察到的 TF 输出（`.tmp_analysis/diag_ar.py`）：
   `apoplectic stroke → "Nooplelectic"`、`Deabolis → "Nobal"`、`β-defensins → "V-defensin"`、
   `Catawba, Muskogee-speaking Creek and Choctaw → "Noreekwba, Muskogee,,, Choctaw"`

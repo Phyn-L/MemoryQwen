@@ -795,7 +795,7 @@ class MetaLoRA(nn.Module):
         This is the autoencoding objective the context-compression literature uses (e.g.
         500xCompressor eq. 1): the *frozen backbone* is the decoder, the per-layer key/value
         pairs of the memory prefix it, and every context token is predicted from the memory
-        plus the gold prefix, ``P(t_i | memory, t_<i)``. The memory slots and the LoRA
+        plus the teacher-forced prefix, ``P(t_i | memory, t_<i)``. The memory slots and the LoRA
         adapters still receive gradient because the prefix is differentiable, but no
         decoder has to be learned from scratch -- which is exactly what separates this from
         the memory-only ``context_lm`` objective (where every token must be produced from

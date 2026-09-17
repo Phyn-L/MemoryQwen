@@ -20,7 +20,7 @@
 
 两篇论文在**同量级压缩比**下都比我们高约 20 个相对百分点，而它们的共同点是：
 
-1. **reader 就是那个冻结的预训练 LLM**（ICAE 原文 "the untouched target LLM as the decoder"；500x 解码器零新增参数），memory 只负责携带"LLM 猜不出来的残差"，且重建是 **gold-prefix 条件**的 `P(t_i | memory, t_<i)`（teacher forcing）；
+1. **reader 就是那个冻结的预训练 LLM**（ICAE 原文 "the untouched target LLM as the decoder"；500x 解码器零新增参数），memory 只负责携带"LLM 猜不出来的残差"，且重建是 **teacher-forced 条件**的 `P(t_i | memory, t_<i)`；
 2. memory 以**逐层 KV**（500x）或**序列前缀**（ICAE）注入冻结模型，走的是模型自己的注意力与词表头。
 
 我们现在的 reader 是：`MemoryDecoder`（每层 256 维瓶颈，只 attend memory）× 随机初始化的 `context_lm_head: 256→151936`，目标是在 **memory-only** 条件下复述全部 context token（采样 256 个位置）。即：**memory 侧的信息量不比论文少（28 层 × 2048/token ≈ 500x 的逐层 KV），但读出口要从零学一个语言模型头**。因此本轮全部改动集中在**读取侧与目标函数**，不改 writer 的骨架。
@@ -122,7 +122,7 @@ class VocabularyHead(nn.Module):
 
 **改什么**：`src/model.py` 新增 `fused_forward` 与 `autoencode_with_memory`；`src/losses.py` 新增 `sequence_lm_loss`；`utils/config.py` 增字段；`scripts/train.py` 接线与日志键。
 
-**为什么**：这是两篇论文的核心机制，也是"同一压缩比下差 20 个点"的最可能原因。现有 `context_lm` 要求 memory-only 复述全文；改成"冻结 Qwen + memory KV 前缀 + gold-prefix 条件"后，解码由预训练权重完成（`P(t_i | memory, t_<i)`），memory 只需携带残差。
+**为什么**：这是两篇论文的核心机制，也是"同一压缩比下差 20 个点"的最可能原因。现有 `context_lm` 要求 memory-only 复述全文；改成"冻结 Qwen + memory KV 前缀 + teacher-forced 条件"后，解码由预训练权重完成（`P(t_i | memory, t_<i)`），memory 只需携带残差。
 
 **怎么改**：
 
@@ -157,7 +157,7 @@ class VocabularyHead(nn.Module):
   | 目标 | nats/token |
   |---|---|
   | teacher：纯因果 LM（= full-context bypass） | **2.103** |
-  | **ae：memory 前缀 + gold prefix（500x eq.1）** | **2.472** |
+  | **ae：memory 前缀 + teacher forcing（500x eq.1）** | **2.472** |
   | probe：memory-only（旧目标） | **12.140**（ln vocab = 11.931） |
 
   说明冻结 LM 解码把目标一开局就放回语言模型量级（与 teacher 差 0.37 nats，这 0.37 正是 memory 要学的部分），而旧目标贴着随机分类基线。`memory_tokens` 梯度范数 28.4，冻结参数梯度为 0。

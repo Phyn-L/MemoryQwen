@@ -49,8 +49,8 @@ def main():
         print(f"No usable records in {args.split}; skipping evaluation.")
         return
     evaluator = Evaluator(tokenizer, cfg)
-    # Autoregressive first: it is the headline result. Teacher forcing feeds the gold
-    # answer prefix back in, so its em/f1 mostly rewards lexical continuation; only
+    # Autoregressive first: it is the headline result. Teacher forcing feeds the answer
+    # prefix back in, so its em/f1 mostly rewards lexical continuation; only
     # first_token_em there is a retrieval signal.
     autoregressive = evaluator.autoregressive(model, loader, device, include_teacher_metrics=False)
     print("autoregressive (headline):", autoregressive)

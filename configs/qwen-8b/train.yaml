@@ -23,7 +23,7 @@ memory:
   init_mode: randn                 # randn | token_embed | vocab_mean（C2）
   init_seed: 0
   allow_slot_attention: false      # true = 槽 k 可看槽 <= k（C2）
-  ae_lm_weight: 0.0                # >0 开启 memory 前缀自编码（B2，冻结 backbone + gold prefix）
+  ae_lm_weight: 0.0                # >0 开启 memory 前缀自编码（B2，冻结 backbone + teacher forcing）
   ae_lm_positions: 0               # 0 = 全部 context 位置；省算力可写 256
   distill_weight: 0.0              # B1 KL 蒸馏，需要 ae_lm_weight > 0
   distill_temperature: 1.0

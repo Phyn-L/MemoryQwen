@@ -146,7 +146,7 @@ class Evaluator:
                         continue
                     # Retrieval diagnostic: the first answer token is the only
                     # answer position that must be produced from the memory alone
-                    # (every later token can copy the gold prefix it was fed).
+                    # (every later token can copy the teacher-forced prefix it was fed).
                     first_token_hits += int(
                         int(predictions[i][active][0].item()) in self._first_token_ids(record)
                     )
