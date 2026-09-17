@@ -135,7 +135,13 @@ def sample_positions(mask, count, generator=None):
     Same contract as ``MetaLoRA.sample_context_targets`` but standalone, so a caller can
     index an already-aligned ``(hidden, labels)`` pair (see :func:`sequence_lm_loss`).
     Returns ``[B, P]`` indices and a ``[B, P]`` keep-mask; rows with fewer than ``count``
-    valid positions repeat index 0 in the unused slots and mark them False.
+    valid positions get ``-1`` in the unused slots.
+
+    ``-1`` rather than "repeat index 0": a repeated 0 is indistinguishable from a row that
+    legitimately sampled position 0, so a caller that forgot the keep-mask would score the
+    same token ``count - valid`` extra times (a context shorter than the budget would be
+    trained mostly on its own first token). The losses translate a negative position into
+    ``ignore_index``, which makes that mistake impossible.
     """
     mask = mask.bool()
     if mask.ndim != 2:
@@ -145,7 +151,7 @@ def sample_positions(mask, count, generator=None):
     budget = max(1, min(int(count), mask.size(1)))
     positions = scores.topk(budget, dim=1).indices
     keep = mask.gather(1, positions)
-    return positions.masked_fill(~keep, 0), keep
+    return positions.masked_fill(~keep, -1), keep
 
 
 def sequence_lm_loss(hidden, labels, head, mask=None, positions=None, max_logits_rows=256):
@@ -173,11 +179,19 @@ def sequence_lm_loss(hidden, labels, head, mask=None, positions=None, max_logits
         mask = labels.ne(-100)
     else:
         mask = mask.bool() & labels.ne(-100)
-    labels = labels.masked_fill(~mask, -100)
     if positions is not None:
-        index = positions.unsqueeze(-1).expand(-1, -1, hidden.size(-1))
+        # `sample_positions` writes -1 into the slots it could not fill (a row with fewer
+        # valid positions than the budget). Those must not be scored: gathering them with a
+        # clamped index and ANDing in "was this slot real" is what drops them. Relying on
+        # the gathered mask alone is not enough, because a duplicate would point at a
+        # position that is itself valid.
+        valid = positions >= 0
+        safe = positions.clamp_min(0)
+        index = safe.unsqueeze(-1).expand(-1, -1, hidden.size(-1))
         hidden = hidden.gather(1, index)
-        labels = labels.gather(1, positions)
+        labels = labels.gather(1, safe)
+        mask = mask.gather(1, safe) & valid
+    labels = labels.masked_fill(~mask, -100)
     head_dtype = getattr(head, "compute_dtype", None) or head.weight.dtype
     weight = (
         head.materialized_weight()
@@ -254,10 +268,14 @@ def kl_distill_loss(student_hidden, teacher_hidden, head, mask=None, temperature
         if hasattr(head, "materialized_weight") else head.weight
     )
     if positions is not None:
-        index = positions.unsqueeze(-1).expand(-1, -1, student_hidden.size(-1))
+        # See sequence_lm_loss: -1 means "this sampled slot could not be filled" and must
+        # not be scored, which the gathered mask alone cannot express.
+        valid = positions >= 0
+        safe = positions.clamp_min(0)
+        index = safe.unsqueeze(-1).expand(-1, -1, student_hidden.size(-1))
         student_hidden = student_hidden.gather(1, index)
         teacher_hidden = teacher_hidden.gather(1, index)
-        mask = mask.gather(1, positions)
+        mask = mask.gather(1, safe) & valid
     width = student_hidden.size(-1)
     flat_student = student_hidden.reshape(-1, width).to(head_dtype)
     flat_teacher = teacher_hidden.reshape(-1, width).to(head_dtype)

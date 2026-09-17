@@ -8,7 +8,8 @@ What is asserted
    shifts once), ignores ``-100``, honours an extra mask, agrees with a manual
    cross entropy, and is invariant to the chunk size.
 2. ``positions`` restricts the loss to the gathered targets and returns exactly the same
-   number as masking every other position.
+   number as masking every other position -- including for a row with fewer valid positions
+   than the budget, whose unused slots ``sample_positions`` marks invalid.
 3. Gradient reaches the tied unembedding's adapter (or a plain linear head) and the hidden
    states, through the checkpointed chunk path.
 4. On a real (tiny) Qwen3: ``ae_lm=True`` populates aligned autoencoding terms, the loss is
@@ -107,6 +108,34 @@ def test_positions_select_the_same_targets_as_a_mask():
     assert torch.allclose(got, want, atol=1e-6)
 
 
+def test_a_row_with_fewer_positions_than_the_budget_scores_each_one_once():
+    """The unused sample slots of a short row must not be scored.
+
+    ``sample_positions`` fills them with index 0 and marks them False. The keep-mask has to
+    be gathered alongside the hidden states: before it was, those duplicates pointed at a
+    valid label and were counted, so a context shorter than ``ae_lm_positions`` was trained
+    mostly on its own first token (3 valid positions under a budget of 5 put token 0 into 3
+    of the 5 loss terms).
+    """
+    embedding, head = _head()
+    torch.manual_seed(6)
+    hidden = torch.randn(1, 5, 8)
+    labels = torch.tensor([[7, 11, 13, -100, -100]])
+    mask = labels.ne(-100)
+    positions, keep = sample_positions(mask, 5)
+    assert int(keep.sum()) == 3, "the sampler marks the two duplicate slots invalid"
+    assert int((positions < 0).sum()) == 2, "unused slots carry -1, not a repeated index 0"
+
+    sampled = sequence_lm_loss(hidden, labels, head, mask=mask, positions=positions)
+    dense = sequence_lm_loss(hidden, labels, head, mask=mask)
+    assert torch.allclose(sampled, dense, atol=1e-6), "the duplicate slots changed the loss"
+
+    per_token = F.cross_entropy(
+        F.linear(hidden[0, :3], head.materialized_weight()), labels[0, :3], reduction="none"
+    )
+    assert torch.allclose(sampled, per_token.mean(), atol=1e-6)
+
+
 def test_loss_is_finite_and_gradients_flow_through_the_checkpoint():
     embedding, head = _head()
     hidden = torch.randn(2, 5, 8, requires_grad=True)
@@ -139,8 +168,12 @@ def test_sample_positions_respects_the_mask():
     assert positions.shape == (3, 3) and keep.shape == (3, 3)
     for row in range(3):
         chosen = keep[row]
-        assert bool(mask[row].gather(0, positions[row])[chosen].all()), "picked a masked-out slot"
+        picked = positions[row][chosen]
+        assert bool(mask[row][picked].all()), "picked a masked-out slot"
         assert int(chosen.sum()) == min(3, int(mask[row].sum()))
+        # Slots the row could not fill are -1, not a repeated index 0 (see the sampler's
+        # docstring: a repeated 0 would be scored again by a caller that forgot the mask).
+        assert bool((positions[row][~chosen] < 0).all())
 
 
 # --- 2. the tied unembedding -------------------------------------------------------
