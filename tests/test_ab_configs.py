@@ -36,18 +36,22 @@ SWITCHES = {
     "readout_length": (8, 0),
 }
 
-# 1 epoch over the 252,465 contexts kept by train_datasets=all at ctx=1024, global batch 32.
-STEPS_PER_EPOCH = 7890
+# 1 epoch over the 252,465 contexts kept by train_datasets=all at ctx=1024, global batch
+# 8 x 8 ranks = 64 -> ceil(252465 / 64) = 3,945 steps. Second round: M raised to 64 (32:1,
+# the compression ratio the M=64/ctx=2048 arm won with) and max_answer_tokens cut to 64 to
+# buy back the QA branch's peak (its full-vocab logits halve).
+STEPS_PER_EPOCH = 3945
 SCHEDULE = {
     "training.batch_size": 8,
     "training.epochs": 1,
-    "scheduler.warmup_steps": 400,
-    "evaluation.teacher_forced_every": 500,
-    "evaluation.autoregressive_every": 1000,
-    "checkpoint.save_every_steps": 2000,
+    "scheduler.warmup_steps": 200,
+    "evaluation.teacher_forced_every": 200,
+    "evaluation.autoregressive_every": 400,
+    "checkpoint.save_every_steps": 400,
     "logging.log_every": 25,
     "data.max_context_tokens": 1024,
-    "memory.memory_length": 16,
+    "data.max_answer_tokens": 64,
+    "memory.memory_length": 64,
     "data.validation_max_samples": 2000,
     "evaluation.autoregressive_max_qa": 128,
     "evaluation.max_new_tokens": 32,
@@ -107,7 +111,7 @@ def test_the_expected_step_count_matches_the_launcher():
     """scripts/run_ab.sh prints the same budget the schedule was written for."""
     source = (REPO / "scripts" / "run_ab.sh").read_text(encoding="utf-8")
     assert "CONTEXTS=252465" in source
-    assert 252465 // 32 + (252465 % 32 > 0) == STEPS_PER_EPOCH
+    assert 252465 // 64 + (252465 % 64 > 0) == STEPS_PER_EPOCH
 
 
 if __name__ == "__main__":

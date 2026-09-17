@@ -85,11 +85,17 @@ echo "checkout      : $ROOT"
 echo "HEAD          : $(git log --oneline -1 2>/dev/null || echo 'not a git checkout')"
 echo "ranks x batch : $NUM_PROCESSES x $BATCH = global batch $GLOBAL_BATCH"
 echo "expected      : 1 epoch = ceil($CONTEXTS / $GLOBAL_BATCH) = $EXPECTED_STEPS steps"
-if [ "$EXPECTED_STEPS" -ne 7890 ]; then
-    echo "NOTE: the cadences in both configs are written for 7890 steps. At $EXPECTED_STEPS" >&2
-    echo "      steps per epoch they are not wrong, just coarser/finer than designed:" >&2
-    echo "      warmup 400 = $(awk -v w=400 -v s="$EXPECTED_STEPS" 'BEGIN{printf "%.1f", 100*w/s}')% of the run," \
-         "TF every 500 = $((EXPECTED_STEPS / 500)) points." >&2
+DESIGN_STEPS=3945   # the budget the shipped cadences were written for (batch 8 x 8 ranks)
+if [ "$EXPECTED_STEPS" -ne "$DESIGN_STEPS" ]; then
+    eval "$(awk '/^  (teacher_forced_every|autoregressive_every|warmup_steps):/{
+        key = $1; gsub(/:/, "", key); value = $2; gsub(/[^0-9]/, "", value)
+        print "CFG_" toupper(key) "=" value
+    }' "$ON_CONFIG")"
+    echo "NOTE: the shipped cadences assume $DESIGN_STEPS steps per epoch, this run has" >&2
+    echo "      $EXPECTED_STEPS -- they are not wrong, just a different fraction:" >&2
+    echo "      warmup ${CFG_WARMUP_STEPS:-?} = $(awk -v w="${CFG_WARMUP_STEPS:-0}" -v s="$EXPECTED_STEPS" 'BEGIN{printf "%.1f", (s>0? 100*w/s : 0)}')% of the run," \
+         "TF every ${CFG_TEACHER_FORCED_EVERY:-?} = $((EXPECTED_STEPS / ${CFG_TEACHER_FORCED_EVERY:-1})) points," \
+         "AR every ${CFG_AUTOREGRESSIVE_EVERY:-?} = $((EXPECTED_STEPS / ${CFG_AUTOREGRESSIVE_EVERY:-1})) points." >&2
 fi
 echo "order         : ON then OFF (sequential; the pair is only comparable if both run)"
 if [ "$RESUME" != "0" ]; then
