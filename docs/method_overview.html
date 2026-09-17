@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MemoryQwen 方法结构总览</title>
+<style>
+  :root{
+    --bg:#0f1216; --panel:#161b22; --panel2:#1c232c; --line:#2b3542;
+    --text:#e6edf3; --dim:#9aa7b4; --dim2:#6e7d8c;
+    --blue:#4c9aff; --green:#3fb950; --orange:#e3a008; --purple:#a371f7; --red:#f85149; --teal:#39c5cf;
+    --mono:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:15px/1.75 -apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  header{position:sticky;top:0;z-index:10;background:rgba(15,18,22,.94);backdrop-filter:blur(6px);
+    border-bottom:1px solid var(--line);padding:14px 26px}
+  header h1{margin:0;font-size:19px;letter-spacing:.3px}
+  header .sub{color:var(--dim);font-size:13px;margin-top:3px}
+  nav{margin-top:9px;display:flex;flex-wrap:wrap;gap:6px}
+  nav a{font-size:12.5px;background:var(--panel2);border:1px solid var(--line);border-radius:99px;
+    padding:3px 11px;color:var(--dim)}
+  nav a:hover{color:var(--text);border-color:var(--blue);text-decoration:none}
+  main{max-width:1180px;margin:0 auto;padding:26px 26px 90px}
+  section{margin:34px 0 0}
+  h2{font-size:17px;margin:0 0 6px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  h2 .n{color:var(--dim2);font-weight:400;margin-right:8px;font-family:var(--mono);font-size:14px}
+  h3{font-size:14.5px;margin:20px 0 6px;color:var(--teal)}
+  p{margin:9px 0}
+  .lead{color:var(--dim)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px 18px;margin:14px 0}
+  .grid{display:grid;gap:12px}
+  .g2{grid-template-columns:repeat(auto-fit,minmax(330px,1fr))}
+  .g3{grid-template-columns:repeat(auto-fit,minmax(215px,1fr))}
+  .g4{grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}
+  .kpi{background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:11px 13px}
+  .kpi .k{color:var(--dim);font-size:12px}
+  .kpi .v{font-family:var(--mono);font-size:19px;margin-top:2px}
+  .kpi .v small{font-size:12px;color:var(--dim)}
+  code,kbd{font-family:var(--mono);font-size:12.6px;background:#0b0e12;border:1px solid var(--line);
+    border-radius:5px;padding:1px 5px;color:#d7e3ee}
+  pre{background:#0b0e12;border:1px solid var(--line);border-radius:9px;padding:13px 15px;overflow:auto;
+    font-family:var(--mono);font-size:12.6px;line-height:1.6;color:#cbd6e2}
+  table{border-collapse:collapse;width:100%;margin:10px 0;font-size:13.6px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:var(--panel2);color:var(--dim);font-weight:600;font-size:12.6px;letter-spacing:.2px}
+  td.mono,th.mono{font-family:var(--mono);font-size:12.4px}
+  tbody tr:nth-child(even){background:rgba(255,255,255,.017)}
+  .yes{color:var(--green);font-weight:700}
+  .no{color:var(--red);font-weight:700}
+  .cond{color:var(--orange);font-weight:700}
+  .tag{display:inline-block;font-family:var(--mono);font-size:11.4px;border-radius:5px;padding:1px 7px;
+    border:1px solid;margin-right:5px}
+  .t-a1{color:#a371f7;border-color:#a371f7}
+  .t-c2{color:#39c5cf;border-color:#39c5cf}
+  .t-b2{color:#3fb950;border-color:#3fb950}
+  .t-b1{color:#e3a008;border-color:#e3a008}
+  .t-c3{color:#4c9aff;border-color:#4c9aff}
+  .t-off{color:#6e7d8c;border-color:#6e7d8c}
+  .note{border-left:3px solid var(--blue);background:var(--panel2);border-radius:0 8px 8px 0;padding:10px 14px;margin:12px 0;color:var(--dim)}
+  .warn{border-left:3px solid var(--red)}
+  .ok{border-left:3px solid var(--green)}
+  .muted{color:var(--dim2)}
+  .bar{height:16px;border-radius:4px;background:linear-gradient(90deg,#1f6feb,#388bfd);display:inline-block;vertical-align:middle}
+  .bar.small{background:linear-gradient(90deg,#8957e5,#a371f7)}
+  ul{margin:8px 0 8px 20px;padding:0}
+  li{margin:4px 0}
+  details{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:9px 13px;margin:9px 0}
+  summary{cursor:pointer;color:var(--dim);font-size:13.4px}
+  details[open] summary{color:var(--text);margin-bottom:7px}
+  svg{display:block;width:100%;height:auto}
+  .legend{display:flex;flex-wrap:wrap;gap:14px;color:var(--dim);font-size:12.6px;margin-top:6px}
+  .legend i{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+  footer{color:var(--dim2);font-size:12.4px;border-top:1px solid var(--line);margin-top:44px;padding-top:14px}
+</style>
+</head>
+<body>
+<header>
+  <h1>MemoryQwen 方法结构总览</h1>
+  <div class="sub">Qwen3 冻结主干 + LoRA + M 个与问题无关的 memory token；四个训练目标、两条评测路径、一个 ON/OFF A/B</div>
+  <nav>
+    <a href="#s1">1 一句话</a><a href="#s2">2 总览图</a><a href="#s3">3 形状与注意力</a>
+    <a href="#s4">4 五个读法/开关</a><a href="#s5">5 四个目标与梯度</a><a href="#s6">6 评测口径</a>
+    <a href="#s7">7 A/B 设计</a><a href="#s8">8 已知陷阱</a><a href="#s9">9 速查</a>
+  </nav>
+</header>
+<main>
+
+<section id="s1">
+  <h2><span class="n">01</span>一句话：把 context 压进 M 个槽，之后所有问题只读这 M 个槽</h2>
+  <div class="card">
+    <p>一段 context（≤1024 token）连同 <b>M 个可学习的 memory token</b> 一起送进冻结的 Qwen3-1.7B（只挂 LoRA）。
+    前向结束后<b>只保留 memory 位置上的 per-layer hidden state 与 KV cache，context 本身不再进入后续计算</b>。
+    于是：</p>
+    <ul>
+      <li><b>问题期</b>只看到 <code>[question (+readout) + answer]</code> 与 memory 前缀 —— memory 必须在看不见 context 的情况下把答案所需的证据装进去；</li>
+      <li><b>同一个 memory 前缀对同一段 context 的所有问题复用一次</b>（KV cache 只算一次），这就是「问题无关、可缓存」的含义；</li>
+      <li>memory 的空间是 <b>M × 2048</b>，相对 1024 token 的 context 就是 <b>64:1</b> 的压缩（A/B 配置 ctx=1024 / M=16）。</li>
+    </ul>
+    <div class="grid g4" style="margin-top:14px">
+      <div class="kpi"><div class="k">主干（冻结）</div><div class="v">Qwen3-1.7B <small>28 层 · h=2048</small></div></div>
+      <div class="kpi"><div class="k">词表</div><div class="v">151,936</div></div>
+      <div class="kpi"><div class="k">memory 槽 M</div><div class="v">16 <small>A/B</small></div></div>
+      <div class="kpi"><div class="k">压缩比 ctx/M</div><div class="v">64:1</div></div>
+      <div class="kpi"><div class="k">可训练参数</div><div class="v">≈48.7M <small>ON（tied）</small></div></div>
+      <div class="kpi"><div class="k">LoRA</div><div class="v">r8 α16 <small>7 个投影</small></div></div>
+      <div class="kpi"><div class="k">decoder</div><div class="v">256×8 <small>每层一个</small></div></div>
+      <div class="kpi"><div class="k">dtype</div><div class="v">bf16 主干 <small>+ fp32 训练量</small></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="s2">
+  <h2><span class="n">02</span>总览图：一次编码，四条下游通路</h2>
+  <p class="lead">蓝色=编码一次（每步都跑）；绿色=QA 分支（每步都跑，训练目标）；橙色=只在 ON 臂打开的辅助目标；灰色=评测时才跑的路径。</p>
+  <div class="card">
+  <svg viewBox="0 0 1120 560" role="img" aria-label="方法结构总览">
+    <defs>
+      <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto">
+        <path d="M0,0 L7,3.2 L0,6.4 z" fill="#7d8b9a"/>
+      </marker>
+      <marker id="arb" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto">
+        <path d="M0,0 L7,3.2 L0,6.4 z" fill="#4c9aff"/>
+      </marker>
+      <marker id="arg" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto">
+        <path d="M0,0 L7,3.2 L0,6.4 z" fill="#3fb950"/>
+      </marker>
+      <marker id="aro" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto">
+        <path d="M0,0 L7,3.2 L0,6.4 z" fill="#e3a008"/>
+      </marker>
+      <marker id="arp" markerWidth="9" markerHeight="9" refX="7" refY="3.2" orient="auto">
+        <path d="M0,0 L7,3.2 L0,6.4 z" fill="#a371f7"/>
+      </marker>
+      <style>
+        .bx{fill:#1c232c;stroke:#2b3542;stroke-width:1.3;rx:8}
+        .bx-enc{stroke:#4c9aff}.bx-qa{stroke:#3fb950}.bx-aux{stroke:#e3a008}.bx-eval{stroke:#6e7d8c}
+        .lb{fill:#e6edf3;font:12.5px -apple-system,'PingFang SC',sans-serif}
+        .lb2{fill:#9aa7b4;font:11.5px -apple-system,'PingFang SC',sans-serif}
+        .mn{fill:#cbd6e2;font:11.5px ui-monospace,Menlo,monospace}
+        .ttl{fill:#6e7d8c;font:11.5px ui-monospace,Menlo,monospace;letter-spacing:.5px}
+        .fl{fill:none;stroke:#7d8b9a;stroke-width:1.4;marker-end:url(#ar)}
+        .flb{fill:none;stroke:#4c9aff;stroke-width:1.6;marker-end:url(#arb)}
+        .flg{fill:none;stroke:#3fb950;stroke-width:1.6;marker-end:url(#arg)}
+        .flo{fill:none;stroke:#e3a008;stroke-width:1.6;marker-end:url(#aro)}
+        .flp{fill:none;stroke:#a371f7;stroke-width:1.6;marker-end:url(#arp)}
+        .dash{stroke-dasharray:4 4}
+      </style>
+    </defs>
+
+      <text class="ttl" x="14" y="20">① 编码（每步一次） · Encoder pass</text>
+      <rect class="bx bx-enc" x="14" y="30" width="152" height="46"/>
+      <text class="lb" x="26" y="52">context ids [B, ≤1024]</text>
+      <text class="lb2" x="26" y="68">冻结 embedding</text>
+      <rect class="bx bx-enc" x="196" y="30" width="146" height="46"/>
+      <text class="lb" x="208" y="52">memory_tokens</text>
+      <text class="mn" x="208" y="68">[M=16, 2048] 可学</text>
+      <rect class="bx bx-enc" x="372" y="26" width="238" height="54"/>
+      <text class="lb" x="384" y="48">Qwen3-1.7B（冻结）+ LoRA r8</text>
+      <text class="mn" x="384" y="66">block-causal mask（见 ③）</text>
+      <path class="flb" d="M166,53 H196"/>
+      <path class="flb" d="M342,53 H372"/>
+      <text class="lb2" x="250" y="24">拼成 [context | memory] 一次前向</text>
+
+      <rect class="bx bx-enc" x="640" y="14" width="200" height="34"/>
+      <text class="mn" x="650" y="36">layer_memory [B,28,M,2048]</text>
+      <rect class="bx bx-enc" x="640" y="54" width="200" height="34"/>
+      <text class="mn" x="650" y="76">memory KV cache（只留 M 位）</text>
+      <rect class="bx bx-enc" x="640" y="94" width="200" height="34"/>
+      <text class="mn" x="650" y="116">context_hidden（蒸馏 teacher）</text>
+      <path class="flb" d="M610,53 H640"/>
+      <path class="flb" d="M610,60 C624,60 626,36 640,31"/>
+      <path class="flb" d="M610,62 C624,62 626,108 640,108"/>
+
+      <text class="ttl" x="14" y="190">② QA 分支（每步） · 只看 memory 前缀，context 已不在场</text>
+      <rect class="bx bx-qa" x="14" y="200" width="150" height="46"/>
+      <text class="lb" x="26" y="222">question ids</text>
+      <text class="mn" x="26" y="238">[rows, ≤128]</text>
+      <rect class="bx bx-qa" x="186" y="200" width="150" height="46"/>
+      <text class="lb" x="198" y="220">readout（可选）</text>
+      <text class="mn" x="198" y="236">[rows, R=8, 2048]</text>
+      <rect class="bx bx-qa" x="358" y="200" width="150" height="46"/>
+      <text class="lb" x="370" y="222">answer ids</text>
+      <text class="mn" x="370" y="238">[rows, ≤128]</text>
+      <rect class="bx bx-qa" x="548" y="196" width="222" height="54"/>
+      <text class="lb" x="560" y="218">Qwen3（冻结）+ LoRA</text>
+      <text class="mn" x="560" y="236">past_key_values = memory KV</text>
+      <rect class="bx bx-qa" x="812" y="196" width="180" height="54"/>
+      <text class="mn" x="822" y="216">logits [rows, S, 151936]</text>
+      <text class="lb2" x="822" y="234">qa_loss（只算 answer 位）</text>
+      <path class="flg" d="M164,223 H186"/>
+      <path class="flg" d="M336,223 H358"/>
+      <path class="flg" d="M508,223 H548"/>
+      <path class="flg" d="M770,223 H812"/>
+      <path class="fl dash" d="M740,54 C740,120 700,170 660,196" stroke="#3fb950"/>
+      <text class="lb2" x="700" y="176">复用编码的 KV（不重算 context）</text>
+
+      <text class="ttl" x="14" y="300">③ 辅助目标（ON 臂） · 都从 layer_memory 出发</text>
+      <rect class="bx bx-aux" x="14" y="312" width="150" height="52"/>
+      <text class="lb" x="26" y="333">28 × MemoryDecoder</text>
+      <text class="mn" x="26" y="351">256-d bottleneck</text>
+      <rect class="bx bx-aux" x="196" y="312" width="176" height="52"/>
+      <text class="lb" x="208" y="333">memory-only 探针</text>
+      <text class="mn" x="208" y="351">query@t−1 · CE → nats/token</text>
+      <rect class="bx bx-aux" x="404" y="312" width="196" height="52"/>
+      <text class="lb" x="416" y="333">autoencode_with_memory</text>
+      <text class="mn" x="416" y="351">主干当解码器，memory 当前缀</text>
+      <rect class="bx bx-aux" x="632" y="312" width="196" height="52"/>
+      <text class="lb" x="644" y="333">KL 蒸馏</text>
+      <text class="mn" x="644" y="351">teacher = context_hidden</text>
+      <rect class="bx bx-aux" x="860" y="312" width="150" height="52"/>
+      <text class="lb" x="872" y="333">TiedUnembedding</text>
+      <text class="mn" x="872" y="351">0 参数，用冻结 E</text>
+      <path class="flo" d="M164,338 H196"/>
+      <path class="flo" d="M372,338 H404"/>
+      <path class="flo" d="M600,338 H632"/>
+      <path class="flo" d="M828,338 H860"/>
+      <path class="flo" d="M840,128 C840,220 700,280 660,300"/>
+      <text class="lb2" x="700" y="292">layer_memory 也喂给解码器</text>
+
+      <text class="ttl" x="14" y="420">④ 评测（torch.no_grad）</text>
+      <rect class="bx bx-eval" x="14" y="432" width="250" height="52"/>
+      <text class="lb" x="26" y="453">teacher-forced：喂 gold 前缀</text>
+      <text class="mn" x="26" y="471">首答位 argmax → first_token_em</text>
+      <rect class="bx bx-eval" x="286" y="432" width="250" height="52"/>
+      <text class="lb" x="298" y="453">autoregressive：自己生成（头条）</text>
+      <text class="mn" x="298" y="471">em / f1 / rouge_l / first_token_em</text>
+      <rect class="bx bx-eval" x="558" y="432" width="250" height="52"/>
+      <text class="lb" x="570" y="453">memory-only 探针（诚实指标）</text>
+      <text class="mn" x="570" y="471">reconstruction_loss = nats/token</text>
+      <rect class="bx bx-eval" x="830" y="432" width="180" height="52"/>
+      <text class="lb" x="842" y="453">GPU 显存实测</text>
+      <text class="mn" x="842" y="471">最坏 128.5 / 140 GiB</text>
+
+      <rect x="14" y="516" width="1000" height="30" rx="8" fill="#141a21" stroke="#2b3542"/>
+      <text class="lb2" x="26" y="536">梯度只回传到：memory_tokens · LoRA · decoders · context_lm_head(adapter) · resampler —— 冻结主干一动不动</text>
+      <path class="flp" d="M300,516 C300,470 320,300 320,150 L320,120 C320,90 340,70 372,66"/>
+      <text class="lb2" x="330" y="505">四个损失的梯度都汇到 memory / LoRA</text>
+    </svg>
+    <div class="legend">
+      <span><i style="background:#4c9aff"></i>编码一次（E5 每步成本主体）</span>
+      <span><i style="background:#3fb950"></i>QA 训练目标</span>
+      <span><i style="background:#e3a008"></i>辅助目标（OFF 臂全关）</span>
+      <span><i style="background:#a371f7"></i>梯度回流</span>
+      <span><i style="background:#6e7d8c"></i>仅评测</span>
+    </div>
+  </div>
+</section>
+
+<section id="s3">
+  <h2><span class="n">03</span>形状与注意力规则（读代码时最需要记住的两张表）</h2>
+  <div class="grid g2">
+    <div class="card">
+      <h3>张量形状（B = context 数/步，rows = B × qa_per_context）</h3>
+      <table>
+        <thead><tr><th class="mono">名字</th><th class="mono">形状</th><th>含义</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">memory_tokens</td><td class="mono">[M, 2048]</td><td>可学习，唯一「全局记忆」载体</td></tr>
+          <tr><td class="mono">layer_memory</td><td class="mono">[B, 28, M, 2048]</td><td>编码前向里 memory 槽在每层的 hidden</td></tr>
+          <tr><td class="mono">memory_cache</td><td class="mono">28 × (K,V)[B, heads, M, 128]</td><td>只保留 memory 位置的 KV，QA 分支的 past_key_values</td></tr>
+          <tr><td class="mono">context_hidden</td><td class="mono">[B, L, 2048]</td><td>编码前向里 context 行的末层 hidden（=纯因果 LM 分布 → 蒸馏 teacher，白送）</td></tr>
+          <tr><td class="mono">probe hidden</td><td class="mono">[B, 28, P, 256]</td><td>28 个 decoder 在 P 个采样位置的输出（P = context_lm_positions）</td></tr>
+          <tr><td class="mono">readout</td><td class="mono">[rows, R, 2048]</td><td>resampler 的 R 个问题条件位置，插在 question 与 answer 之间</td></tr>
+          <tr><td class="mono">logits</td><td class="mono">[rows, S, 151936]</td><td>QA 分支输出，只对 answer 位算 loss（其余 -100）</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h3>谁可以注意谁（编码 pass 用的是 additive mask，分块 causal）</h3>
+      <table>
+        <thead><tr><th>query ＼ key</th><th>context</th><th>memory</th><th>question</th><th>readout</th><th>answer</th></tr></thead>
+        <tbody>
+          <tr><td>context 行</td><td class="cond">仅更早的（因果）</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td></tr>
+          <tr><td>memory 行</td><td class="yes">✓ 全部有效</td><td class="cond">仅 slot_attention 打开时（因果）</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td></tr>
+          <tr><td>question 行</td><td class="no">✗</td><td class="yes">✓ 全部</td><td class="cond">因果</td><td class="no">✗</td><td class="no">✗</td></tr>
+          <tr><td>readout 行</td><td class="no">✗</td><td class="yes">✓ 全部</td><td class="yes">✓ 全部</td><td class="cond">因果</td><td class="no">✗</td></tr>
+          <tr><td>answer 行</td><td class="no">✗</td><td class="yes">✓ 全部</td><td class="yes">✓ 全部</td><td class="yes">✓ 全部</td><td class="cond">因果</td></tr>
+        </tbody>
+      </table>
+      <div class="note">关键点：<b>没有任何一行能看见 context</b>（除 memory 行和 context 行自己）。所以「答案对不对」这件事完全由那 M 个槽承载，这就是这个方法的全部赌注。padding 的 key 一律屏蔽；被完全屏蔽的行用 <code>finfo.min</code> 而不是 <code>-inf</code>，避免 NaN。</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>压缩：一条 context → M 个槽</h3>
+    <div style="margin:8px 0 4px"><span class="bar" style="width:74%"></span>
+      <span class="muted" style="margin-left:8px">1024 token 的 context（冻结 embedding 后一次性用完）</span></div>
+    <div><span class="bar small" style="width:14%"></span>
+      <span class="muted" style="margin-left:8px">M=16 个槽 × 2048 维 → 之后所有计算只看这一段（64:1）</span></div>
+    <p class="muted" style="margin-top:10px">ctx=512/M=16 是 32:1，ctx=1024/M=8 是 128:1。压缩比变了，「同一份评测上能不能答对」的难度就变了 —— 所以 A/B 里 ctx 与 M 必须两臂一致，只动开关。</p>
+  </div>
+</section>
+
+<section id="s4">
+  <h2><span class="n">04</span>五处读法/开关：每个开关到底改了什么</h2>
+  <table>
+    <thead><tr><th>开关</th><th class="mono">config</th><th>ON</th><th>OFF（升级前行为）</th><th>改动落在哪</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="tag t-a1">A1</span>绑定词表头</td>
+        <td class="mono">memory.head_mode</td><td class="mono">tied</td><td class="mono">linear</td>
+        <td>探针用的词表头 <code>W = E @ adapter</code>（E = 冻结 embedding），只训练 2048×256 的 adapter（0.5M），
+        而不是从零学 <code>[151936, 256]</code> 的 39M 矩阵 → 第一步的 logits 就落在预训练 token 几何里</td>
+      </tr>
+      <tr>
+        <td><span class="tag t-c2">C2</span>初始化 + 槽间注意力</td>
+        <td class="mono">memory.init_mode<br>memory.allow_slot_attention</td><td class="mono">token_embed<br>true</td><td class="mono">randn<br>false</td>
+        <td>M 个槽从词表里真实 token 的 embedding 取初始值（而不是 randn×0.02 的随机方向）；并且允许 memory 行互相注意（OFF 时槽之间完全独立）</td>
+      </tr>
+      <tr>
+        <td><span class="tag t-b2">B2</span>memory 前缀自编码</td>
+        <td class="mono">memory.ae_lm_weight<br>ae_lm_positions</td><td class="mono">1.0<br>128</td><td class="mono">0.0<br>—</td>
+        <td>冻结主干当解码器、memory 的 per-layer KV 当前缀，teacher-forced 地重建 context（500xCompressor eq.1 那一项）；
+        用主干自己的 tied embedding 打分，<b>0 参数</b>，梯度只进 memory/LoRA</td>
+      </tr>
+      <tr>
+        <td><span class="tag t-b1">B1</span>KL 蒸馏</td>
+        <td class="mono">memory.distill_weight<br>distill_positions</td><td class="mono">0.3<br>128</td><td class="mono">0.0<br>—</td>
+        <td>把「带 memory 的分布」拉向「不带 memory 的纯因果 LM 分布」；teacher 就是编码 pass 里 context 行自己的 hidden，<b>不额外跑前向</b></td>
+      </tr>
+      <tr>
+        <td><span class="tag t-c3">C3</span>问题期 resampler</td>
+        <td class="mono">memory.readout_length</td><td class="mono">8</td><td class="mono">0</td>
+        <td>8 个可学习 latent 对 <code>cat([question, memory])</code> 做 cross-attention，产出 8 个 readout 位置插在 question 与 answer 之间；
+        memory 本身仍然与问题无关、可缓存，只有这 8 个位置是按问题现算的（2.6M 参数）</td>
+      </tr>
+    </tbody>
+  </table>
+  <div class="note">诊断用的探针不是开关：<code>reconstruction_loss: context_lm</code> + <code>context_lm_positions</code> 在三份配置里都开着，
+  它是唯一「memory 单独面对 context」的诚实指标（nats/token，起点 ≈ ln(vocab) ≈ 11.9）。OFF 臂并不等于「没有辅助目标」，而是「没有 B2/B1」。</div>
+</section>
+
+<section id="s5">
+  <h2><span class="n">05</span>四个训练目标：各自在训什么、梯度给谁</h2>
+  <div class="grid g2">
+    <div class="card">
+      <h3>损失组合（ON 臂的权重）</h3>
+      <pre>total = 1.0 · qa_loss            # 唯一直接对应任务的目标
+      + 1.0 · reconstruction_loss # memory-only 探针（context_lm，nats/token）
+      + 1.0 · ae_loss             # B2：主干当前缀解码器
+      + 0.3 · distill_loss        # B1：KL(带 memory ‖ 不带 memory)
+
+OFF 臂：ae_lm_weight=0, distill_weight=0，只剩 qa + 探针</pre>
+      <div class="note warn">所以 ON/OFF 的 <code>train/loss</code> <b>绝对值不可比</b>（损失项不同），只能比 <code>val_*</code>。</div>
+    </div>
+    <div class="card">
+      <h3>梯度去向</h3>
+      <table>
+        <thead><tr><th>目标</th><th>memory_tokens</th><th>LoRA</th><th>decoders</th><th>词表头</th><th>resampler</th></tr></thead>
+        <tbody>
+          <tr><td>qa_loss</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td class="cond">✓（C3 开时）</td></tr>
+          <tr><td>探针 context_lm</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td></tr>
+          <tr><td>AE（B2）</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗ <span class="muted">(0 参数)</span></td><td class="no">✗</td></tr>
+          <tr><td>蒸馏（B1）</td><td class="yes">✓</td><td class="yes">✓</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">冻结的 Qwen3 主干（含它自己的 lm_head）永远不更新；QA 的 logits 来自主干，所以 qa_loss 通过 memory/LoRA 起作用。</p>
+    </div>
+  </div>
+  <details>
+    <summary>为什么 AE 的「用主干打分」不算自欺？与探针的区别</summary>
+    <p><b>探针（context_lm）</b>：query 位于 t−1，逐层 decoder 只吃 memory 槽，<b>看不到任何 context token，也看不到其它层</b>；输出经共享词表头分类成第 t 个 token。
+    这是「memory 里到底有没有这段文字」的直接测量，但它是个弱读出器（256-d bottleneck + 单层分类）。</p>
+    <p><b>AE（B2）</b>：让<b>整只冻结主干</b>带着 memory KV 前缀去 teacher-forced 重建 context（<code>P(t_i | memory, t_&lt;i)</code>）。它比探针强得多（28 层、全词表、真实因果语言模型），
+    所以适合当训练信号；但也正因为主干本身很会续写，它的损失下降不等于 memory 变好 —— 这就是为什么我们<b>把两者都留着</b>：AE 训、探针看。</p>
+  </details>
+</section>
+
+<section id="s6">
+  <h2><span class="n">06</span>评测：三条读法，一张指标表</h2>
+  <table>
+    <thead><tr><th>读法</th><th>输入</th><th>它回答的问题</th><th>看什么</th></tr></thead>
+    <tbody>
+      <tr><td><b>teacher-forced</b><br><span class="muted">val_teacher_forced/*</span></td>
+        <td>gold 答案作为前缀喂回去</td>
+        <td>“给定答案开头，能不能续对”</td>
+        <td>诊断用。分数会被语言模型先验抬高，只当趋势看</td></tr>
+      <tr><td><b>autoregressive</b><br><span class="muted">val_autoregressive/*</span></td>
+        <td>自己 greedy 生成 32 token</td>
+        <td><b>“完全靠自己，答案对不对”</b></td>
+        <td><b>头条数字</b>（唯一能与 ICL baseline 比的）</td></tr>
+      <tr><td><b>memory-only 探针</b><br><span class="muted">val_teacher_forced/reconstruction_loss</span></td>
+        <td>memory 槽（无 context）</td>
+        <td>“槽里到底装进去了多少原文”</td>
+        <td>nats/token，起点 ≈11.9；只比趋势与两臂同点</td></tr>
+    </tbody>
+  </table>
+  <div class="grid g2">
+    <div class="card">
+      <h3>指标（单尺子）</h3>
+      <table>
+        <thead><tr><th class="mono">key</th><th>定义</th></tr></thead>
+        <tbody>
+          <tr><td class="mono">em</td><td>归一化后与某个 gold 答案完全相同</td></tr>
+          <tr><td class="mono">f1</td><td>与最好那个 gold 的 token 级 F1（官方 SQuAD 口径）</td></tr>
+          <tr><td class="mono">rouge_l</td><td>与最好那个 gold 的 LCS F1</td></tr>
+          <tr><td class="mono">first_token_em</td><td>第一个答案词是否命中（token id <b>或</b> 归一化文本），检索信号</td></tr>
+        </tbody>
+      </table>
+      <p class="muted">归一化 = 官方 SQuAD（小写、去标点、去冠词）；多参考答案取<b>逐指标最大</b>。
+      <code>precision</code> 已删除（短答案可以刷分，且与 f1 几乎同步）。</p>
+    </div>
+    <div class="card">
+      <h3>实现上的三个约定</h3>
+      <ul>
+        <li>验证 loader <code>shuffle=False</code>，两臂数据顺序一致 → 差异只来自开关；</li>
+        <li>评测在 <b>每个 rank</b> 都跑并 all-reduce（少一个 rank 会让别人 NCCL 超时）；</li>
+        <li>cadence 用取模，但 <code>should_evaluate()</code> 保证<b>最后一步一定评测</b> —— 单 epoch 的 run 不能缺终点数字。</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="s7">
+  <h2><span class="n">07</span>A/B 设计：只动 6 个开关</h2>
+  <div class="card">
+    <p>两条 arm 的配置文件逐字段相同，差异只有 <b>那 6 个开关 + checkpoint.output_dir</b>，由 <code>tests/test_ab_configs.py</code> 断言（改一份忘改另一份会红）。</p>
+    <table>
+      <thead><tr><th>字段</th><th class="mono">ab_h200_on.yaml</th><th class="mono">ab_h200_off.yaml</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">memory.head_mode</td><td class="mono">tied</td><td class="mono">linear</td><td rowspan="6">六个 reader 开关，其余全部相同</td></tr>
+        <tr><td class="mono">memory.init_mode</td><td class="mono">token_embed</td><td class="mono">randn</td></tr>
+        <tr><td class="mono">memory.allow_slot_attention</td><td class="mono">true</td><td class="mono">false</td></tr>
+        <tr><td class="mono">memory.ae_lm_weight</td><td class="mono">1.0</td><td class="mono">0.0</td></tr>
+        <tr><td class="mono">memory.distill_weight</td><td class="mono">0.3</td><td class="mono">0.0</td></tr>
+        <tr><td class="mono">memory.readout_length</td><td class="mono">8</td><td class="mono">0</td></tr>
+        <tr><td class="mono">checkpoint.output_dir</td><td class="mono">outputs/ab_h200_on</td><td class="mono">outputs/ab_h200_off</td><td>避免互相覆盖</td></tr>
+      </tbody>
+    </table>
+    <h3>步数只由「每卡 batch × 进程数」决定</h3>
+    <pre>1 epoch 步数 = ceil(252465 / (batch_size × NUM_PROCESSES))     # 252,465 = all@ctx=1024 的 context 数
+
+batch 8 × 4 进程 = 全局 32 → 7,890 步/epoch      # 设计稿
+batch 12 × 8 进程 = 全局 96 → 2,630 步/epoch     # 你现在改成的版本
+batch 8 × 8 进程 = 全局 64 → 3,945 步/epoch</pre>
+    <p class="muted">训练脚本启动时会打印一行 <code>schedule: steps=… batch=AxB ranks=… warmup=… teacher_forced_every=… autoregressive_every=… save_every_steps=… log_every=…</code>，
+    那是最快的"我到底在跑什么"确认方式。改 batch/进程数必须重算 cadence（或在测试里更新期望）。</p>
+  </div>
+</section>
+
+<section id="s8">
+  <h2><span class="n">08</span>已知陷阱（都是真的踩过的）</h2>
+  <table>
+    <thead><tr><th>现象</th><th>根因</th><th>现状</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>ON 臂跑到第一个 validation 之后那一步就崩：<code>Expected to have finished reduction … did not receive grad for rank N: 757</code></td>
+        <td>tied 词表头把 <code>W = E @ adapter</code> 按参数 version 缓存，而评测整个在 <code>torch.no_grad()</code> 里、且它前面刚 <code>optimizer.step()</code>，
+        于是在 no_grad 下重建的「无计算图 W」被写进缓存 → 下一步训练命中它 → adapter 无梯度 → DDP abort（757 = <code>context_lm_head.adapter.weight</code>）。
+        <b>单进程不会报错</b>，只有多卡 + tied 才撞上。</td>
+        <td class="yes">已修（<code>2838abe</code>）+ 回归测试 <code>tests/test_vocab_head.py</code></td>
+      </tr>
+      <tr>
+        <td>step 500 附近 <code>CUDA out of memory</code>（ctx=1024/M=8/B=12）</td>
+        <td>两趟全 context 的 28 层前向（编码 + AE）+ QA 分支的 full-vocab logits（B=12 时那个 3.4 GiB 分配）。
+        最坏形状实测：编码 57G → QA 111G → AE 前向处 OOM。</td>
+        <td class="cond">A/B 形态（B=8/M=16）最坏 128.5/140 GiB，可跑；评测后额外 <code>empty_cache()</code></td>
+      </tr>
+      <tr>
+        <td>显存碎片提示 <code>expandable_segments not supported</code></td>
+        <td>H200 上的 torch 不支持该 allocator 选项，设了也会被忽略</td>
+        <td class="muted">别指望它救碎片，靠降低峰值 + 评测后释放缓存</td>
+      </tr>
+      <tr>
+        <td>bf16 主干 × fp32 训练量报 <code>expected scalar type BFloat16 but found Float</code></td>
+        <td>accelerate 的 bf16 autocast 会把 fp32 Linear 的结果变回 bf16，再撞上 fp32 的 LayerNorm</td>
+        <td class="yes">所有模块边界包 <code>no_autocast</code>（<code>444bcea</code> + 两个回归测试）</td>
+      </tr>
+      <tr>
+        <td>验证集只覆盖 SQuAD v1.1 的前一段</td>
+        <td><code>shuffle=False</code> + <code>validation_max_samples</code> / <code>autoregressive_max_qa</code> 截断</td>
+        <td class="muted">两臂一致即可比；要评全量得改采样策略（未做）</td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="s9">
+  <h2><span class="n">09</span>速查</h2>
+  <div class="grid g2">
+    <div class="card">
+      <h3>跑 A/B（H200，8 卡，顺序 on → off）</h3>
+      <pre>cd /home/lijie/proj2/xmu/lz/MemoryQwen
+NUM_PROCESSES=8 bash scripts/run_ab.sh      # 顺序跑两臂
+DRYRUN=1 NUM_PROCESSES=8 bash scripts/run_ab.sh   # 只看命令</pre>
+      <p class="muted">产物：<code>logs/ab_{on,off}_*.log</code>、<code>outputs/ab_h200_{on,off}</code>、<code>wandb/offline-run-*</code>。</p>
+      <h3 style="margin-top:16px">读曲线（不用等 wandb sync）</h3>
+      <pre>python /home/lijie/proj2/xmu/lz/extract_run.py \
+    wandb/offline-run-*/run-&lt;id&gt;.wandb --json /tmp/ab_on.json</pre>
+    </div>
+    <div class="card">
+      <h3>关键代码位置</h3>
+      <table>
+        <tbody>
+          <tr><td class="mono">src/model.py :: encode_context_prefix</td><td>编码 + per-layer memory + KV cache</td></tr>
+          <tr><td class="mono">src/model.py :: forward_qa_with_prefix</td><td>QA 分支（复用 memory KV）</td></tr>
+          <tr><td class="mono">src/model.py :: context_lm_terms</td><td>memory-only 探针</td></tr>
+          <tr><td class="mono">src/model.py :: autoencode_with_memory</td><td>B2 前缀自编码</td></tr>
+          <tr><td class="mono">src/resampler.py</td><td>C3 问题期 readout</td></tr>
+          <tr><td class="mono">src/losses.py</td><td>四个损失 + combine_losses</td></tr>
+          <tr><td class="mono">src/evaluator.py</td><td>TF / AR 两条评测 + 分布式汇总</td></tr>
+          <tr><td class="mono">docs/AB_H200.md</td><td>A/B 设计、判读规则、显存实测</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <footer>
+    由 <code>docs/method_overview.html</code> 提供（离线单文件，无外部依赖）。内容对应当前仓库状态：<code>76bb625</code>。
+    数字来自真实运行与显存探针（4090 / 8×H200），不是论文里的目标值。
+  </footer>
+</section>
+
+</main>
+</body>
+</html>
