@@ -34,11 +34,28 @@ def main():
     cfg.checkpoint.output_dir = str(checkpoint_path.parent)
     if not cfg.logging.wandb_run_name:
         cfg.logging.wandb_run_name = checkpoint_path.parent.name
+    # Multi-GPU evaluation: `accelerate launch --num_processes N` (scripts/test.sh does it)
+    # gives every rank one card, and only the *loader* is sharded here. The evaluator
+    # all-reduces its own accumulators (src/evaluator.py::_distributed_sum), so sharding the
+    # batches is all that is needed to divide the work.
+    #
+    # The model is deliberately NOT prepared: `accelerator.prepare(model)` would wrap it in DDP
+    # and enable bf16 autocast, while the training-time evaluation scores the unwrapped model
+    # outside autocast (it calls `accelerator.unwrap_model`) -- preparing it here would make
+    # `scripts/test.py` report slightly different numbers than the run's own validation curve.
+    accelerator = None
+    try:
+        from accelerate import Accelerator
+
+        accelerator = Accelerator(gradient_accumulation_steps=1, mixed_precision="no")
+        device = accelerator.device
+    except ImportError:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer, model = load_model(cfg)
     CheckpointManager(cfg.checkpoint.output_dir).load(
         checkpoint_path, model, allow_missing_trainable=args.allow_missing_trainable,
     )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu"); model.to(device)
+    model.to(device)
     ds = make_context_dataset(
         cfg, args.split, tokenizer,
         # --max-samples is the only cap here: the config's {split}_max_samples belongs to
@@ -50,16 +67,32 @@ def main():
         ds, batch_size=cfg.training.batch_size, shuffle=False,
         collate_fn=make_collate(cfg, tokenizer, sample_qa=False),
     )
+    if accelerator is not None:
+        loader = accelerator.prepare(loader)
+    is_main = accelerator is None or accelerator.is_main_process
     if not len(loader):
-        print(f"No usable records in {args.split}; skipping evaluation.")
+        if is_main:
+            print(f"No usable records in {args.split}; skipping evaluation.")
+        if accelerator is not None:
+            # Every rank must still take part in nothing else; just leave together.
+            accelerator.wait_for_everyone()
         return
+    if is_main:
+        ranks = 1 if accelerator is None else accelerator.num_processes
+        print(f"evaluating {ds.__class__.__name__} split={args.split} "
+              f"batches/rank={len(loader)} ranks={ranks}")
     evaluator = Evaluator(tokenizer, cfg)
     # Autoregressive first: it is the headline result. Teacher forcing feeds the answer
     # prefix back in, so its em/f1 mostly rewards lexical continuation; only
-    # first_token_em there is a retrieval signal.
+    # first_token_em there is a retrieval signal. Both collectives are called by every rank;
+    # the numbers that come back are already the global ones.
     autoregressive = evaluator.autoregressive(model, loader, device, include_teacher_metrics=False)
-    print("autoregressive (headline):", autoregressive)
-    print("teacher-forced (diagnostic only):", evaluator.teacher_forced(model, loader, device))
+    teacher_forced = evaluator.teacher_forced(model, loader, device)
+    if is_main:
+        print("autoregressive (headline):", autoregressive)
+        print("teacher-forced (diagnostic only):", teacher_forced)
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
 
 
 if __name__ == "__main__":
