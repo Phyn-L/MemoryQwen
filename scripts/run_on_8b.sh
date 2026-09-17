@@ -53,6 +53,14 @@ for required in utils src configs pyproject.toml; do
   fi
 done
 
+# 每台机器自己的设置（gitignored，train.sh / test.sh 也 source 它）。PATH 这类东西写在这里一次就够：
+#   export PATH=/home/lijie/proj2/.conda/envs/shine/bin:$PATH
+# 它在本脚本读下面那些默认值之前生效，所以这里设的 MACHINE / BATCH_SIZE 等也会被采纳。
+if [ -f "$ROOT/scripts/env.local.sh" ]; then
+  # shellcheck source=/dev/null
+  . "$ROOT/scripts/env.local.sh"
+fi
+
 MACHINE="${MACHINE:-h200}"
 BATCH_SIZE="${BATCH_SIZE:-4}"
 CTX="${CTX:-1024}"
@@ -243,7 +251,7 @@ if [ "${VISIBLE_NOW:-0}" -lt 1 ]; then
   exit 1
 fi
 if [ "$NUM_PROCESSES" -gt "$VISIBLE_NOW" ]; then
-  echo "run_on_8b.sh: NUM_PROCESSES=$NUM_PROCESSES 但只看到 $VISIBLE_NOW 张卡；改成 $VISIBLE_NOW。" >&2
+  echo "run_on_8b.sh: NUM_PROCESSES=$NUM_PROCESSES 但只看到 $VISIBLE_NOW 张卡；改成 ${VISIBLE_NOW}。" >&2
   NUM_PROCESSES="$VISIBLE_NOW"
 fi
 
