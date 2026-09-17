@@ -581,9 +581,12 @@ main process is wrong twice over:
 accumulated sums and counts (`_distributed_sum`) and must be called by every rank;
 `scripts/train.py` keeps `is_main` only for `run.log`. Decoding is orders of magnitude
 more expensive than a teacher-forced forward, so `evaluation.autoregressive_max_qa`
-(default 256) caps how many QA rows *each rank* generates — the global number of decoded
-rows is `autoregressive_max_qa * world_size`. Leaving that cap out of a 4-way run is what
-produced the 10-minute hang described above.
+(default 1024) caps how many QA rows the *whole* evaluation generates. The budget is global:
+it is split into contiguous windows of the validation split's row order, so the scored rows —
+and therefore the metric's noise — do not depend on how many ranks the run uses. (It used to
+be a per-rank cap, which made an 8-GPU and a 4-GPU run score different question sets; the
+global decoded count was `autoregressive_max_qa * world_size`.) Leaving the cap out of a
+4-way run entirely is what produced the 10-minute hang described above.
 
 Each decoder in `src/MemoryDecoder.py` receives only its own layer's memory
 embedding (`[B, M, H]`). It projects memory and positional queries into a

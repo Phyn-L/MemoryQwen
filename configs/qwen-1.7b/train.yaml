@@ -79,7 +79,7 @@ evaluation:
   # QA rows each rank decodes per autoregressive evaluation; decoding is ~1000x a
   # teacher-forced token and a rank stuck in an eval for >10 min kills the run via
   # the NCCL watchdog. Global decoded rows = this * world_size.
-  autoregressive_max_qa: 256
+  autoregressive_max_qa: 2048
 training:
   batch_size: 1
   epochs: 1

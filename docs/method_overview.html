@@ -470,7 +470,7 @@ batch 8 × 8 进程 = 全局 64 → 3,945 步/epoch</pre>
       </tr>
       <tr>
         <td>验证集只覆盖 SQuAD v1.1 的前一段</td>
-        <td><code>shuffle=False</code> + <code>validation_max_samples</code> / <code>autoregressive_max_qa</code> 截断</td>
+        <td><code>shuffle=False</code> + <code>validation_max_samples</code> 截断（AR 的 <code>autoregressive_max_qa</code> 是全局行数，按 rank 切连续窗口，换卡数不换题集）</td>
         <td class="muted">两臂一致即可比；要评全量得改采样策略（未做）</td>
       </tr>
     </tbody>

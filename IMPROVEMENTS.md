@@ -457,7 +457,7 @@ if is_main and step % cfg.evaluation.autoregressive_every == 0:
 | 改动 | 位置 |
 | --- | --- |
 | 评测改为**每个 rank 都跑自己的分片**，累积量用 `_distributed_sum` 做 all_reduce(SUM) 后再相除；`is_main` 只用于 `run.log` | `src/evaluator.py`、`scripts/train.py` |
-| 新增 `evaluation.autoregressive_max_qa`（默认 256，**每 rank**），把自回归评测的绝对耗时压进看门狗窗口；全局解码行数 = 该值 × `world_size` | `utils/config.py`、三个 `train.yaml` |
+| `evaluation.autoregressive_max_qa`（默认 1024，**全局**行数；早期语义是每 rank，已改成按 rank 切连续窗口），把自回归评测的绝对耗时压进看门狗窗口，同时让评测集不随卡数变化 | `utils/config.py`、`src/evaluator.py::row_window`、三个 `train.yaml` |
 | 评测块之后加 `accelerator.wait_for_everyone()` 显式同步 | `scripts/train.py` |
 
 ### 验证

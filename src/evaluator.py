@@ -31,6 +31,34 @@ def _distributed_sum(values, device):
     return tensor.tolist()
 
 
+def _distributed_world_size() -> int:
+    if dist.is_available() and dist.is_initialized():
+        return int(dist.get_world_size())
+    return 1
+
+
+def _distributed_rank() -> int:
+    if dist.is_available() and dist.is_initialized():
+        return int(dist.get_rank())
+    return 0
+
+
+def row_window(total: int, rank: int, world_size: int) -> tuple[int, int]:
+    """The contiguous slice of the global QA-row order that one rank evaluates.
+
+    The autoregressive budget is *global*: the windows of all ranks tile ``[0, total)``, so
+    the union is the first ``total`` rows of the validation split no matter how many ranks
+    there are. Giving every rank the same budget instead (the old behaviour) scored
+    ``total * world_size`` rows whose identity changed with the rank count -- an 8-GPU run
+    and a 4-GPU run were not comparable, and adding cards silently changed the test set.
+    """
+    if total <= 0 or world_size <= 1:
+        return 0, max(0, total)
+    per_rank = -(-int(total) // int(world_size))          # ceil
+    start = min(int(total), int(rank) * per_rank)
+    return start, min(int(total), start + per_rank)
+
+
 class Evaluator:
     def __init__(self, tokenizer, cfg):
         self.tokenizer, self.cfg = tokenizer, cfg
@@ -226,7 +254,8 @@ class Evaluator:
         }
 
     @torch.no_grad()
-    def autoregressive(self, model, loader, device, include_teacher_metrics=True, max_qa=None):
+    def autoregressive(self, model, loader, device, include_teacher_metrics=True, max_qa=None,
+                       row_loader=None):
         """Headline evaluation: every answer token is produced by the model itself.
 
         Unlike :meth:`teacher_forced` this never feeds the gold answer back, so these are
@@ -236,34 +265,67 @@ class Evaluator:
         reports the teacher-forced ppl/qa_loss/reconstruction_loss at the cost of a second
         pass.
 
-        ``max_qa`` caps how many QA rows *this rank* decodes.  Decoding is orders of
-        magnitude more expensive than one teacher-forced forward, and a rank that stays
-        inside the evaluation for longer than the NCCL watchdog timeout (10 minutes by
-        default) makes every other rank abort with "Watchdog caught collective
-        operation timeout". The cap is per rank, so the global number of decoded rows is
-        ``max_qa * world_size``.
+        ``max_qa`` caps how many QA rows the *whole* evaluation decodes: the budget is split
+        into contiguous windows of the global row order (see :func:`row_window`), so the
+        scored rows and the noise level stay the same when the rank count changes. Decoding
+        is orders of magnitude more expensive than one teacher-forced forward, and a rank
+        that stays inside the evaluation longer than the NCCL watchdog timeout (10 minutes)
+        makes every other rank abort, which is why the budget exists at all.
+
+        ``row_loader`` supplies that global order and must be the *unsharded* validation
+        loader (``accelerator.prepare`` shards by batch, which would scatter a rank's rows
+        across the whole split). Without it a distributed run cannot honour a global budget,
+        so it falls back to the historical per-rank cap and says so.
         """
         model.eval()
         sums = {key: 0.0 for key in METRIC_KEYS}
         samples = 0
         first_token_hit = 0
         enabled = is_main_process()
+        world, rank = _distributed_world_size(), _distributed_rank()
+        if max_qa is None:
+            window, row_source = (0, None), loader
+        elif row_loader is None and world > 1:
+            print(
+                f"[evaluator] WARNING: evaluation.autoregressive_max_qa={max_qa} is a global "
+                f"row budget but no unsharded row loader was supplied; falling back to "
+                f"{max_qa} rows per rank ({max_qa * world} rows total), which depends on the "
+                "rank count.",
+                flush=True,
+            )
+            window, row_source = (0, max_qa), loader
+        else:
+            window = row_window(max_qa, rank, world)
+            row_source = loader if row_loader is None else row_loader
+        cursor = 0
         for batch in tqdm(
-            loader,
-            total=len(loader),
+            row_source,
+            total=len(row_source),
             desc="Validation (autoregressive)",
             unit="batch",
             disable=not enabled,
             leave=False,
         ):
-            if max_qa is not None and samples >= max_qa:
-                break
+            rows = batch["question_ids"].size(0)
+            batch_start, batch_end = cursor, cursor + rows
+            cursor = batch_end
+            # Only the rows inside this rank's window are decoded. The batches outside it
+            # are skipped *before* the prefix encode, so a rank whose window is late in the
+            # split pays iteration cost only.
+            start_row = max(batch_start, window[0])
+            end_row = min(batch_end, batch_end if window[1] is None else window[1])
+            if end_row <= start_row:
+                if window[1] is not None and batch_start >= window[1]:
+                    break
+                continue
+            rows_slice = slice(start_row - batch_start, end_row - batch_start)
             ids = {
                 key: value.to(device)
                 for key, value in batch.items()
                 if key != "records"
             }
-            q = ids["qa_context_indices"]
+            q = ids["qa_context_indices"][rows_slice]
+            records = batch["records"][rows_slice]
             embed = model.qwen.get_input_embeddings()
             prefix = model.encode_context_prefix(
                 embed(ids["context_ids"]), ids["context_mask"]
@@ -275,16 +337,14 @@ class Evaluator:
             generated = model.generate_answers_with_prefix(
                 prefix,
                 q,
-                ids["question_ids"],
-                ids["question_mask"],
+                ids["question_ids"][rows_slice],
+                ids["question_mask"][rows_slice],
                 self.tokenizer,
                 self.cfg.evaluation.max_new_tokens,
                 group_by_context=True,
                 max_rows_per_group=max(1, self.cfg.evaluation.qa_batch_size),
             )
-            for i, record in enumerate(batch["records"]):
-                if max_qa is not None and samples >= max_qa:
-                    break
+            for i, record in enumerate(records):
                 row = generated[i].tolist()
                 first_token_hit += int(
                     bool(row) and self._first_token_hit(row[0], record)
@@ -296,6 +356,8 @@ class Evaluator:
                 for key, value in metrics.items():
                     sums[key] += value
                 samples += 1
+            if window[1] is not None and cursor >= window[1]:
+                break
         model.train()
         first_token_hit, samples = _distributed_sum([first_token_hit, samples], device)
         sums = dict(
@@ -308,8 +370,11 @@ class Evaluator:
         # never learned to emit the answer from memory.
         result["first_token_em"] = first_token_hit / max(1, samples)
         if include_teacher_metrics:
-            # Costs a second full pass over the loader.  Callers that already run
-            # teacher_forced separately (scripts/test.py) should pass False.
+            # Costs a second full pass over the *sharded* loader: the teacher-forced numbers
+            # come from its own all-reduce, so they must not be computed on the unsharded row
+            # loader (every rank would score every row and the reduce would count each row
+            # world_size times).  Callers that already run teacher_forced separately
+            # (scripts/test.py) should pass False.
             teacher = self.teacher_forced(model, loader, device)
             result.update(
                 {

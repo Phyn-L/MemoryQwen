@@ -209,6 +209,17 @@ def main() -> None:
         shuffle=False,
         collate_fn=make_collate(cfg, tokenizer, sample_qa=False),
     )
+    # A second, deliberately *unprepared* loader over the same dataset. The autoregressive
+    # budget (`evaluation.autoregressive_max_qa`) is global, and the evaluator slices it into
+    # contiguous windows of the global row order; `accelerator.prepare` shards by batch, so
+    # the prepared loader cannot express "rows 1024..2047 of the split". Skipping the
+    # batches outside a window happens before any compute, so this costs iteration only.
+    validation_row_loader = DataLoader(
+        validation_dataset,
+        batch_size=cfg.training.batch_size,
+        shuffle=False,
+        collate_fn=make_collate(cfg, tokenizer, sample_qa=False),
+    )
     evaluator = Evaluator(tokenizer, cfg)
     effective_loader_len = len(train_loader)
     if accelerator is not None and accelerator.num_processes > 1:
@@ -460,6 +471,7 @@ def main() -> None:
                     device,
                     include_teacher_metrics=teacher_metrics is None,
                     max_qa=cfg.evaluation.autoregressive_max_qa,
+                    row_loader=validation_row_loader,
                 )
             if run and is_main:
                 # Both evaluations are logged together; the step is explicit, so the two

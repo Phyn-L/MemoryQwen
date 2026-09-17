@@ -203,12 +203,12 @@ class EvaluationConfig:
     autoregressive_every: int = 4000
     max_new_tokens: int = 128
     qa_batch_size: int = 4
-    # QA rows each rank decodes during an autoregressive evaluation. Decoding is far
-    # more expensive than a teacher-forced forward, and a rank that spends longer than
-    # the NCCL watchdog timeout (10 minutes) inside an evaluation makes the other ranks
-    # abort with "Watchdog caught collective operation timeout". The global number of
-    # decoded rows is autoregressive_max_qa * world_size.
-    autoregressive_max_qa: int = 256
+    # QA rows the *whole* autoregressive evaluation decodes, split into contiguous windows
+    # of the validation split's row order (src/evaluator.py::row_window). A global budget
+    # rather than a per-rank one, so changing the GPU count changes neither the scored rows
+    # nor the noise level; per-rank work still shrinks as ranks grow, which is what keeps the
+    # evaluation inside the NCCL watchdog timeout (10 minutes).
+    autoregressive_max_qa: int = 1024
 
 
 @dataclass

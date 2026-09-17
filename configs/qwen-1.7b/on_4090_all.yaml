@@ -48,7 +48,7 @@ data:
   validation_max_samples: 256
 evaluation:
   autoregressive_every: 5000
-  autoregressive_max_qa: 64
+  autoregressive_max_qa: 256
   max_new_tokens: 32
   qa_batch_size: 4
   teacher_forced_every: 2000

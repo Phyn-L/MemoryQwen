@@ -53,7 +53,7 @@ SCHEDULE = {
     "data.max_answer_tokens": 64,
     "memory.memory_length": 64,
     "data.validation_max_samples": 2000,
-    "evaluation.autoregressive_max_qa": 128,
+    "evaluation.autoregressive_max_qa": 1024,
     "evaluation.max_new_tokens": 32,
 }
 
