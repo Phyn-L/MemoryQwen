@@ -57,7 +57,7 @@ fi
 GLOBAL_BATCH=$((BATCH * NUM_PROCESSES))
 EXPECTED_STEPS=$(( (CONTEXTS + GLOBAL_BATCH - 1) / GLOBAL_BATCH ))
 
-echo "=== reader A/B on H200 ==="
+echo "=== reader A/B (on -> off, sequential) ==="
 echo "checkout      : $ROOT"
 echo "HEAD          : $(git log --oneline -1 2>/dev/null || echo 'not a git checkout')"
 echo "ranks x batch : $NUM_PROCESSES x $BATCH = global batch $GLOBAL_BATCH"
