@@ -24,12 +24,31 @@ def main():
     parser.add_argument("--split", choices=("validation", "test"), default="test")
     parser.add_argument("--max-samples", type=int)
     parser.add_argument(
+        "--batch-size", type=int,
+        help="Contexts per batch for the evaluation loader (default: the checkpoint config's "
+             "training.batch_size). Evaluation runs under torch.no_grad(), so this is not "
+             "bounded by the training memory -- but every QA pair of a batch's contexts travels "
+             "with it (sample_qa=False), so the QA rows and the [rows, tokens, vocab] logits "
+             "grow with this number. It does not change the metrics.",
+    )
+    parser.add_argument(
+        "--qa-batch-size", type=int,
+        help="QA rows per autoregressive generation group and per teacher-forced loss chunk.",
+    )
+    parser.add_argument(
         "--allow-missing-trainable", action="store_true",
         help="Load a checkpoint that does not cover every trainable tensor (for example an "
              "older run without the context_lm head) instead of failing.",
     )
     args = parser.parse_args()
     cfg = TrainConfig.from_file(args.config, machine=args.machine); cfg.validate()
+    for name, value in (("--batch-size", args.batch_size), ("--qa-batch-size", args.qa_batch_size)):
+        if value is not None and value < 1:
+            raise SystemExit(f"{name} must be >= 1, got {value}")
+    if args.batch_size is not None:
+        cfg.training.batch_size = args.batch_size
+    if args.qa_batch_size is not None:
+        cfg.evaluation.qa_batch_size = args.qa_batch_size
     checkpoint_path = Path(args.checkpoint).resolve()
     cfg.checkpoint.output_dir = str(checkpoint_path.parent)
     if not cfg.logging.wandb_run_name:
@@ -80,6 +99,7 @@ def main():
     if is_main:
         ranks = 1 if accelerator is None else accelerator.num_processes
         print(f"evaluating {ds.__class__.__name__} split={args.split} "
+              f"contexts/batch={cfg.training.batch_size} qa_group={cfg.evaluation.qa_batch_size} "
               f"batches/rank={len(loader)} ranks={ranks}")
     evaluator = Evaluator(tokenizer, cfg)
     # Autoregressive first: it is the headline result. Teacher forcing feeds the answer

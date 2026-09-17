@@ -37,6 +37,11 @@ DRYRUN="${DRYRUN:-0}"
 # all-reduces the accumulators, so the metrics are the same as a single-process run of the
 # same rows (verified: NUM_PROCESSES=1 and 4 agree on a 64-row sample).
 NUM_PROCESSES="${NUM_PROCESSES:-4}"
+# Evaluation batch size. Empty = whatever the checkpoint's config used (training.batch_size).
+# The eval is no_grad, so raising it is a memory/time tradeoff you can measure, not a
+# correctness one: the metrics are batch-invariant (verified 8 vs 32 on the same rows).
+BATCH_SIZE="${BATCH_SIZE:-}"
+QA_BATCH_SIZE="${QA_BATCH_SIZE:-}"
 CONFIG="${CONFIG:-}"
 MACHINE="${MACHINE:-4090}"
 export MACHINE
@@ -87,6 +92,7 @@ echo "checkpoint : $CHECKPOINT"
 echo "scratch    : $WORK"
 echo "machine    : $MACHINE (CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<all $VISIBLE_GPUS>}, NUM_PROCESSES=$NUM_PROCESSES)"
 echo "subsets    : $SUBSETS${SAMPLE_CAP:+   (SAMPLE_CAP=$SAMPLE_CAP rows per subset)}${CONFIG:+   (config override: $CONFIG)}"
+echo "batch      : ${BATCH_SIZE:-<checkpoint config>} contexts/batch${QA_BATCH_SIZE:+, qa group $QA_BATCH_SIZE}"
 echo
 
 # --- 1. one filtered validation file + one eval config per subset ---------------------------
@@ -342,6 +348,8 @@ for subset in $SUBSETS; do
   extra=()
   # No --max-samples unless SAMPLE_CAP asks for one: scoring the full split is the point.
   [ -n "$SAMPLE_CAP" ] && extra=(--max-samples "$SAMPLE_CAP")
+  [ -n "$BATCH_SIZE" ] && extra+=(--batch-size "$BATCH_SIZE")
+  [ -n "$QA_BATCH_SIZE" ] && extra+=(--qa-batch-size "$QA_BATCH_SIZE")
   MACHINE="$MACHINE" NUM_PROCESSES="$NUM_PROCESSES" CONFIG="$WORK/config_${subset}.yaml" \
     bash scripts/test.sh --checkpoint "$CHECKPOINT" --split validation "${extra[@]}" 2>&1 | tee "$log"
   echo
