@@ -28,24 +28,44 @@ from src.icl_baseline import (
 )
 from utils.config import dtype_from_name, expand_env
 from utils.ddp import barrier, init_distributed, is_main_process
+from utils.machines import fill_missing, machine_environ, machine_names, resolve_machine
 
 # Both defaults go through the same ${VAR:-default} mechanism the YAML configs use, so a
 # machine with a different model directory or data tree overrides them with MODEL_ROOT /
-# DATA_ROOT (see scripts/env.local.sh) rather than editing this file.
-DEFAULT_MODEL = expand_env(
-    "${MODEL_ROOT:-/data/lz/hf_cache/hub}/models--Qwen--Qwen3-1.7B/"
-    "snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
-)
-# The same tree the training pipeline uses (data.root in configs/*/train.yaml), and the only
-# supported one: `src.icl_baseline.iter_examples` reads the aggregated context schema and
-# rejects anything else. See the README section "The SQuAD evaluation set, in detail" for
-# what that file actually contains.
-DEFAULT_DATA = Path(expand_env("${DATA_ROOT:-/data/lz/contexts/aggregated}"))
+# DATA_ROOT instead of editing this file. `--machine h200` (or MACHINE=h200, or the hostname)
+# picks those two values out of utils/machines.py, exactly like the training entry does.
+def _machine_overrides(machine: str | None = None) -> dict[str, str]:
+    """Environment overrides for this machine, from utils/machines.py."""
+    resolved, authoritative = resolve_machine(machine)
+    values = machine_environ(resolved)
+    return values if authoritative else fill_missing(values, os.environ)
+
+
+def _default_paths(overrides=None):
+    model_root = expand_env("${MODEL_ROOT:-/data/lz/hf_cache/hub}", overrides)
+    data_root = expand_env("${DATA_ROOT:-/data/lz/contexts/aggregated}", overrides)
+    return (
+        f"{model_root}/models--Qwen--Qwen3-1.7B/"
+        "snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
+        Path(data_root),
+    )
+
+
+# The data default is the same tree the training pipeline uses (data.root in
+# configs/*/train.yaml), and the only supported one: `src.icl_baseline.iter_examples` reads the
+# aggregated context schema and rejects anything else. See the README section "The SQuAD
+# evaluation set, in detail" for what that file actually contains.
+DEFAULT_MODEL, DEFAULT_DATA = _default_paths(_machine_overrides())
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Multi-GPU Qwen3-1.7B few-shot ICL baseline"
+    )
+    parser.add_argument(
+        "--machine", choices=machine_names(), default=None,
+        help="Machine whose paths (utils/machines.py) this run uses; without it the "
+             "MACHINE variable or the hostname decides.",
     )
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument(
@@ -97,6 +117,26 @@ def parse_args():
         "--resume", action="store_true", help="Reuse completed rows in rank shard files"
     )
     args = parser.parse_args()
+    if args.machine:
+        # The defaults above were built before parsing, so rebuild them with this machine's
+        # paths -- but only for the arguments the user did not set explicitly.
+        model, data = _default_paths(machine_environ(args.machine))
+        if args.model == DEFAULT_MODEL:
+            args.model = model
+        for name, old_value, new_value in (
+            ("squad_validation_file", str(DEFAULT_DATA / "squad/validation.jsonl"),
+             str(data / "squad/validation.jsonl")),
+            ("squad_train_file", str(DEFAULT_DATA / "squad/train.jsonl"),
+             str(data / "squad/train.jsonl")),
+            ("race_test_file", str(DEFAULT_DATA / "race/test.jsonl"),
+             str(data / "race/test.jsonl")),
+            ("race_train_file", str(DEFAULT_DATA / "race/train.jsonl"),
+             str(data / "race/train.jsonl")),
+        ):
+            if getattr(args, name) == old_value:
+                setattr(args, name, new_value)
+        print(f"[machine] {args.machine}: MODEL_ROOT={model.rsplit('/models--', 1)[0]} "
+              f"DATA_ROOT={data}", flush=True)
     if args.num_shots < 0 or args.batch_size <= 0 or args.max_input_tokens <= 0:
         parser.error(
             "num-shots must be non-negative and batch/token limits must be positive"

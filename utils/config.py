@@ -4,30 +4,41 @@ from dataclasses import asdict, dataclass, field
 import os
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
+
+from .machines import fill_missing, machine_environ, resolve_machine
 
 
 # ``${VAR}`` or ``${VAR:-default}`` inside a configuration string.
 ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
-def expand_env(value: str) -> str:
+def expand_env(value: str, overrides: Mapping[str, str] | None = None) -> str:
     """Expand ``${VAR}`` and ``${VAR:-default}`` references in one configuration string.
 
     Machine-specific locations must not be baked into tracked files. The model directory and
     the aggregated data root live somewhere different on every cluster, and editing the YAML
     there turns every ``git pull`` into a conflict -- which is exactly what happened. Writing
     them as ``${MODEL_ROOT:-/data/lz/hf_cache/hub}`` keeps the default valid where it was
-    written and lets another machine override it through the environment (the usual route is
-    a gitignored ``scripts/env.local.sh``, see the README).
+    written and lets another machine override it, either through the environment (a gitignored
+    ``scripts/env.local.sh``, a one-off ``export``) or through the per-machine table in
+    ``utils/machines.py``, which a single ``machine`` field selects.
 
     A bare ``${VAR}`` with no fallback raises when the variable is unset, so a typo cannot
     silently turn into an empty path.
+
+    ``overrides`` wins over the process environment: a machine named on the command line or in
+    the config decides where the weights and the data are for this run, instead of depending on
+    whatever the shell happens to export.
     """
+    overrides = overrides or {}
+
     def replace(match: re.Match) -> str:
         name, default = match.group(1), match.group(2)
+        if overrides.get(name):
+            return overrides[name]
         if os.environ.get(name):
             return os.environ[name]
         if default is not None:
@@ -40,14 +51,14 @@ def expand_env(value: str) -> str:
     return ENV_REFERENCE.sub(replace, value)
 
 
-def expand_env_values(value: Any) -> Any:
+def expand_env_values(value: Any, overrides: Mapping[str, str] | None = None) -> Any:
     """Apply :func:`expand_env` to every string in a nested configuration structure."""
     if isinstance(value, str):
-        return expand_env(value)
+        return expand_env(value, overrides)
     if isinstance(value, dict):
-        return {key: expand_env_values(item) for key, item in value.items()}
+        return {key: expand_env_values(item, overrides) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [expand_env_values(item) for item in value]
+        return [expand_env_values(item, overrides) for item in value]
     return value
 
 
@@ -249,14 +260,29 @@ class TrainConfig:
     training: TrainingConfig = field(default_factory=TrainingConfig)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    # Which entry of ``utils/machines.py::MACHINES`` supplied the paths (None = the config's
+    # own defaults). Recorded so a run's wandb config and checkpoint say where it ran.
+    machine: str | None = None
 
     @classmethod
-    def from_file(cls, path: str | Path) -> "TrainConfig":
+    def from_file(cls, path: str | Path, machine: str | None = None) -> "TrainConfig":
+        """Load a config, resolving machine-specific paths.
+
+        ``machine`` (or ``machine:`` in the file, or ``MACHINE`` in the environment) selects
+        an entry from ``utils/machines.py::MACHINES``; a machine that was named outright
+        supplies ``MODEL_ROOT``/``DATA_ROOT``/``WANDB_MODE`` for this load, while one only
+        recognised from the hostname just fills in what the environment did not set.
+        """
         path = Path(path)
         if path.suffix.lower() not in {".yaml", ".yml"}:
             raise ValueError(f"configuration must be a YAML file (.yaml/.yml), got: {path}")
         text = path.read_text(encoding="utf-8")
-        values = expand_env_values(yaml.safe_load(text) or {})
+        raw = dict(yaml.safe_load(text) or {})
+        resolved, authoritative = resolve_machine(machine or raw.get("machine"))
+        overrides = machine_environ(resolved)
+        if not authoritative:
+            overrides = fill_missing(overrides, os.environ)
+        values = expand_env_values(raw, overrides)
         values = dict(values)
         data_values = dict(values.get("data", {}))
         for key in ("train_datasets", "validation_datasets", "test_datasets"):
@@ -278,6 +304,7 @@ class TrainConfig:
             training=TrainingConfig(**values.get("training", {})),
             checkpoint=CheckpointConfig(**values.get("checkpoint", {})),
             logging=LoggingConfig(**values.get("logging", {})),
+            machine=resolved,
         )
 
     def to_dict(self) -> dict[str, Any]:

@@ -62,7 +62,7 @@ def test_expansion_walks_nested_structures():
         os.environ.pop("MEMORYQWEN_TEST_ROOT")
 
 
-MACHINE_VARIABLES = ("MODEL_ROOT", "DATA_ROOT", "WANDB_MODE")
+MACHINE_VARIABLES = ("MACHINE", "MODEL_ROOT", "DATA_ROOT", "WANDB_MODE")
 
 
 def _without_machine_variables():
@@ -71,6 +71,10 @@ def _without_machine_variables():
     Without this the test only passes where the variables happen to be unset -- on the H200,
     where scripts/env.local.sh exports them, the shipped defaults are correctly overridden and
     the assertion failed. A test must not depend on the ambient environment.
+
+    ``MACHINE`` is hidden for the same reason (and the hostname is pinned by the caller where
+    it matters, see tests/test_machines.py): utils/machines.py would otherwise resolve this
+    host to a machine entry and change the roots the defaults resolve to.
     """
     saved = {name: os.environ.pop(name, None) for name in MACHINE_VARIABLES}
 
@@ -114,7 +118,7 @@ def test_the_same_config_files_resolve_to_another_machine():
             assert cfg.logging.wandb_mode == "offline", config
     finally:
         for name in MACHINE_VARIABLES:
-            os.environ.pop(name)
+            os.environ.pop(name, None)
 
 
 def test_the_icl_baseline_defaults_follow_the_same_variables():

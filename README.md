@@ -42,18 +42,33 @@ made `git pull` conflict. `utils.config.expand_env` does the substitution, and
 | `NUM_PROCESSES` | the worker count, overriding the count derived from the visible cards | derived |
 | `CONFIG` | the config every entry-point script uses | `configs/qwen-1.7b/train.yaml` |
 
-Put them in `scripts/env.local.sh`, which is gitignored and sourced by `train.sh`, `test.sh`
-and `test_icl_baseline.sh` when present:
+`MODEL_ROOT` / `DATA_ROOT` / `WANDB_MODE` come from a **table in the code**, keyed by machine
+name (`utils/machines.py::MACHINES`), so a run names its machine once:
+
+```bash
+MACHINE=h200 bash scripts/train.sh              # or --machine h200, or `machine: h200` in the YAML
+```
+
+The table ships the two machines in use (`4090`: `/data/lz/...`; `h200`:
+`/home/lijie/proj2/xmu/lz/...` plus `wandb_mode: offline`). Resolution order: a machine named
+explicitly (CLI / `machine:` / `MACHINE`) supplies its values outright; a machine recognised
+only from the hostname merely *fills gaps*, so it can never overwrite a deliberate `export`;
+with neither, the configs keep using their own `${VAR:-default}` values. An unknown name is an
+error that lists the known ones, never a silent fallback. The resolved machine is printed in the
+`schedule:` line and stored in the run's config/checkpoint.
+
+`scripts/env.local.sh` still works and still wins over the table -- that remains the way to
+override a *single* variable for one run, or to pin `CUDA_VISIBLE_DEVICES` / `NUM_PROCESSES`:
 
 ```bash
 # scripts/env.local.sh -- one machine's settings, never committed
-export MODEL_ROOT=/home/lijie/proj2/xmu/lz
-export DATA_ROOT=/home/lijie/proj2/xmu/lz/aggregated
-export WANDB_MODE=offline
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export MODEL_ROOT=/somewhere/else                # one-off override
 ```
 
 `tests/test_config_env.py` checks that the shipped configs still resolve to the cloud defaults
-with an empty environment, and to the H200 paths above when those variables are set.
+with an empty environment and a hidden hostname, and `tests/test_machines.py` pins the machine
+table, the aliases and the resolution rules above.
 
 `scripts/train.sh` starts one worker per visible GPU, sets
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, and **fails** if several processes are

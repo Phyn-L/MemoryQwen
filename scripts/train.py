@@ -9,6 +9,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from utils.config import TrainConfig, dtype_from_name
+from utils.machines import machine_names
 from src.data import SortishSampler
 from src.evaluator import Evaluator
 from src.losses import (
@@ -141,11 +142,19 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/qwen-1.7b/train.yaml")
+    parser.add_argument(
+        "--machine",
+        choices=machine_names(),
+        default=None,
+        help="Take MODEL_ROOT / DATA_ROOT (and the machine's wandb mode) from "
+             "utils/machines.py::MACHINES. Overrides the config's `machine:` field; can also "
+             "come from the MACHINE environment variable or, failing that, the hostname.",
+    )
     parser.add_argument("--resume")
     parser.add_argument("--wandb-run-id")
     args = parser.parse_args()
 
-    cfg = TrainConfig.from_file(args.config)
+    cfg = TrainConfig.from_file(args.config, machine=args.machine)
     cfg.validate()
     random.seed(cfg.training.seed)
     torch.manual_seed(cfg.training.seed)
@@ -238,6 +247,7 @@ def main() -> None:
         ranks = 1 if accelerator is None else accelerator.num_processes
         print(
             "schedule: "
+            f"machine={cfg.machine or 'config-defaults'} "
             f"steps={total_steps} (epochs={cfg.training.epochs}) "
             f"batch={cfg.training.batch_size}x{ranks} ranks={cfg.training.batch_size * ranks} "
             f"warmup={cfg.scheduler.warmup_steps} "

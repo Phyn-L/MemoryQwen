@@ -17,13 +17,20 @@ done
 cd "$ROOT"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
-# Per-machine settings live in a gitignored file so a cluster with different paths never has
-# to edit tracked files -- and therefore never conflicts on `git pull`. Typical content:
-#   export MODEL_ROOT=/home/lijie/proj2/xmu/lz
-#   export DATA_ROOT=/home/lijie/proj2/xmu/lz/aggregated
-#   export WANDB_MODE=offline
+# Which machine this is -- and therefore where the Qwen weights and the data live -- is one
+# field: `MACHINE=h200 bash scripts/train.sh` (or `--machine h200`), resolved against the table
+# in utils/machines.py. Nothing machine-specific has to be written into tracked files, so a
+# `git pull` can never conflict on a path.
+#
+# The gitignored scripts/env.local.sh still works and still wins over the table, which is the
+# way to override a *single* variable for one run (or to pin CUDA_VISIBLE_DEVICES):
 #   export CUDA_VISIBLE_DEVICES=0,1,2,3
+#   export MODEL_ROOT=/somewhere/else        # one-off override
 # See the README section "Running on another machine".
+if [ -n "${MACHINE:-}" ]; then
+  set -- --machine "$MACHINE" "$@"
+fi
+
 if [ -f "$ROOT/scripts/env.local.sh" ]; then
   # shellcheck source=/dev/null
   . "$ROOT/scripts/env.local.sh"

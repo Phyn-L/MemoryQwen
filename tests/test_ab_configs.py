@@ -67,6 +67,10 @@ def _load(path: Path) -> TrainConfig:
 def _flatten(config: TrainConfig) -> dict:
     flat = {}
     for section, values in asdict(config).items():
+        if not isinstance(values, dict):
+            # Plain top-level fields (`machine`) sit next to the config sections.
+            flat[section] = values
+            continue
         for key, value in values.items():
             flat[f"{section}.{key}"] = value
     return flat

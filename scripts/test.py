@@ -9,12 +9,17 @@ from src.evaluator import Evaluator
 from src.model import load_model
 from src.pipeline import make_collate, make_context_dataset
 from utils.config import TrainConfig
+from utils.machines import machine_names
 from utils.checkpoint import CheckpointManager
 
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate a trained Qwen memory checkpoint")
     parser.add_argument("--config", default="configs/qwen-1.7b/train.yaml")
+    parser.add_argument(
+        "--machine", choices=machine_names(), default=None,
+        help="Machine whose paths (utils/machines.py) this run uses.",
+    )
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--split", choices=("validation", "test"), default="test")
     parser.add_argument("--max-samples", type=int)
@@ -24,7 +29,7 @@ def main():
              "older run without the context_lm head) instead of failing.",
     )
     args = parser.parse_args()
-    cfg = TrainConfig.from_file(args.config); cfg.validate()
+    cfg = TrainConfig.from_file(args.config, machine=args.machine); cfg.validate()
     checkpoint_path = Path(args.checkpoint).resolve()
     cfg.checkpoint.output_dir = str(checkpoint_path.parent)
     if not cfg.logging.wandb_run_name:
