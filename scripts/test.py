@@ -106,8 +106,20 @@ def main():
     # prefix back in, so its em/f1 mostly rewards lexical continuation; only
     # first_token_em there is a retrieval signal. Both collectives are called by every rank;
     # the numbers that come back are already the global ones.
+    import time
+
+    started = time.time()
+    if is_main:
+        print("[eval] autoregressive pass (headline) ...", flush=True)
     autoregressive = evaluator.autoregressive(model, loader, device, include_teacher_metrics=False)
+    if is_main:
+        print(f"[eval] autoregressive done in {time.time() - started:.1f}s", flush=True)
+    started = time.time()
+    if is_main:
+        print("[eval] teacher-forced pass (diagnostic) ...", flush=True)
     teacher_forced = evaluator.teacher_forced(model, loader, device)
+    if is_main:
+        print(f"[eval] teacher-forced done in {time.time() - started:.1f}s", flush=True)
     if is_main:
         print("autoregressive (headline):", autoregressive)
         print("teacher-forced (diagnostic only):", teacher_forced)

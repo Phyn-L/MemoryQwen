@@ -92,7 +92,7 @@ echo "checkpoint : $CHECKPOINT"
 echo "scratch    : $WORK"
 echo "machine    : $MACHINE (CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<all $VISIBLE_GPUS>}, NUM_PROCESSES=$NUM_PROCESSES)"
 echo "subsets    : $SUBSETS${SAMPLE_CAP:+   (SAMPLE_CAP=$SAMPLE_CAP rows per subset)}${CONFIG:+   (config override: $CONFIG)}"
-echo "batch      : ${BATCH_SIZE:-<checkpoint config>} contexts/batch${QA_BATCH_SIZE:+, qa group $QA_BATCH_SIZE}"
+echo "batch      : ${BATCH_SIZE:-<checkpoint config: training.batch_size>} contexts/batch${QA_BATCH_SIZE:+, qa group $QA_BATCH_SIZE}"
 echo
 
 # --- 1. one filtered validation file + one eval config per subset ---------------------------
@@ -118,6 +118,7 @@ from pathlib import Path
 
 import torch
 import yaml
+from tqdm.auto import tqdm
 
 from utils.config import (
     CheckpointConfig,
@@ -231,10 +232,12 @@ for subset in subsets:
     subset_root = work / subset / "squad"
     subset_root.mkdir(parents=True, exist_ok=True)
     contexts = pairs_kept = 0
+    total_lines = sum(1 for _ in source.open(encoding="utf-8"))
     with source.open(encoding="utf-8") as reader, (subset_root / "validation.jsonl").open(
         "w", encoding="utf-8"
     ) as writer:
-        for line in reader:
+        for line in tqdm(reader, total=total_lines, desc=f"[split] {subset}",
+                         unit="context", leave=False):
             if not line.strip():
                 continue
             row = json.loads(line)
@@ -334,7 +337,7 @@ echo
 # --- 2. evaluate every subset ---------------------------------------------------------------
 if [ "$DRYRUN" != "0" ]; then
   for subset in $SUBSETS; do
-    echo "would run: MACHINE=$MACHINE CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES NUM_PROCESSES=$NUM_PROCESSES \\"
+    echo "would run: MACHINE=$MACHINE CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<all $VISIBLE_GPUS>} NUM_PROCESSES=$NUM_PROCESSES \\"
     echo "  bash scripts/test.sh --config $WORK/config_${subset}.yaml \\"
     echo "    --checkpoint $CHECKPOINT --split validation${SAMPLE_CAP:+ --max-samples $SAMPLE_CAP}"
   done

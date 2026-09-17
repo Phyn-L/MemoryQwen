@@ -170,14 +170,21 @@ class Evaluator:
         first_token_hits = 0
         qa_weight = context_weight = 0
         enabled = is_main_process()
-        for batch in tqdm(
+        ranks = _distributed_world_size()
+        desc = "Validation (teacher-forced)"
+        if ranks > 1:
+            # Only the main rank draws a bar (four interleaved bars in one log are unreadable),
+            # but the label has to say whose shard the ETA belongs to.
+            desc += f" [rank {_distributed_rank()}/{ranks}]"
+        progress = tqdm(
             loader,
             total=len(loader),
-            desc="Validation (teacher-forced)",
+            desc=desc,
             unit="batch",
             disable=not enabled,
             leave=False,
-        ):
+        )
+        for batch in progress:
             ids = {
                 key: value.to(device)
                 for key, value in batch.items()
@@ -226,6 +233,8 @@ class Evaluator:
                     for key, value in metrics.items():
                         totals[key] += value
                     samples += 1
+            progress.set_postfix({"contexts": context_weight, "qa_rows": samples}, refresh=False)
+        progress.close()
         model.train()
         qa_sum, reconstruction_sum, first_token_hits, qa_weight, context_weight, samples = (
             _distributed_sum(
@@ -300,14 +309,18 @@ class Evaluator:
             window = row_window(max_qa, rank, world)
             row_source = loader if row_loader is None else row_loader
         cursor = 0
-        for batch in tqdm(
+        desc = "Validation (autoregressive)"
+        if world > 1:
+            desc += f" [rank {rank}/{world}]"
+        progress = tqdm(
             row_source,
             total=len(row_source),
-            desc="Validation (autoregressive)",
+            desc=desc,
             unit="batch",
             disable=not enabled,
             leave=False,
-        ):
+        )
+        for batch in progress:
             rows = batch["question_ids"].size(0)
             batch_start, batch_end = cursor, cursor + rows
             cursor = batch_end
@@ -358,8 +371,10 @@ class Evaluator:
                 for key, value in metrics.items():
                     sums[key] += value
                 samples += 1
+            progress.set_postfix({"qa_rows": samples}, refresh=False)
             if window[1] is not None and cursor >= window[1]:
                 break
+        progress.close()
         model.train()
         first_token_hit, samples = _distributed_sum([first_token_hit, samples], device)
         sums = dict(
