@@ -212,7 +212,7 @@ batch 内最长的答案 —— 这些样本的最后一个答案 token 被 EOS 
 | E7 | `src/evaluator.py:166` | `autoregressive()` 结尾又整跑一遍 `teacher_forced()` | 每次 AR 评测成本翻倍 |
 | E8 | `src/losses.py:44-50` | `memory_contrastive_loss` 的 positive 项 `(z*z).sum(-1)/T ≡ 1/T` 是常数，实际只剩一个阈值式排斥项 | 语义与注释不符（weight=0 未启用）；该未启用目标随后已删除，见 `docs/READER_OPTIONS.md` |
 | E9 | 环境 | `peft` 未安装，实际走 `StaticLoRALinear` 回退路径 | 与 PEFT 生态不兼容，且要求复现时保持同一路径 |
-| E10 | `src/data.py:180` | answer 单独 tokenize 且 `add_special_tokens=False`，首 token 没有前导空格（`'Deabolis'→['De','abol','is']` vs `' Deabolis'→[' De','abol','is']`） | 训练目标形式不自然；影响有限但应统一 |
+| E10 | `src/data.py:180` | answer 单独 tokenize 且 `add_special_tokens=False`，首 token 没有前导空格（`'Deabolis'→['De','abol','is']` vs `' Deabolis'→[' De','abol','is']`） | 训练目标形式不自然；影响有限但应统一。**评测侧已处理**（`aa6cb6c`）：`first_token_em` 改成先比 token id、再比单 token 的归一化文本，模型吐哪种编码都算命中，不会再因为编码边界漏记（Qwen3-1.7B 上 SQuAD v1.1 validation 的 55028 个 gold 首 token，加一个前导空格后 id 无一相同）。数据侧暂不动：`labels` 与 `answer_ids` 同为 bare 编码、两者自洽，改它会同时改变已有 run 的可比性 |
 
 **数据配比**：`train_datasets: all` 过滤后 255143 个 context 中 **74.3% 是 ms_marco**，
 squad 只占 7.4%（`outputs/Qwen1.7B/dataset_cache/train-*/hf_dataset`）。
