@@ -408,6 +408,16 @@ def main() -> None:
                 # Resynchronise explicitly so a rank whose shard finished early cannot
                 # race ahead into the next training step.
                 accelerator.wait_for_everyone()
+            if (teacher_metrics is not None or metrics is not None) and torch.cuda.is_available():
+                # An evaluation allocates a very different tensor mix from a training step
+                # (whole contexts through every decoder, a full validation loader), and the
+                # allocator keeps those blocks cached afterwards. On the H200 that residue
+                # was enough to break the *next* step's backward with "5.31 GiB reserved but
+                # unallocated" while a 3.40 GiB block was requested -- the ON arm died right
+                # after its first evaluation at step 500. Handing the cache back to the
+                # driver costs a fraction of a second once per evaluation interval, and only
+                # on the steps that actually evaluated.
+                torch.cuda.empty_cache()
             if step % cfg.checkpoint.save_every_steps == 0 and is_main:
                 checkpoint_model = (
                     accelerator.unwrap_model(model)

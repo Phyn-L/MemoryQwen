@@ -80,6 +80,15 @@ def test_the_loop_echoes_the_resolved_schedule():
         assert field in source, field
 
 
+def test_the_allocator_cache_is_released_after_an_evaluation():
+    source = _train_source()
+    assert "torch.cuda.empty_cache()" in source, (
+        "the evaluation's cached blocks must not be left for the next backward"
+    )
+    # It must be tied to an evaluation having happened, not run every step.
+    assert "teacher_metrics is not None or metrics is not None" in source
+
+
 if __name__ == "__main__":
     failures = 0
     for name, function in sorted(globals().items()):
