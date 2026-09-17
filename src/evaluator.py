@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 from utils.ddp import is_main_process
 
 from .losses import combine_losses, context_lm_loss, qa_loss, reconstruction_loss
-from .metrics import METRIC_KEYS, best_reference_metrics, normalize_answer
+from .metrics import METRIC_KEYS, answer_line, best_reference_metrics, normalize_answer
 
 
 def _distributed_sum(values, device):
@@ -220,7 +220,9 @@ class Evaluator:
                     text = self.tokenizer.decode(
                         predictions[i][active].tolist(), skip_special_tokens=True
                     )
-                    metrics = best_reference_metrics(text, record.references)
+                    # Same answer span the ICL baseline scores: its first line. See
+                    # src.metrics.answer_line for why this is not cosmetic.
+                    metrics = best_reference_metrics(answer_line(text), record.references)
                     for key, value in metrics.items():
                         totals[key] += value
                     samples += 1
@@ -350,7 +352,7 @@ class Evaluator:
                     bool(row) and self._first_token_hit(row[0], record)
                 )
                 metrics = best_reference_metrics(
-                    self.tokenizer.decode(row, skip_special_tokens=True),
+                    answer_line(self.tokenizer.decode(row, skip_special_tokens=True)),
                     record.references,
                 )
                 for key, value in metrics.items():

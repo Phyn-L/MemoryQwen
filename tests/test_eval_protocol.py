@@ -1,9 +1,16 @@
 """Evaluation-protocol invariants: the scored set must not depend on the number of GPUs.
 
-The autoregressive budget (`evaluation.autoregressive_max_qa`) is a *global* number of QA
+Two protocol invariants.
+
+1. The autoregressive budget (`evaluation.autoregressive_max_qa`) is a *global* number of QA
 rows. It used to be a per-rank cap, so an 8-GPU run decoded ``8 x cap`` rows and a 4-GPU run
 ``4 x cap`` -- different question sets, different noise levels, and an A/B whose two arms were
 launched with different rank counts silently stopped being comparable.
+
+2. Both harnesses score the *same* answer span. The ICL baseline always looked at the first
+line of a completion while the evaluator scored all of it, so ``"Paris\nExplanation: ..."``
+was ``em=1`` for one and ``em=0`` for the other -- sharing the normalizer and the reduction
+did not make the numbers comparable on its own.
 
 Run with ``python tests/test_eval_protocol.py`` or ``pytest tests``.
 """
@@ -165,6 +172,91 @@ def test_a_rank_only_scores_the_rows_inside_its_window():
     # A window that does not divide the batch size is still exact: the last rank of a
     # budget that stops mid-batch scores only the part inside its window.
     assert _scored_rows(model, batches, max_qa=5, world=2, rank=1) == ["a3", "a4"]
+
+
+def _ar_result(model, batches, max_qa, decoded="cat", world=1, rank=0) -> dict:
+    """The autoregressive metrics with a controllable decoded string."""
+    cfg = TrainConfig()
+    cfg.evaluation.max_new_tokens = 1
+    cfg.evaluation.qa_batch_size = 2
+    evaluator = Evaluator(_Tokenizer(), cfg)
+    evaluator.tokenizer.decode = lambda ids, skip_special_tokens=True: decoded
+    evaluator_module._distributed_world_size = lambda: world
+    evaluator_module._distributed_rank = lambda: rank
+    try:
+        return evaluator.autoregressive(
+            model, batches, torch.device("cpu"), include_teacher_metrics=False,
+            max_qa=max_qa, row_loader=batches,
+        )
+    finally:
+        evaluator_module._distributed_world_size = _real_world
+        evaluator_module._distributed_rank = _real_rank
+
+
+def test_the_evaluator_scores_the_first_answer_line_like_the_baseline():
+    """The audit's example: `Paris\nExplanation: ...` against the gold `Paris`."""
+    if not _available():
+        return
+    model = _model()
+    batches = [{
+        "context_ids": torch.randint(0, VOCAB, (1, CONTEXT_LENGTH)),
+        "context_mask": torch.ones(1, CONTEXT_LENGTH, dtype=torch.bool),
+        "question_ids": torch.randint(0, VOCAB, (1, QUESTION_LENGTH)),
+        "question_mask": torch.ones(1, QUESTION_LENGTH, dtype=torch.bool),
+        "qa_context_indices": torch.zeros(1, dtype=torch.long),
+        "records": [QARecord("q", "Paris")],
+    }]
+    result = _ar_result(model, batches, max_qa=1, decoded="Paris\nExplanation: city in France")
+    assert result["em"] == 1.0, result
+    assert result["f1"] == 1.0, result
+    assert result["rouge_l"] == 1.0, result
+
+
+def test_the_two_harnesses_postprocess_identically_on_tricky_generations():
+    from src.icl_baseline import ICLExample, example_metrics, parse_prediction
+    from src.metrics import answer_line, best_reference_metrics
+
+    cases = [
+        ("Paris\nExplanation: city in France", ("Paris",)),
+        ("\nParis", ("Paris",)),            # a leading blank line is formatting
+        ("the cat sat", ("cat",)),
+        ("", ("cat",)),
+        ("cat", ("the cat",)),
+    ]
+    for raw, references in cases:
+        example = ICLExample(id="1", dataset="squad", context="c", question="q",
+                             references=tuple(references))
+        baseline_prediction, _ = parse_prediction(example, raw)
+        ours = best_reference_metrics(answer_line(raw), references)
+        theirs = example_metrics(baseline_prediction, references)
+        assert baseline_prediction == answer_line(raw), (raw, baseline_prediction)
+        assert ours == theirs, (raw, ours, theirs)
+
+
+def test_limit_examples_mirrors_the_memory_side_validation_subset():
+    from src.icl_baseline import ICLExample, limit_examples
+
+    class _WordTokenizer:
+        def __call__(self, text, add_special_tokens=False):
+            from types import SimpleNamespace
+
+            return SimpleNamespace(input_ids=text.split())
+
+    examples = [
+        ICLExample(id="1", dataset="squad", context="a b c", question="q1", references=("x",)),
+        ICLExample(id="2", dataset="squad", context="a b c", question="q2", references=("y",)),
+        ICLExample(id="3", dataset="squad", context="d e f g h i", question="q3", references=("z",)),
+        ICLExample(id="4", dataset="squad", context="j", question="q4", references=("w",)),
+    ]
+    assert [e.question for e in limit_examples(examples, max_contexts=2)] == ["q1", "q2", "q3"]
+    assert [e.question for e in limit_examples(examples, max_context_tokens=3,
+                                               tokenizer=_WordTokenizer())] == ["q1", "q2", "q4"]
+    # Length filtering happens first, like the dataset cache build (`filter_long_context`)
+    # does before `validation_max_samples` slices the first N contexts: dropping the long
+    # context promotes "j" into the first two.
+    assert [e.question for e in limit_examples(examples, max_contexts=2, max_context_tokens=3,
+                                               tokenizer=_WordTokenizer())] == ["q1", "q2", "q4"]
+    assert [e.question for e in limit_examples(examples)] == ["q1", "q2", "q3", "q4"]
 
 
 if __name__ == "__main__":

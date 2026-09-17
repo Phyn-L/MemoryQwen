@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-from .metrics import METRIC_KEYS, best_reference_metrics, normalize_answer
+from .metrics import METRIC_KEYS, answer_line, best_reference_metrics, normalize_answer
 
 
 @dataclass(frozen=True)
@@ -69,6 +69,43 @@ def load_jsonl(path: str | Path, dataset: str) -> list[ICLExample]:
             continue
         records.append(example)
     return records
+
+
+def limit_examples(records, max_contexts=None, max_context_tokens=None, tokenizer=None):
+    """Trim a split the way the memory evaluator's validation set is trimmed.
+
+    The two harnesses must score the same *items*, and by default they did not: the memory
+    side reads the cached validation split, which drops contexts longer than
+    ``data.max_context_tokens`` and then keeps at most ``data.validation_max_samples``
+    **contexts**, while this script read the raw file and capped **examples** (QA rows) with
+    ``--max-samples``. Same normalizer, same reduction, different question set.
+
+    ``max_contexts`` keeps the examples of the first N distinct contexts in file order and
+    ``max_context_tokens`` drops the examples whose context does not fit, so
+    ``--max-contexts`` / ``--max-context-tokens`` can reproduce the memory side's subset.
+    """
+    limited = list(records)
+    if max_context_tokens is not None:
+        if tokenizer is None:
+            raise ValueError("max_context_tokens needs a tokenizer")
+        limited = [
+            example
+            for example in limited
+            if len(tokenizer(example.context, add_special_tokens=False).input_ids)
+            <= int(max_context_tokens)
+        ]
+    if max_contexts is not None:
+        seen: list[str] = []
+        kept = []
+        for example in limited:
+            key = example.context
+            if key not in seen:
+                if len(seen) >= int(max_contexts):
+                    continue
+                seen.append(key)
+            kept.append(example)
+        limited = kept
+    return limited
 
 
 def sample_jsonl(path: str | Path, dataset: str, count: int, seed: int) -> list[ICLExample]:
@@ -167,8 +204,9 @@ def _demo_answer(example: ICLExample) -> str:
 def parse_prediction(example: ICLExample, raw_prediction: str) -> tuple[str, str]:
     raw = raw_prediction.strip()
     if example.dataset != "race":
-        first_line = raw.splitlines()[0].strip() if raw else ""
-        return first_line, ""
+        # The very same helper the memory evaluator uses, so the two harnesses cannot drift
+        # apart on what "the prediction" is.
+        return answer_line(raw), ""
     match = re.search(r"(?:^|[\s(\[])s*([A-D])(?:[\s).:\]]|$)", raw.upper())
     if not match:
         normalized = normalize_answer(raw)

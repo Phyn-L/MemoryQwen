@@ -46,6 +46,24 @@ def normalize_answer(value) -> str:
     return " ".join(text.split())
 
 
+def answer_line(text) -> str:
+    """The answer span of a raw generation: its first non-empty line, stripped.
+
+    A SQuAD answer is a phrase, but instruction-tuned models like to keep talking
+    (``"Paris\nExplanation: city in France"``). The ICL baseline always scored only the first
+    line while the evaluator scored the whole completion, so the *same* generation could be
+    ``em=1`` for one harness and ``em=0`` for the other -- sharing the normalizer and the
+    reduction did not make the numbers comparable on its own. Both call this now.
+
+    The first *non-empty* line, not ``splitlines()[0]``: a leading blank line is formatting,
+    not an empty answer, and both harnesses must treat it identically.
+    """
+    for line in str(text).splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
 def exact_match(prediction, reference, normalize=normalize_answer) -> float:
     return float(normalize(prediction) == normalize(reference))
 

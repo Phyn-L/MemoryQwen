@@ -24,6 +24,7 @@ from src.icl_baseline import (
     parse_prediction,
     render_prompt,
     sample_jsonl,
+    limit_examples,
 )
 from utils.config import dtype_from_name, expand_env
 from utils.ddp import barrier, init_distributed, is_main_process
@@ -76,7 +77,19 @@ def parse_args():
     parser.add_argument(
         "--max-samples",
         type=int,
-        help="Debug-only cap applied independently to each dataset",
+        help="Debug-only cap applied independently to each dataset (in *examples*, i.e. QA rows)",
+    )
+    parser.add_argument(
+        "--max-contexts",
+        type=int,
+        help="Keep only the first N distinct contexts of the file, the unit the memory "
+        "evaluator's data.validation_max_samples uses",
+    )
+    parser.add_argument(
+        "--max-context-tokens",
+        type=int,
+        help="Drop examples whose context does not fit in N tokens, mirroring the memory "
+        "side's data.max_context_tokens + filter_long_context",
     )
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--no-chat-template", action="store_true")
@@ -319,6 +332,14 @@ def main():
         records = load_jsonl(paths[dataset][0], dataset)
         if args.max_samples is not None:
             records = records[: args.max_samples]
+        records = limit_examples(
+            records,
+            max_contexts=args.max_contexts,
+            max_context_tokens=args.max_context_tokens,
+            tokenizer=tokenizer,
+        )
+        if not records:
+            raise SystemExit(f"{dataset}: no examples left after the subset filters")
         evaluate_dataset(
             args,
             dataset,
