@@ -40,8 +40,25 @@ NUM_PROCESSES="${NUM_PROCESSES:-4}"
 CONFIG="${CONFIG:-}"
 MACHINE="${MACHINE:-4090}"
 export MACHINE
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 export WANDB_MODE="${WANDB_MODE:-offline}"
+
+# Card selection. An explicit CUDA_VISIBLE_DEVICES is respected as-is; otherwise every visible
+# card stays visible, which is what `accelerate launch --num_processes N` needs -- pinning it to
+# "0" here made a 4-rank launch silently run one rank on GPU 0. NUM_PROCESSES is also clamped to
+# the visible cards, with a warning, so a typo cannot quietly cost 3/4 of the machine.
+VISIBLE_GPUS="${CUDA_VISIBLE_DEVICES:-}"
+if [ -z "$VISIBLE_GPUS" ]; then
+  VISIBLE_GPUS=$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')
+else
+  VISIBLE_GPUS=$(awk -F, '{print NF}' <<<"$VISIBLE_GPUS")
+fi
+case "$VISIBLE_GPUS" in ''|*[!0-9]*) VISIBLE_GPUS=1 ;; esac
+[ "$VISIBLE_GPUS" -ge 1 ] || VISIBLE_GPUS=1
+if [ "$NUM_PROCESSES" -gt "$VISIBLE_GPUS" ]; then
+  echo "eval_squad_v1v2.sh: NUM_PROCESSES=$NUM_PROCESSES but only $VISIBLE_GPUS GPU(s) visible" \
+       "(CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}); running $VISIBLE_GPUS." >&2
+  NUM_PROCESSES="$VISIBLE_GPUS"
+fi
 
 # Per-machine paths come from utils/machines.py (MACHINE=4090 above); the gitignored env file
 # still wins for a one-off override -- same rule as train.sh.
@@ -68,7 +85,7 @@ fi
 mkdir -p "$WORK"
 echo "checkpoint : $CHECKPOINT"
 echo "scratch    : $WORK"
-echo "machine    : $MACHINE (CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES, NUM_PROCESSES=$NUM_PROCESSES)"
+echo "machine    : $MACHINE (CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<all $VISIBLE_GPUS>}, NUM_PROCESSES=$NUM_PROCESSES)"
 echo "subsets    : $SUBSETS${SAMPLE_CAP:+   (SAMPLE_CAP=$SAMPLE_CAP rows per subset)}${CONFIG:+   (config override: $CONFIG)}"
 echo
 
