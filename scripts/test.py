@@ -32,6 +32,13 @@ def main():
              "grow with this number. It does not change the metrics.",
     )
     parser.add_argument(
+        "--max-new-tokens", type=int,
+        help="Upper bound on the tokens the autoregressive pass decodes per answer (default: "
+             "evaluation.max_new_tokens from the checkpoint config, 32 in the shipped configs). "
+             "Keep it at 32 to stay comparable with scripts/test_icl_baseline.py, which uses "
+             "--squad-max-new-tokens 32.",
+    )
+    parser.add_argument(
         "--qa-batch-size", type=int,
         help="QA rows per autoregressive generation group and per teacher-forced loss chunk.",
     )
@@ -42,13 +49,19 @@ def main():
     )
     args = parser.parse_args()
     cfg = TrainConfig.from_file(args.config, machine=args.machine); cfg.validate()
-    for name, value in (("--batch-size", args.batch_size), ("--qa-batch-size", args.qa_batch_size)):
+    for name, value in (
+        ("--batch-size", args.batch_size),
+        ("--qa-batch-size", args.qa_batch_size),
+        ("--max-new-tokens", args.max_new_tokens),
+    ):
         if value is not None and value < 1:
             raise SystemExit(f"{name} must be >= 1, got {value}")
     if args.batch_size is not None:
         cfg.training.batch_size = args.batch_size
     if args.qa_batch_size is not None:
         cfg.evaluation.qa_batch_size = args.qa_batch_size
+    if args.max_new_tokens is not None:
+        cfg.evaluation.max_new_tokens = args.max_new_tokens
     checkpoint_path = Path(args.checkpoint).resolve()
     cfg.checkpoint.output_dir = str(checkpoint_path.parent)
     if not cfg.logging.wandb_run_name:
@@ -100,6 +113,7 @@ def main():
         ranks = 1 if accelerator is None else accelerator.num_processes
         print(f"evaluating {ds.__class__.__name__} split={args.split} "
               f"contexts/batch={cfg.training.batch_size} qa_group={cfg.evaluation.qa_batch_size} "
+              f"max_new_tokens={cfg.evaluation.max_new_tokens} "
               f"batches/rank={len(loader)} ranks={ranks}")
     evaluator = Evaluator(tokenizer, cfg)
     # Autoregressive first: it is the headline result. Teacher forcing feeds the answer

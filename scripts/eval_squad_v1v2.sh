@@ -42,6 +42,10 @@ NUM_PROCESSES="${NUM_PROCESSES:-4}"
 # correctness one: the metrics are batch-invariant (verified 8 vs 32 on the same rows).
 BATCH_SIZE="${BATCH_SIZE:-}"
 QA_BATCH_SIZE="${QA_BATCH_SIZE:-}"
+# Generation budget. Empty = the checkpoint config's evaluation.max_new_tokens (32 in the
+# shipped configs, which is what the ICL baseline decodes too -- changing it makes the AR
+# numbers no longer comparable with scripts/test_icl_baseline.py).
+MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-}"
 CONFIG="${CONFIG:-}"
 MACHINE="${MACHINE:-4090}"
 export MACHINE
@@ -92,7 +96,7 @@ echo "checkpoint : $CHECKPOINT"
 echo "scratch    : $WORK"
 echo "machine    : $MACHINE (CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<all $VISIBLE_GPUS>}, NUM_PROCESSES=$NUM_PROCESSES)"
 echo "subsets    : $SUBSETS${SAMPLE_CAP:+   (SAMPLE_CAP=$SAMPLE_CAP rows per subset)}${CONFIG:+   (config override: $CONFIG)}"
-echo "batch      : ${BATCH_SIZE:-<checkpoint config: training.batch_size>} contexts/batch${QA_BATCH_SIZE:+, qa group $QA_BATCH_SIZE}"
+echo "batch      : ${BATCH_SIZE:-<checkpoint config: training.batch_size>} contexts/batch${QA_BATCH_SIZE:+, qa group $QA_BATCH_SIZE}${MAX_NEW_TOKENS:+, max_new_tokens $MAX_NEW_TOKENS}"
 echo
 
 # --- 1. one filtered validation file + one eval config per subset ---------------------------
@@ -353,6 +357,7 @@ for subset in $SUBSETS; do
   [ -n "$SAMPLE_CAP" ] && extra=(--max-samples "$SAMPLE_CAP")
   [ -n "$BATCH_SIZE" ] && extra+=(--batch-size "$BATCH_SIZE")
   [ -n "$QA_BATCH_SIZE" ] && extra+=(--qa-batch-size "$QA_BATCH_SIZE")
+  [ -n "$MAX_NEW_TOKENS" ] && extra+=(--max-new-tokens "$MAX_NEW_TOKENS")
   MACHINE="$MACHINE" NUM_PROCESSES="$NUM_PROCESSES" CONFIG="$WORK/config_${subset}.yaml" \
     bash scripts/test.sh --checkpoint "$CHECKPOINT" --split validation "${extra[@]}" 2>&1 | tee "$log"
   echo
