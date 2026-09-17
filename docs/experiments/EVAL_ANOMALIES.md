@@ -1,5 +1,7 @@
 # 全集 SQuAD v1/v2 评测（ON vs OFF）异常核查
 
+> 历史快照：2026-09-18 归档。正文状态、数值、路径和预计完成时间属于当时记录，本次未重新运行实验或核实远端状态。当前操作见[运行指南](../guides/RUNNING.md)，实验状态见[实验索引](../experiments/README.md)。
+
 对象：`outputs/eval_{on,off}/results.{md,json}` + `test_{v1,v2,v2all}.log`，2026-09-18 00:20-00:38，
 checkpoint 是第二轮那对（`ab_h200_on/Qwen1.7B_20260917_213648/last.pt`、
 `ab_h200_off/Qwen1.7B_20260917_230444/last.pt`）。六份日志里没有报错、没有 NaN。
@@ -67,7 +69,7 @@ v1 + v2(answerable) 这两列（它们现在是干净的）。
 
 * 六份日志都是 `ranks=8`、`contexts/batch=256 qa_group=256`；v1 是 9 个 batch / 8 rank
   （rank0 两批），v2 是 5 个 batch / 8 rank。
-* 原因（已核对）：H200 工作区里 `scripts/eval_squad_v1v2.sh` 有一份**未提交的本地修改**，把默认值
+* 原因（已核对）：H200 工作区里 `scripts/archive/eval_squad_v1v2.sh` 有一份**未提交的本地修改**，把默认值
   改成了 `NUM_PROCESSES=4 → 8`、`BATCH_SIZE/QA_BATCH_SIZE="" → 256`、`MACHINE=4090 → h200`、
   `CUDA_VISIBLE_DEVICES` 默认 `0..7`。这几处正好解释日志里的 `ranks=8` 与 `contexts/batch=256`；
   `scripts/env.local.sh` 里 `NUM_PROCESSES` 那两行仍然是注释，不是它。

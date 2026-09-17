@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SQuAD validation 的 ICL 基线：Qwen3-1.7B 与 Qwen3-8B，全集、few-shot、贪心 32 token。
 #
-# 目的：给 memory 侧（`scripts/eval_squad_v1v2.sh` 的 AR 数字）一个同口径的对照。两边共用
+# 目的：给 memory 侧（`scripts/archive/eval_squad_v1v2.sh` 的 AR 数字）一个同口径的对照。两边共用
 # `src/metrics.answer_line` + 官方 SQuAD 归一化 + "每条参考取 max" 的归约（见 docs/AB_H200.md
 # 第 3 节），生成都是贪心 + `max_new_tokens=32`，评分都只取生成结果的第一行。
 #
@@ -15,11 +15,11 @@
 #
 # 用法：
 #   cd <repo>
-#   MACHINE=h200 bash scripts/eval_icl_squad.sh                  # 1.7B + 8B，4-shot，v1/v2/full
-#   MACHINE=h200 MODELS="8b" SHOTS=0 SUBSETS="v1" bash scripts/eval_icl_squad.sh
-#   MACHINE=h200 DRYRUN=1 bash scripts/eval_icl_squad.sh          # 只打印将要执行的命令
-#   MACHINE=h200 SAMPLE_CAP=8 MODELS="1.7b" SUBSETS="v1" bash scripts/eval_icl_squad.sh   # 冒烟
-#   MACHINE=h200 RESUME=1 MODELS="8b" bash scripts/eval_icl_squad.sh                      # 断点续跑
+#   MACHINE=h200 bash scripts/archive/eval_icl_squad.sh                  # 1.7B + 8B，4-shot，v1/v2/full
+#   MACHINE=h200 MODELS="8b" SHOTS=0 SUBSETS="v1" bash scripts/archive/eval_icl_squad.sh
+#   MACHINE=h200 DRYRUN=1 bash scripts/archive/eval_icl_squad.sh          # 只打印将要执行的命令
+#   MACHINE=h200 SAMPLE_CAP=8 MODELS="1.7b" SUBSETS="v1" bash scripts/archive/eval_icl_squad.sh   # 冒烟
+#   MACHINE=h200 RESUME=1 MODELS="8b" bash scripts/archive/eval_icl_squad.sh                      # 断点续跑
 #
 # 常用环境变量：
 #   MODELS="1.7b 8b"     要跑的模型（1.7b / 8b）
@@ -41,7 +41,7 @@
 # 注意：`--resume` 的分片文件名里带 rank 数，续跑必须用同样的 NUM_GPUS。
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
 # Same completeness check as train.sh/test.sh: a stray copy of scripts/ next to the data tree
 # would otherwise start 8 ranks that all die with "No module named 'utils'".
@@ -69,7 +69,7 @@ if ! "$PYTHON" -c "import torch" >/dev/null 2>&1; then
 fi
 
 # Which machine this is -- and therefore where the weights and the data live -- is one field:
-# `MACHINE=h200 bash scripts/eval_icl_squad.sh`, resolved against utils/machines.py exactly like
+# `MACHINE=h200 bash scripts/archive/eval_icl_squad.sh`, resolved against utils/machines.py exactly like
 # train.sh / test.sh do. The gitignored scripts/env.local.sh still works and still wins: the table
 # is only consulted for what is still unset.
 if [ -f "$ROOT/scripts/env.local.sh" ]; then
@@ -161,7 +161,7 @@ for subset in $SUBSETS; do
   if [ ! -f "$file" ]; then
     echo "eval_icl_squad.sh: subset '$subset' needs '$file', which does not exist." >&2
     echo "eval_icl_squad.sh: generate the splits once with any checkpoint, e.g." >&2
-    echo "    CHECKPOINT=<ckpt> SAMPLE_CAP=1 bash scripts/eval_squad_v1v2.sh" >&2
+    echo "    CHECKPOINT=<ckpt> SAMPLE_CAP=1 bash scripts/archive/eval_squad_v1v2.sh" >&2
     echo "  (SAMPLE_CAP only caps the decoded rows; the split files are always written in full)" >&2
     echo "eval_icl_squad.sh: or point SPLIT_DIR at an existing WORK directory." >&2
     exit 1

@@ -141,7 +141,7 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/qwen-1.7b/train.yaml")
+    parser.add_argument("--config", default="configs/qwen-1.7b/train_baseline.yaml")
     parser.add_argument(
         "--machine",
         choices=machine_names(),

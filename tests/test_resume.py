@@ -117,7 +117,7 @@ def test_a_fresh_run_nests_its_directory_under_the_configured_output_dir():
 
 
 def test_the_launcher_finds_checkpoints_in_every_run_directory():
-    source = (REPO / "scripts" / "run_ab.sh").read_text(encoding="utf-8")
+    source = (REPO / "scripts" / "archive" / "run_ab.sh").read_text(encoding="utf-8")
     assert '"$out_dir"/*/step-*.pt' in source, "the launcher must look inside the run dirs"
     assert "RESUME=" in source and "--resume" in source
 

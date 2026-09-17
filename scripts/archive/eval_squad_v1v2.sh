@@ -17,14 +17,14 @@
 #     and every QA row of the subset are scored (SAMPLE_CAP=... exists only for a smoke run).
 #
 # Usage (on the 4090):
-#   CHECKPOINT=outputs/Qwen1.7B_20260917_213648.pt bash scripts/eval_squad_v1v2.sh
-#   CHECKPOINT=... SAMPLE_CAP=8 bash scripts/eval_squad_v1v2.sh      # quick plumbing check
-#   CHECKPOINT=... DRYRUN=1 bash scripts/eval_squad_v1v2.sh          # print the plan only
+#   CHECKPOINT=outputs/Qwen1.7B_20260917_213648.pt bash scripts/archive/eval_squad_v1v2.sh
+#   CHECKPOINT=... SAMPLE_CAP=8 bash scripts/archive/eval_squad_v1v2.sh      # quick plumbing check
+#   CHECKPOINT=... DRYRUN=1 bash scripts/archive/eval_squad_v1v2.sh          # print the plan only
 #   CHECKPOINT=... CONFIG=configs/qwen-1.7b/train.yaml bash ...      # override the derived config
 #   CHECKPOINT=... CUDA_VISIBLE_DEVICES=1 bash ...
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$ROOT"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 

@@ -8,4 +8,4 @@ export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 if [ -f "$ROOT/scripts/env.local.sh" ]; then
   source "$ROOT/scripts/env.local.sh"
 fi
-exec python -m utils.launcher train "$@"
+exec python -m utils.launcher icl "$@"

@@ -278,6 +278,13 @@ class TrainConfig:
             raise ValueError(f"configuration must be a YAML file (.yaml/.yml), got: {path}")
         text = path.read_text(encoding="utf-8")
         raw = dict(yaml.safe_load(text) or {})
+        return cls.from_dict(raw, machine=machine)
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any], machine: str | None = None) -> "TrainConfig":
+        unknown = set(raw) - set(cls.__dataclass_fields__)
+        if unknown:
+            raise ValueError(f"Unknown configuration sections: {sorted(unknown)}")
         resolved, authoritative = resolve_machine(machine or raw.get("machine"))
         overrides = machine_environ(resolved)
         if not authoritative:

@@ -17,11 +17,11 @@
 #   cd /home/lijie/proj2/xmu/lz/MemoryQwen
 #   export PATH=/home/lijie/proj2/.conda/envs/shine/bin:$PATH
 #
-#   DRYRUN=1 bash scripts/run_on_8b.sh          # 只生成配置 + 打印调度，不启动
-#   SMOKE=1  bash scripts/run_on_8b.sh          # 256 个 context 的冒烟（十几步，几分钟）
-#   bash scripts/run_on_8b.sh                   # 正式跑（默认 batch 4/卡 x 8 卡 = global 32）
-#   BATCH_SIZE=8 bash scripts/run_on_8b.sh      # 与第二轮 ON 完全同调度（global 64 / 3945 步）
-#   RESUME=1 bash scripts/run_on_8b.sh          # 从 $WORK 下最新的 checkpoint 续跑
+#   DRYRUN=1 bash scripts/archive/run_on_8b.sh          # 只生成配置 + 打印调度，不启动
+#   SMOKE=1  bash scripts/archive/run_on_8b.sh          # 256 个 context 的冒烟（十几步，几分钟）
+#   bash scripts/archive/run_on_8b.sh                   # 正式跑（默认 batch 4/卡 x 8 卡 = global 32）
+#   BATCH_SIZE=8 bash scripts/archive/run_on_8b.sh      # 与第二轮 ON 完全同调度（global 64 / 3945 步）
+#   RESUME=1 bash scripts/archive/run_on_8b.sh          # 从 $WORK 下最新的 checkpoint 续跑
 #
 # 环境变量（都有默认值）：
 #   MACHINE=h200        取 utils/machines.py 里的 MODEL_ROOT / DATA_ROOT（也可写进 config）
@@ -41,7 +41,7 @@
 #   logs/on_8b_<时间戳>.log
 set -euo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$ROOT"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export ROOT
@@ -264,4 +264,4 @@ CKPT=$(find "$WORK" -maxdepth 2 -name 'last.pt' -printf '%T@ %p\n' 2>/dev/null |
 echo
 echo "训练结束。用同一把尺子（全集 SQuAD v1/v2，4 卡）评它："
 echo "  CHECKPOINT=${CKPT:-$WORK/Qwen8B_<时间戳>/last.pt} NUM_PROCESSES=4 WORK=outputs/eval_on_8b \\"
-echo "    bash scripts/eval_squad_v1v2.sh"
+echo "    bash scripts/archive/eval_squad_v1v2.sh"

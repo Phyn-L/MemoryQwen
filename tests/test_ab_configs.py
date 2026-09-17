@@ -113,7 +113,7 @@ def test_every_cadence_is_written_against_the_single_epoch_budget():
 
 def test_the_expected_step_count_matches_the_launcher():
     """scripts/run_ab.sh prints the same budget the schedule was written for."""
-    source = (REPO / "scripts" / "run_ab.sh").read_text(encoding="utf-8")
+    source = (REPO / "scripts" / "archive" / "run_ab.sh").read_text(encoding="utf-8")
     assert "CONTEXTS=252465" in source
     assert 252465 // 64 + (252465 % 64 > 0) == STEPS_PER_EPOCH
 

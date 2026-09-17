@@ -27,6 +27,8 @@ from src.icl_baseline import (
     limit_examples,
 )
 from utils.config import dtype_from_name, expand_env
+from utils.icl_config import load_icl_defaults
+from utils.model_paths import resolve_model_path
 from utils.ddp import barrier, init_distributed, is_main_process
 from utils.machines import fill_missing, machine_environ, machine_names, resolve_machine
 
@@ -58,35 +60,45 @@ def _default_paths(overrides=None):
 DEFAULT_MODEL, DEFAULT_DATA = _default_paths(_machine_overrides())
 
 
-def parse_args():
+def parse_args(argv=None):
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--config")
+    bootstrap.add_argument("--machine")
+    known, _ = bootstrap.parse_known_args(argv)
+    default_model, default_data = _default_paths(_machine_overrides(known.machine))
+    defaults = load_icl_defaults(known.config, known.machine) if known.config else {}
     parser = argparse.ArgumentParser(
-        description="Multi-GPU Qwen3-1.7B few-shot ICL baseline"
+        description="Multi-GPU Qwen family ICL baseline"
     )
     parser.add_argument(
         "--machine", choices=machine_names(), default=None,
         help="Machine whose paths (utils/machines.py) this run uses; without it the "
              "MACHINE variable or the hostname decides.",
     )
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--config", help="ICL YAML; controls shot count, decoding, split and output")
+    parser.add_argument("--split", choices=("train", "validation", "test"))
+    parser.add_argument("--data-root")
+    parser.add_argument("--max-new-tokens", type=int)
+    parser.add_argument("--model", default=default_model)
     parser.add_argument(
-        "--datasets", nargs="+", choices=("squad", "race"), default=["squad", "race"]
+        "--datasets", nargs="+", default=["squad", "race"]
     )
     parser.add_argument(
         "--squad-validation-file",
-        default=str(DEFAULT_DATA / "squad/validation.jsonl"),
+        default=str(default_data / "squad/validation.jsonl"),
     )
     parser.add_argument(
-        "--squad-train-file", default=str(DEFAULT_DATA / "squad/train.jsonl")
+        "--squad-train-file", default=str(default_data / "squad/train.jsonl")
     )
     parser.add_argument(
-        "--race-test-file", default=str(DEFAULT_DATA / "race/test.jsonl")
+        "--race-test-file", default=str(default_data / "race/test.jsonl")
     )
     parser.add_argument(
-        "--race-train-file", default=str(DEFAULT_DATA / "race/train.jsonl")
+        "--race-train-file", default=str(default_data / "race/train.jsonl")
     )
     parser.add_argument("--output-dir", default="outputs/icl_baseline/qwen3-1.7b")
     parser.add_argument("--num-shots", type=int, default=4)
-    parser.add_argument("--batch-size", type=int, default=2, help="Per-GPU batch size")
+    parser.add_argument("--batch-size", "--bs", type=int, default=2, help="Per-GPU batch size")
     parser.add_argument("--max-input-tokens", type=int, default=8192)
     parser.add_argument("--squad-max-new-tokens", type=int, default=32)
     parser.add_argument("--race-max-new-tokens", type=int, default=8)
@@ -116,32 +128,49 @@ def parse_args():
     parser.add_argument(
         "--resume", action="store_true", help="Reuse completed rows in rank shard files"
     )
-    args = parser.parse_args()
-    if args.machine:
-        # The defaults above were built before parsing, so rebuild them with this machine's
-        # paths -- but only for the arguments the user did not set explicitly.
-        model, data = _default_paths(machine_environ(args.machine))
-        if args.model == DEFAULT_MODEL:
-            args.model = model
-        for name, old_value, new_value in (
-            ("squad_validation_file", str(DEFAULT_DATA / "squad/validation.jsonl"),
-             str(data / "squad/validation.jsonl")),
-            ("squad_train_file", str(DEFAULT_DATA / "squad/train.jsonl"),
-             str(data / "squad/train.jsonl")),
-            ("race_test_file", str(DEFAULT_DATA / "race/test.jsonl"),
-             str(data / "race/test.jsonl")),
-            ("race_train_file", str(DEFAULT_DATA / "race/train.jsonl"),
-             str(data / "race/train.jsonl")),
-        ):
-            if getattr(args, name) == old_value:
-                setattr(args, name, new_value)
-        print(f"[machine] {args.machine}: MODEL_ROOT={model.rsplit('/models--', 1)[0]} "
-              f"DATA_ROOT={data}", flush=True)
+    parser.set_defaults(**defaults)
+    args = parser.parse_args(argv)
     if args.num_shots < 0 or args.batch_size <= 0 or args.max_input_tokens <= 0:
         parser.error(
             "num-shots must be non-negative and batch/token limits must be positive"
         )
+    if not args.datasets or any(not name or "/" in name or name in (".", "..") for name in args.datasets):
+        parser.error("datasets must be directory names under the data root")
+    if args.max_new_tokens is not None and args.max_new_tokens <= 0:
+        parser.error("max-new-tokens must be positive")
+    if args.num_workers < 0:
+        parser.error("num-workers must be non-negative")
+    for name in ("max_samples", "max_contexts", "max_context_tokens"):
+        value = getattr(args, name)
+        if value is not None and value <= 0:
+            parser.error(f"{name} must be positive")
+    if args.config and args.split == "train" and args.num_shots:
+        parser.error("few-shot evaluation on train risks demonstration leakage; use validation/test")
+    args.model = resolve_model_path(args.model, args.machine)
+    if args.data_root is None:
+        args.data_root = str(_default_paths(_machine_overrides(args.machine))[1])
+    if args.output_dir is None:
+        if args.resume:
+            parser.error("--resume requires --output-dir pointing to the existing run")
+        from datetime import datetime
+        from src.pipeline import model_run_label
+        args.output_dir = f"outputs/icl/{model_run_label(args.model)}_{datetime.now():%Y%m%d_%H%M%S}"
     return args
+
+
+def dataset_paths(args):
+    root = Path(args.data_root)
+    paths = {}
+    for dataset in args.datasets:
+        if args.split is not None:
+            paths[dataset] = (str(root / dataset / f"{args.split}.jsonl"), str(root / dataset / "train.jsonl"))
+        elif dataset == "squad":
+            paths[dataset] = (args.squad_validation_file, args.squad_train_file)
+        elif dataset == "race":
+            paths[dataset] = (args.race_test_file, args.race_train_file)
+        else:
+            raise ValueError(f"Specify --split for dataset {dataset}")
+    return paths
 
 
 def distributed_context():
@@ -224,7 +253,7 @@ def evaluate_dataset(
     )
     mode = "a" if args.resume else "w"
     max_new_tokens = (
-        args.squad_max_new_tokens if dataset == "squad" else args.race_max_new_tokens
+        args.max_new_tokens or (args.race_max_new_tokens if dataset == "race" else args.squad_max_new_tokens)
     )
     with shard_path.open(mode, encoding="utf-8") as handle:
         progress = tqdm(
@@ -321,8 +350,8 @@ def experiment_metadata(args, world_size, demonstrations):
         "arguments": vars(args),
         "protocol": {
             "decoding": "greedy",
-            "squad": "SQuAD v1.1 validation",
-            "race": "RACE all test",
+            "datasets": dataset_paths(args),
+            "answer_filter": "Skip QA rows with no reference answer",
             "em_f1_normalization": "official SQuAD style",
             "multi_reference_reduction": "maximum per example",
             "bleu_4": "corpus BLEU-4, closest reference length, add-one smoothing",
@@ -346,12 +375,13 @@ def main():
     args = parse_args()
     rank, world_size, device = distributed_context()
     seed_everything(args.seed, rank)
+    if dist.is_initialized():
+        shared_output = [args.output_dir if rank == 0 else None]
+        dist.broadcast_object_list(shared_output, src=0)
+        args.output_dir = shared_output[0]
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    paths = {
-        "squad": (args.squad_validation_file, args.squad_train_file),
-        "race": (args.race_test_file, args.race_train_file),
-    }
+    paths = dataset_paths(args)
     demonstrations = {
         dataset: sample_jsonl(paths[dataset][1], dataset, args.num_shots, args.seed)
         for dataset in args.datasets

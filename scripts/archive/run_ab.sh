@@ -9,14 +9,14 @@
 # the comparison unreadable -- and all of them are documented in docs/AB_H200.md.
 #
 # Usage:
-#   NUM_PROCESSES=4 bash scripts/run_ab.sh          # 4 ranks x batch 8 = global 32
-#   NUM_PROCESSES=8 bash scripts/run_ab.sh          # 8 ranks, halve training.batch_size
-#   DRYRUN=1 bash scripts/run_ab.sh                 # print what would run, launch nothing
-#   RESUME=1 NUM_PROCESSES=8 bash scripts/run_ab.sh  # continue each arm from its newest
+#   NUM_PROCESSES=4 bash scripts/archive/run_ab.sh          # 4 ranks x batch 8 = global 32
+#   NUM_PROCESSES=8 bash scripts/archive/run_ab.sh          # 8 ranks, halve training.batch_size
+#   DRYRUN=1 bash scripts/archive/run_ab.sh                 # print what would run, launch nothing
+#   RESUME=1 NUM_PROCESSES=8 bash scripts/archive/run_ab.sh  # continue each arm from its newest
 #                                                   # checkpoint instead of starting over
 set -u
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT" || exit 1
 
 # The H200 checkout has the working conda env outside the default PATH. Prepending it when
@@ -147,7 +147,7 @@ for arm in on off; do
         tail -n 40 "$log" >&2
         echo "run_ab.sh: full log: $log" >&2
         echo "run_ab.sh: to continue this arm from its newest checkpoint (same rank count!):" >&2
-        echo "  cd $ROOT && RESUME=1 NUM_PROCESSES=$NUM_PROCESSES ON_CONFIG=$ON_CONFIG OFF_CONFIG=$OFF_CONFIG bash scripts/run_ab.sh" >&2
+        echo "  cd $ROOT && RESUME=1 NUM_PROCESSES=$NUM_PROCESSES ON_CONFIG=$ON_CONFIG OFF_CONFIG=$OFF_CONFIG bash scripts/archive/run_ab.sh" >&2
         exit "$status"
     fi
     echo "=== arm $arm finished ==="

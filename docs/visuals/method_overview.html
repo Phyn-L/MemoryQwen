@@ -77,7 +77,7 @@
   footer{color:var(--dim2);font-size:12.4px;border-top:1px solid var(--line);margin-top:44px;padding-top:14px}
 </style>
 </head>
-<body>
+<body><p style="padding:12px">历史可视化，原页面对应 76bb625。<a href="../README.md">文档导航</a> · <a href="../guides/METHOD.md">当前方法说明</a></p>
 <header>
   <h1>MemoryQwen 方法结构总览</h1>
   <div class="sub">Qwen3 冻结主干 + LoRA + M 个与问题无关的 memory token；四个训练目标、两条评测路径、一个 ON/OFF A/B</div>
@@ -507,7 +507,7 @@ DRYRUN=1 NUM_PROCESSES=8 bash scripts/run_ab.sh   # 只看命令</pre>
     </div>
   </div>
   <footer>
-    由 <code>docs/method_overview.html</code> 提供（离线单文件，无外部依赖）。内容对应当前仓库状态：<code>76bb625</code>。
+    由 <code>docs/visuals/method_overview.html</code> 提供（离线单文件，无外部依赖）。内容对应当前仓库状态：<code>76bb625</code>。
     数字来自真实运行与显存探针（4090 / 8×H200），不是论文里的目标值。
   </footer>
 </section>

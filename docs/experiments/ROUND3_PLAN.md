@@ -1,8 +1,10 @@
 # 第三轮运行计划（2026-09-17 夜 → 次日）
 
+> 历史快照：2026-09-18 归档。正文状态、数值、路径和预计完成时间属于当时记录，本次未重新运行实验或核实远端状态。当前操作见[运行指南](../guides/RUNNING.md)，实验状态见[实验索引](../experiments/README.md)。
+
 代码状态：两台机器都在 `718b606`（5 项修复 + 机器表 + 单一评测脚本）。下面所有数字都出自
 **同一份修复后代码**，可以直接并到一张表里。第二轮的完整结果记在
-[`docs/AB_H200.md`](AB_H200.md) 第 10 节。
+[`docs/experiments/AB_H200.md`](AB_H200.md) 第 10 节。
 
 ## 0. 现在的状态
 
@@ -40,9 +42,9 @@
    ```bash
    cd /home/lijie/proj2/xmu/lz/MemoryQwen
    CHECKPOINT=outputs/ab_h200_on/Qwen1.7B_20260917_213648/last.pt \
-     NUM_PROCESSES=4 WORK=outputs/eval_on  bash scripts/eval_squad_v1v2.sh
+     NUM_PROCESSES=4 WORK=outputs/eval_on  bash scripts/archive/eval_squad_v1v2.sh
    CHECKPOINT=outputs/ab_h200_off/Qwen1.7B_20260917_230444/last.pt \
-     NUM_PROCESSES=4 WORK=outputs/eval_off bash scripts/eval_squad_v1v2.sh
+     NUM_PROCESSES=4 WORK=outputs/eval_off bash scripts/archive/eval_squad_v1v2.sh
    ```
    产物 `outputs/eval_{on,off}/results.md`：AR + TF 的 EM/F1/ROUGE_L，分 v1.1 / v2.0 / v2.0-all。
    （ON 的 checkpoint 在 4090 上也有一份，评测在哪台机器跑都行；OFF 目前只在 H200。）
@@ -67,7 +69,7 @@ CONFIG=configs/qwen-1.7b/ab_h200_on_m16.yaml NUM_PROCESSES=8 bash scripts/train.
 ```
 
 跑起来先看两行：`schedule: machine=h200 steps=3945 batch=8x8 ranks=8 ...`（不对就停），
-以及第一个 `val_teacher_forced/*`（step 200）。跑完同样用 `scripts/eval_squad_v1v2.sh`
+以及第一个 `val_teacher_forced/*`（step 200）。跑完同样用 `scripts/archive/eval_squad_v1v2.sh`
 把两个 checkpoint 在全集上评一遍，这样压缩比曲线和 ON/OFF 用同一把尺子。
 
 **判读（对照点 = 第二轮 ON：M64 0.6737 AR f1 / 0.6882 TF f1 / 探针 7.284）**：
@@ -107,7 +109,7 @@ CONFIG=configs/qwen-1.7b/ab_h200_on_ctx2048.yaml NUM_PROCESSES=8 bash scripts/tr
 
 ## 5. 每次跑前/后的固定动作
 
-* 跑前 `DRYRUN=1`（A/B 用 `MACHINE=h200 DRYRUN=1 NUM_PROCESSES=8 bash scripts/run_ab.sh`；
+* 跑前 `DRYRUN=1`（A/B 用 `MACHINE=h200 DRYRUN=1 NUM_PROCESSES=8 bash scripts/archive/run_ab.sh`；
   单跑直接看上面命令里的 `CONFIG=`/`NUM_PROCESSES=`），确认 `schedule:` 行里的
   `steps=`、`batch=…x… ranks=…` 和预期一致。
 * 跑起来先看 `train/lr` 是不是**单条** cosine（多卡重复缩短过的问题已修，见 `0f444c2`），

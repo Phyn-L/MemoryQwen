@@ -1,5 +1,7 @@
 # 工程问题：根因、证据与修复
 
+> 历史快照：2026-09-18 归档。正文状态、数值、路径和预计完成时间属于当时记录，本次未重新运行实验或核实远端状态。当前操作见[运行指南](../guides/RUNNING.md)，实验状态见[实验索引](../experiments/README.md)。
+
 所有数字都是在本机 4×4090（24 GiB）上实测的，脚本在 `.tmp_analysis/bench_eng.py`、
 `.tmp_analysis/bench_attn.py`、`.tmp_analysis/bench_attn_one.py`、`.tmp_analysis/bench_lmhead.py`、
 `.tmp_analysis/bench_mask_sweep.py`。
@@ -504,4 +506,146 @@ SQuAD dev 恰好全部 ≤ 2048（实测 2067/2067 保留，长度缓存里 p90=
 
 `_encode_context`（27 行）在 `forward` 改走 `encode_context_prefix` +
 `forward_qa_with_prefix` 之后就没有任何调用点了，已整段删除。
+
+
+<a id="readme-target-format-history"></a>
+
+## 原 README：target-format 修复记录
+
+来源：整理前 `30b897a` 的 README，第 138–185、343–378 行。以下数值与示例保留原样，不代表重新验证。
+
+## Answer-target format and metric semantics
+
+Three issues were found after the first training runs. They are documented here because
+two of them silently corrupted the training target instead of raising an error, and the
+third made the reported score look better than the model actually was.
+
+### Fixed: question padding used to sit between the question and the answer
+
+`collate_context_records` right-padded questions to the longest question in the batch,
+and the model then concatenated `[question, answer]`. For every QA row whose question was
+shorter than the batch maximum, the first answer token was therefore predicted from the
+hidden state of a *padding* position, whose continuation-mask row contains only a
+self-edge. Training and teacher-forced evaluation both supervised the first answer token
+there, while `generate_answer_with_prefix` strips the padding before decoding, so the
+supervised position and the inference position were not the same one.
+
+The effect is directly measurable through `Evaluator.teacher_forced` on a trained
+checkpoint, over 200 SQuAD-dev contexts (1598 QA rows). With the legacy collate, letting
+8 contexts share a batch instead of 1 dropped F1 from 0.2907 to 0.2503 and
+first-answer-token accuracy from 0.082 to 0.011; with the fix the same comparison gives
+0.3860 vs 0.3705 and 0.325 vs 0.296. The small residual change comes from context
+padding shifting the absolute positions, not from the question padding. Keeping one row
+fixed and only changing its batch neighbour flipped its first predicted token from `in`
+(`infinite`) to `No` under the legacy collate.
+
+`data.question_padding_side` now defaults to `left`, which keeps the real question tokens
+adjacent to the answer, and `generate_answer_with_prefix` selects question tokens through
+`question_mask` instead of slicing a prefix. `build_block_causal_mask` and
+`build_continuation_mask` already index questions through `question_mask`, so they are
+correct for either padding side. Set `data.question_padding_side: right` only to
+reproduce the old runs.
+
+### Fixed: `append_eos` could overwrite the last answer token
+
+`collate_context_records` wrote EOS at `valid`, the first padding slot. That requires a
+free slot beyond the longest answer, but `padding=True` pads to the longest answer *in
+the batch*, so for the row(s) with `valid == width` the `elif` branch overwrote the final
+answer token with EOS instead of appending it. When every answer in a batch had the same
+length this destroyed the entire answer:
+
+```text
+question_padding_side=right, eos_mode=overwrite  ->  answer_ids [[151645], [151645]]
+question_padding_side=left,  eos_mode=append     ->  answer_ids [[32214, 151645], [80185, 151645]]
+```
+
+`data.eos_mode` now defaults to `append`, which allocates one extra column and writes EOS
+after the last real answer token. `overwrite` remains available to reproduce old runs.
+
+### Regression check for the two target-format fixes
+
+```python
+from transformers import AutoTokenizer
+from src.data import ContextRecord, QARecord, collate_fn
+
+tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
+rows = [
+    ContextRecord("Alpha beta gamma delta epsilon zeta eta theta.",
+                  (QARecord("Which Greek letter is third?", "gamma", "x", ""),), "x", ""),
+    ContextRecord("One two three four five six seven eight nine ten.",
+                  (QARecord("What comes after six?", "seven", "x", ""),), "x", ""),
+]
+kwargs = dict(max_context_tokens=128, max_question_tokens=32, max_answer_tokens=16,
+              append_eos=True, use_chat_template=False,
+              chat_template_enable_thinking=False, qa_per_context=2, sample_qa=False)
+fixed = collate_fn(rows, tokenizer, question_padding_side="left", eos_mode="append", **kwargs)
+legacy = collate_fn(rows, tokenizer, question_padding_side="right", eos_mode="overwrite", **kwargs)
+assert fixed["answer_ids"].tolist() == [[32214, 151645], [80185, 151645]]
+assert legacy["answer_ids"].tolist() == [[151645], [151645]]   # answer destroyed by the old bug
+assert (fixed["labels"] == fixed["answer_ids"]).all()
+```
+
+The fixed layout must also keep the question's real tokens immediately before the answer.
+The first row below has the longer question and therefore no question padding; the second
+row is left padded:
+
+```python
+qmask = fixed["question_mask"]
+assert qmask[0].all() and qmask[0].sum() == 6
+assert qmask[1].tolist() == [False, True, True, True, True, True]
+# real question tokens are last in every row, so the answer starts right after them
+for row in qmask:
+    assert row[-int(row.sum()):].all() and not row[:-int(row.sum())].any()
+```
+
+
+## 原 README：早期方法概述
+
+以下是历史原文；其 PEFT、pooling 和损失概述不再作为当前方法说明。当前说明见[方法文档](../guides/METHOD.md)。
+
+# Qwen MetaLoRA Context Memory
+
+This project trains a single Qwen backbone with ordinary PEFT MetaLoRA (static LoRA).
+Qwen itself encodes the context (there is no second memory encoder). Per-layer pooled
+Qwen context states are combined with a global learnable memory-token bank, and the resulting memory is
+inserted into the Qwen sequence as `[context, memory, question, answer]`. MetaLoRA is
+implemented as ordinary PEFT LoRA (`lora_A/lora_B`) on the selected Qwen projections.
+Every Qwen layer has an independent memory decoder. It is trained either to reconstruct the
+original context input embeddings, or -- the default -- to predict the context tokens
+themselves through a shared vocabulary head, so that the memory has to make the context
+recoverable as text rather than as a point in embedding space. The objective is
+`qa_weight * answer_only_causal_CE + reconstruction_weight * auxiliary_memory_loss`; see
+"Auxiliary memory objectives".
+
+
+<a id="readme-dtype-history"></a>
+
+## 原 README：dtype 测量记录
+
+以下保留原测量文字；其中 bfloat16 精度表述需更正：显式 fraction 为 7 位，含隐含首位的有效精度为 8 位，1.0 上方相邻数间隔为 2^-7。原数值表没有在本次重算。
+
+### Why
+
+bfloat16 carries 8 mantissa bits, so a value near 1.0 has a relative resolution of about
+2^-8. AdamW's step is `p.add_(m_hat / (sqrt(v_hat) + eps), alpha=-lr)`, whose magnitude is
+roughly `lr` = 1e-4, below that resolution. The update rounds away. Measured on a tiny
+Qwen3 build with all 59 trainable tensors and one AdamW step at `lr=1e-4`: **43/59
+parameters changed in bfloat16, 59/59 in float32**. `.tmp_analysis/verify_dtype.py`
+reproduces this.
+
+The end-to-end effect, from two arms trained for 6000 steps on the same SQuAD subset with
+the same seed and only `model.trainable_dtype` changed (300 SQuAD-dev examples, paired
+bootstrap 95% CI):
+
+| metric | bfloat16 | float32 | delta |
+| --- | --- | --- | --- |
+| autoregressive F1 | 0.2863 | **0.3497** | **+0.0635** [+0.021, +0.105] |
+| autoregressive EM | 0.1700 | **0.2267** | **+0.0567** [+0.017, +0.097] |
+| teacher-forced F1 | 0.3683 | **0.4364** | **+0.0681** [+0.038, +0.098] |
+| teacher-forced EM | 0.1200 | **0.1700** | **+0.0500** [+0.020, +0.080] |
+
+Parameter precision and the auxiliary objective interact: with float32 parameters the
+`mse_cosine` reconstruction loss is worth keeping (removing it cost 0.050 autoregressive
+F1, CI [−0.092, −0.007]), whereas under bfloat16 it had looked like dead weight. Re-check
+any "drop the reconstruction term" conclusion against a float32 run.
 

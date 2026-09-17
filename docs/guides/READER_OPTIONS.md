@@ -1,6 +1,6 @@
 # 记忆读取侧（reader）可选项说明
 
-对应实现：`docs/PLAN_reader_upgrade.md`（计划 + 实测记录），代码在 `src/model.py`、`src/resampler.py`、
+对应历史实施记录：[PLAN_reader_upgrade.md](../history/PLAN_reader_upgrade.md)（计划 + 实测记录），代码在 `src/model.py`、`src/resampler.py`、
 `src/losses.py`，配置字段在 `utils/config.py::MemoryConfig`。
 
 **所有字段的默认值都等于旧行为**：一个都不写，或全部保持默认，训练与评估路径和改动前一致（有回归测试钉住）。
@@ -8,28 +8,15 @@
 
 ---
 
-## 0. 一句话总览：这些开关在修什么
+## 0. 使用范围
 
-旧路径的瓶颈不在 memory 侧，而在**读出口**：memory 的逐层隐状态（28 层 × 2048/token）被喂给一个
-**从零学的 256 维瓶颈解码器 + 随机初始化的 `256→151936` 词表头**，并且要求在 **memory-only**（看不到任何前文）
-的条件下复述整个 context。实测（真实 1.7B、真实英文文本、memory 尚未训练）：
-
-| 目标 | nats/token |
-|---|---|
-| teacher：纯因果 LM（full-context bypass） | 2.103 |
-| **AE：memory 前缀 + teacher forcing（B2 开启后）** | **2.472** |
-| probe：memory-only（旧目标，默认仍在跑） | 12.140（≈ ln vocab = 11.931） |
-
-也就是说：把解码器换成冻结的 backbone（B2）之后，目标函数一开局就回到语言模型量级（与 teacher 只差 0.37 nats，
-这 0.37 就是 memory 要学的东西）。下面的开关就是围绕这一点组织的。
-
----
+以下字段按 `utils/config.py::MemoryConfig` 核对。推荐组合是实验起点，不是普遍优于 OFF 的结论；历史初始 loss 和 CPU 冒烟记录见[实施记录](../history/PLAN_reader_upgrade.md#reader-options-history)。
 
 ## 1. 字段总表
 
 | 字段 | 默认 | 作用 | 代价 | 建议 |
 |---|---|---|---|---|
-| `head_mode` | `linear` | `tied` = 词表头用 backbone 自己的 tied embedding 打分，只训 `D→H` adapter | 省 38.4M 随机参数（1.7B）；每步一次 `V×H×D` 物化（~3 ms） | 打开（零风险） |
+| `head_mode` | `linear` | `tied` = 词表头用 backbone 自己的 tied embedding 打分，只训 `D→H` adapter | 省 38.4M 随机参数（1.7B）；每步一次 `V×H×D` 物化（~3 ms） | 作为对照实验选项 |
 | `head_init` | `auto` | tied 时 adapter 用 memory projection 初始化（步 0 logits 就有意义） | 无 | 保持 `auto` |
 | `init_mode` | `randn` | memory slot 初始化：`token_embed` 用真实 token embedding 行 | 无 | 打开 `token_embed` |
 | `init_seed` | `0` | `token_embed` 抽样种子（可复现） | 无 | 随意 |
@@ -81,9 +68,6 @@ memory:
   readout_length: 8
   readout_hidden_size: 256
 ```
-
-已在 CPU 上用真实 1.7B（真 tokenizer）与 tiny Qwen3 的完整 `scripts/train.py` 跑通（含 TF/AR 评测）：
-`val_teacher_forced/{ae_loss, distill_loss, loss, qa_loss}` 都会出现在 wandb 的 teacher-forced 面板里。
 
 ---
 
@@ -173,7 +157,7 @@ memory:
 ## 6. 已删除的选项
 
 - `contrastive_weight` / `contrastive_temperature` / `contrastive_margin`（`memory_contrastive_loss`）**已删除**：
-  三个 config 与全部历史 run 都是 `0.0`，没有测试，且 `IMPROVEMENTS.md` E8 已审计出它的 positive 项
+  三个 config 与全部历史 run 都是 `0.0`，没有测试，且 [IMPROVEMENTS](../history/IMPROVEMENTS.md) E8 已审计出它的 positive 项
   `(z·z)/T ≡ 1/T` 是常数（退化成纯阈值排斥项）。若日后要做"同 context 为正、跨 context 为负"的对比目标，
   请新加一个带测试的实现，不要复活旧实现。
 
@@ -189,7 +173,7 @@ memory:
 
 ## 8. 怎么验证这些开关有用
 
-见 [AB_H200.md](AB_H200.md)：`configs/qwen-1.7b/ab_h200_{on,off}.yaml` 两臂除 6 个开关外逐字段
-相同（`tests/test_ab_configs.py` 断言），单 epoch、7,890 步，用 `scripts/run_ab.sh` 顺序跑完两臂。
+见 [AB_H200.md](../experiments/AB_H200.md)：`configs/qwen-1.7b/ab_h200_{on,off}.yaml` 两臂除 6 个开关外逐字段
+相同（`tests/test_ab_configs.py` 断言），步数以所选配置、进程数和实际数据量打印的 schedule 为准，用 `scripts/archive/run_ab.sh` 顺序跑完两臂。
 之前的 `0rj6x1xc`（ctx2048/M64/1ep）与 `vry7n1sw`（ctx512/M16/3ep）形状不同，只能当规模参照，
 不能用来判断开关的好坏。

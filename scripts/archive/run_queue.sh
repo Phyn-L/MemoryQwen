@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # 串行队列：跑完一个再跑下一个，中途失败**默认就停**（不然会在错误的前提上再烧几个小时）。
 #
-#   QUEUE=8b,m32,m16 bash scripts/run_queue.sh     # 默认：8B ON -> ctx1024/M32(32:1) -> ctx1024/M16(64:1)
-#   QUEUE=m32,m16 bash scripts/run_queue.sh        # 跳过 8B（8B 已经跑完/在别处跑）
-#   QUEUE=8b,eval8b,m32,m16 bash scripts/run_queue.sh   # 8B 跑完先做全集评测，再接着训形状
-#   DRYRUN=1 QUEUE=8b,m32,m16 bash scripts/run_queue.sh # 只做预检 + 打印每个阶段的命令
-#   STOP_ON_FAIL=0 bash scripts/run_queue.sh       # 失败也继续（想一口气把能跑的都跑掉时用）
+#   QUEUE=8b,m32,m16 bash scripts/archive/run_queue.sh     # 默认：8B ON -> ctx1024/M32(32:1) -> ctx1024/M16(64:1)
+#   QUEUE=m32,m16 bash scripts/archive/run_queue.sh        # 跳过 8B（8B 已经跑完/在别处跑）
+#   QUEUE=8b,eval8b,m32,m16 bash scripts/archive/run_queue.sh   # 8B 跑完先做全集评测，再接着训形状
+#   DRYRUN=1 QUEUE=8b,m32,m16 bash scripts/archive/run_queue.sh # 只做预检 + 打印每个阶段的命令
+#   STOP_ON_FAIL=0 bash scripts/archive/run_queue.sh       # 失败也继续（想一口气把能跑的都跑掉时用）
 #
 # 阶段：
-#   8b       Qwen3-8B + ON 开关（scripts/run_on_8b.sh，默认 batch 4 x 8 卡 = global 32 / 7890 步）
+#   8b       Qwen3-8B + ON 开关（scripts/archive/run_on_8b.sh，默认 batch 4 x 8 卡 = global 32 / 7890 步）
 #   eval8b   对 outputs/on_8b 下最新的 last.pt 跑全集 SQuAD v1/v2（4 卡）
 #   m32      ctx1024/M=32（32:1）ON 单臂：configs/qwen-1.7b/ab_h200_on_m32.yaml
 #   m16      ctx1024/M=16（64:1）ON 单臂：configs/qwen-1.7b/ab_h200_on_m16.yaml
@@ -21,7 +21,7 @@
 # 产物目录：outputs/on_8b/（8B）、outputs/shape_m32/、outputs/shape_m16/、outputs/eval_on_8b/（评测）
 set -uo pipefail
 
-ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$ROOT"
 export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
@@ -139,11 +139,11 @@ mkdir -p logs
 stage_command() {
   local stage="$1" ckpt
   case "$stage" in
-    8b) echo "bash scripts/run_on_8b.sh" ;;
+    8b) echo "bash scripts/archive/run_on_8b.sh" ;;
     eval8b)
       ckpt=$(find outputs/on_8b -maxdepth 2 -name 'last.pt' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | awk '{print $2}')
       [ -n "$ckpt" ] || { echo "run_queue.sh: outputs/on_8b 下没有 last.pt，eval8b 无法执行" >&2; return 1; }
-      echo "CHECKPOINT=$ckpt NUM_PROCESSES=$EVAL_RANKS MACHINE=$MACHINE WORK=outputs/eval_on_8b bash scripts/eval_squad_v1v2.sh"
+      echo "CHECKPOINT=$ckpt NUM_PROCESSES=$EVAL_RANKS MACHINE=$MACHINE WORK=outputs/eval_on_8b bash scripts/archive/eval_squad_v1v2.sh"
       ;;
     *)
       ckpt=""
@@ -162,8 +162,8 @@ if [ "$DRYRUN" != "0" ]; then
   for stage in "${STAGES[@]}"; do
     echo "  [$stage] $(stage_command "$stage" || echo '<不可用>')"
   done
-  echo "(DRYRUN=1，未启动。8B 阶段的配置校验由 scripts/run_on_8b.sh 的 DRYRUN 自己做，"
-  echo " 想单独看就跑 DRYRUN=1 bash scripts/run_on_8b.sh)"
+  echo "(DRYRUN=1，未启动。8B 阶段的配置校验由 scripts/archive/run_on_8b.sh 的 DRYRUN 自己做，"
+  echo " 想单独看就跑 DRYRUN=1 bash scripts/archive/run_on_8b.sh)"
   exit 0
 fi
 

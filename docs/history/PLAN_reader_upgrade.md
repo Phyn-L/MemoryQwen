@@ -1,6 +1,8 @@
 # 记忆读取侧升级计划（A1 / B1 / B2 / C2 / C3）
 
-状态：**待执行**（本文档为 commit 1，只写计划，不改代码）
+> 历史快照：2026-09-18 归档。正文状态、数值、路径和预计完成时间属于当时记录，本次未重新运行实验或核实远端状态。当前操作见[运行指南](../guides/RUNNING.md)，实验状态见[实验索引](../experiments/README.md)。
+
+初始计划状态：**当时待执行**（commit 1）。后文包含实施与验证记录，请按各节时间阅读；当前字段见[reader 选项](../guides/READER_OPTIONS.md)。
 机器：4x4090（`/data/lz/MemoryQwen`，HEAD `9d62f53`）
 参考：ICAE（ICLR 2024）、500xCompressor（arXiv:2408.03094），逐页分析见 `papers/ICAE_report.md`、`papers/500xCompressor_report.md`
 
@@ -238,7 +240,7 @@ C3 (resampler)  ← 独立，但建议放在 reader 修好之后（否则分不�
 | `7558cae` | logging：训练侧 ae_loss/distill_loss 进 teacher-forced 损失面板 | 109 |
 
 **实现完成后新增/修正的两处计划外内容**：
-1. `docs/PLAN_reader_upgrade.md` B2 节记录的"融合前向"约束（collate 展平 QA 行 → 单次前向省不掉，改为免费拿 teacher logits）。
+1. `docs/history/PLAN_reader_upgrade.md` B2 节记录的"融合前向"约束（collate 展平 QA 行 → 单次前向省不掉，改为免费拿 teacher logits）。
 2. `7558cae`：B1/B2 的损失只在训练时计算，evaluator 不产生它们，所以仅改 `LOSS_KEYS` 永远不会被记录（端到端冒烟实测发现）；`eval_log_payloads` 增加可选 `train_metrics` 后，wandb 里可见 `val_teacher_forced/ae_loss` 与 `val_teacher_forced/distill_loss`。
 
 **仍未完成（阻塞于资源）**：GPU 上的端到端训练冒烟（真数据、真 1.7B、小 batch、约 30 步）。4x4090 四张卡在实现期间被其他任务占满（每卡 ~20/24 GB、利用率 40–100%），未打扰；已用"真实 1.7B + 真实文本的 CPU 冒烟"和"tiny Qwen3 + 完整 `scripts/train.py` 的端到端 CPU 冒烟（五项功能全开、TF+AR 评测各一次）"代替。等有空闲卡时补跑。
@@ -258,3 +260,61 @@ C3 (resampler)  ← 独立，但建议放在 reader 修好之后（否则分不�
 - 压缩比 curriculum、compressed-token 初始化技巧、层选择消融 —— 两篇论文都没有；
 - 2048 token + M=1 的极端设置 —— 超出论文验证范围（480× 上限、96–480 token 上下文）；
 - 用 BLEU/ROUGE 作为主判据 —— 会被 LM 先验刷高（ICAE：BLEU 0.98 / EM 0.6），改用 `first_token_em`、逐位置 EM、空 memory 基线。
+
+## 原 README 中的扩展想法及后续状态
+
+来源：整理前 README 第 800–825 行。下面的 “not implemented” 是旧表述：当前已有可选 AE-LM 和 tied head；不能据此认定相关能力仍未实现。grouped decoder sharing 仍作为未实施设想保留。
+
+#### Alternatives not implemented
+
+- **Let Qwen itself be the reconstruction decoder** (AutoCompressor style): run the
+  backbone over `[memory, context[:-1]]` with a causal mask that lets context positions
+  attend to the memory, and compute the cross entropy with the frozen `lm_head`. The
+  memory is then trained by the same machinery that consumes it, and the per-layer
+  decoders can be deleted. More faithful, but it costs roughly another full prefix-length
+  forward pass per step.
+- **Keep the `H`-width output and reuse Qwen's frozen `lm_head`.** This keeps the
+  pretrained unembedding geometry instead of learning a head from scratch, at eight times
+  the head cost (see above). Useful if the learned head turns out to be the bottleneck.
+
+
+## Possible decoder extension: learned layer embeddings with grouped sharing
+
+A resource-efficient follow-up is to share one bottleneck decoder within each
+group of adjacent Qwen layers. Before decoding, add a learned layer embedding to
+the projected memory tokens and/or positional queries so that the shared decoder
+can condition its reconstruction on the source layer. For example, 28 Qwen layers
+can be divided into seven groups of four layers, reducing decoder parameters by
+approximately 4x while retaining layer identity. This is an exploratory model
+variant rather than the current implementation and should be compared against
+independent decoders with matched bottleneck width. Useful ablations include group
+sizes 1, 2, 4, and 28, with and without learned layer embeddings, evaluated using
+per-layer reconstruction loss, QA metrics, peak memory, and training throughput.
+
+
+<a id="reader-options-history"></a>
+
+## 从 reader 选项迁入的历史测量
+
+以下为原 reader 说明的初始测量和 CPU 冒烟记录，未在本次重测。
+
+## 0. 一句话总览：这些开关在修什么
+
+旧路径的瓶颈不在 memory 侧，而在**读出口**：memory 的逐层隐状态（28 层 × 2048/token）被喂给一个
+**从零学的 256 维瓶颈解码器 + 随机初始化的 `256→151936` 词表头**，并且要求在 **memory-only**（看不到任何前文）
+的条件下复述整个 context。实测（真实 1.7B、真实英文文本、memory 尚未训练）：
+
+| 目标 | nats/token |
+|---|---|
+| teacher：纯因果 LM（full-context bypass） | 2.103 |
+| **AE：memory 前缀 + teacher forcing（B2 开启后）** | **2.472** |
+| probe：memory-only（旧目标，默认仍在跑） | 12.140（≈ ln vocab = 11.931） |
+
+也就是说：把解码器换成冻结的 backbone（B2）之后，目标函数一开局就回到语言模型量级（与 teacher 只差 0.37 nats，
+这 0.37 就是 memory 要学的东西）。下面的开关就是围绕这一点组织的。
+
+---
+
+
+已在 CPU 上用真实 1.7B（真 tokenizer）与 tiny Qwen3 的完整 `scripts/train.py` 跑通（含 TF/AR 评测）：
+`val_teacher_forced/{ae_loss, distill_loss, loss, qa_loss}` 都会出现在 wandb 的 teacher-forced 面板里。

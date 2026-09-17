@@ -20,3 +20,6 @@ scripts/env.local.sh
 
 # A/B launcher logs (scripts/run_ab.sh)
 logs/
+
+# Local Hugging Face cache
+.hf_cache/

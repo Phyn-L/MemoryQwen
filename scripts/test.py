@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import yaml
 from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
@@ -11,20 +13,37 @@ from src.pipeline import make_collate, make_context_dataset
 from utils.config import TrainConfig
 from utils.machines import machine_names
 from utils.checkpoint import CheckpointManager
+from utils.model_paths import relocate_saved_paths
+
+
+def evaluation_config(checkpoint, config=None, machine=None):
+    if config:
+        raw_config = yaml.safe_load(Path(config).read_text())
+        if 'test' not in raw_config:
+            return TrainConfig.from_file(config, machine=machine)
+    state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    raw = state.get("config")
+    if not isinstance(raw, dict) or not raw:
+        raise ValueError("Checkpoint has no saved config; supply --config explicitly")
+    # The machine that wrote the checkpoint is provenance, not the current execution host.
+    raw = dict(raw)
+    raw.pop("machine", None)
+    return TrainConfig.from_dict(relocate_saved_paths(raw, machine), machine=machine)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Evaluate a trained Qwen memory checkpoint")
-    parser.add_argument("--config", default="configs/qwen-1.7b/train.yaml")
+    parser.add_argument("--config", help="Test YAML (checkpoint architecture), or explicit full training YAML")
+    parser.add_argument("--datasets", nargs="+", help="Dataset directory names under data.root")
     parser.add_argument(
         "--machine", choices=machine_names(), default=None,
         help="Machine whose paths (utils/machines.py) this run uses.",
     )
-    parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--split", choices=("validation", "test"), default="test")
+    parser.add_argument("--checkpoint", "--ckpt", required=True)
+    parser.add_argument("--split", choices=("validation", "test"), default="validation")
     parser.add_argument("--max-samples", type=int)
     parser.add_argument(
-        "--batch-size", type=int,
+        "--batch-size", "--bs", type=int,
         help="Contexts per batch for the evaluation loader (default: the checkpoint config's "
              "training.batch_size). Evaluation runs under torch.no_grad(), so this is not "
              "bounded by the training memory -- but every QA pair of a batch's contexts travels "
@@ -47,8 +66,29 @@ def main():
         help="Load a checkpoint that does not cover every trainable tensor (for example an "
              "older run without the context_lm head) instead of failing.",
     )
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument("--config")
+    preliminary, _ = bootstrap.parse_known_args()
+    if preliminary.config:
+        raw = yaml.safe_load(Path(preliminary.config).read_text())
+        if 'test' in raw:
+            if set(raw) - {'test', 'machine'}:
+                parser.error("Test YAML supports only test and machine sections")
+            allowed = {'datasets', 'split', 'batch_size', 'qa_batch_size', 'max_new_tokens', 'max_samples'}
+            if not isinstance(raw['test'], dict) or set(raw['test']) - allowed:
+                parser.error("Unknown test YAML fields")
+            parser.set_defaults(**raw['test'], machine=raw.get('machine'))
     args = parser.parse_args()
-    cfg = TrainConfig.from_file(args.config, machine=args.machine); cfg.validate()
+    if args.split not in ('validation', 'test'):
+        parser.error("split must be validation or test")
+    if args.datasets is not None and (not isinstance(args.datasets, (list, tuple)) or not args.datasets or
+            any(not isinstance(x, str) or not x or '/' in x or x in ('.', '..') for x in args.datasets)):
+        parser.error("datasets must be a list of dataset directory names")
+    if args.max_samples is not None and args.max_samples <= 0:
+        parser.error("max-samples must be positive")
+    cfg = evaluation_config(args.checkpoint, args.config, args.machine)
+    if args.datasets:
+        setattr(cfg.data, f"{args.split}_datasets", tuple(args.datasets))
     for name, value in (
         ("--batch-size", args.batch_size),
         ("--qa-batch-size", args.qa_batch_size),
@@ -62,6 +102,7 @@ def main():
         cfg.evaluation.qa_batch_size = args.qa_batch_size
     if args.max_new_tokens is not None:
         cfg.evaluation.max_new_tokens = args.max_new_tokens
+    cfg.validate()
     checkpoint_path = Path(args.checkpoint).resolve()
     cfg.checkpoint.output_dir = str(checkpoint_path.parent)
     if not cfg.logging.wandb_run_name:
@@ -137,6 +178,15 @@ def main():
     if is_main:
         print("autoregressive (headline):", autoregressive)
         print("teacher-forced (diagnostic only):", teacher_forced)
+    if is_main:
+        report = {"checkpoint": str(checkpoint_path), "split": args.split,
+                  "datasets": getattr(cfg.data, f"{args.split}_datasets") or cfg.data.dataset,
+                  "config": cfg.to_dict(), "autoregressive": autoregressive,
+                  "teacher_forced": teacher_forced}
+        from datetime import datetime
+        report_path = checkpoint_path.parent / f"eval_{args.split}_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
+        report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+        print(f"results: {report_path}")
     if accelerator is not None:
         accelerator.wait_for_everyone()
 
