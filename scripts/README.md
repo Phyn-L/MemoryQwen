@@ -32,3 +32,13 @@ HotpotQA 当前使用 `validation.jsonl`：本地 `test.jsonl` 为空。memory �
 - `configs/icl/icl_<dataset>_<N>shot.yaml`
 
 旧的 A/B、8B、队列、专用 SQuAD 评测和早期 ICL wrapper 已移至 [archive](archive/README.md)。它们用于追溯历史实验，不是日常入口；新的实验变体应写入 YAML，而不是新增专用 shell。
+
+## HotpotQA 顺序对比
+
+在 4×4090 上按默认设置连续运行 memory checkpoint、Qwen3-1.7B ICL 和 Qwen3-8B ICL：
+
+```bash
+bash scripts/test_hotpotqa_suite.sh --machine 4090
+```
+
+默认使用 `outputs/Qwen1.7B_20260917_213648.pt`、4-shot、4 个分布式进程；memory 每卡 context batch 为 1，ICL 每卡 QA batch 为 4。可用 `--ckpt`、`--memory-bs`、`--icl-bs`、`--shots 0|4` 调整。每个结果 JSON 都包含 `em`、`f1`、`rouge_l`。
