@@ -1,0 +1,120 @@
+# H200 A/B 的 ON 臂：记忆读取侧 6 个开关全开，目标机器 8xH200（140 GiB/卡）。
+# 与 ab_h200_off.yaml 的唯一差异就是那 6 个开关 + checkpoint.output_dir，其余逐字段相同，
+# 由 tests/test_ab_configs.py 断言（防止手改一份忘了改另一份）。
+#
+# 6 个开关（OFF 臂的取值写在 ab_h200_off.yaml）：
+#   memory.head_mode          linear -> tied        (A1：记忆读出头与词表 embedding 绑定)
+#   memory.init_mode          randn  -> token_embed (C2：memory 用真实 token embedding 初始化)
+#   memory.allow_slot_attention false -> true       (C2：memory 槽之间可以互相注意)
+#   memory.ae_lm_weight       0.0    -> 1.0         (B2：冻结主干当前缀解码器的自编码目标)
+#   memory.distill_weight     0.0    -> 0.3         (B1：全上下文模型 KL 蒸馏进 memory)
+#   memory.readout_length     0      -> 8           (C3：问题期 resampler 读 memory)
+#
+# 训练规模：train_datasets=all 在 ctx=1024 下保留 252,465 条 context（丢 6,255 条 >1024 token、
+# 2,464 条无可用 QA 对）。全局 batch = batch_size 8 x 4 进程 = 32 => 1 epoch = ceil(252465/32) = 7,890 步。
+# 所以整个训练就是 1 epoch、7,890 步，下面所有 cadence 都是按这个步数配的：
+#   warmup_steps            400   (~5% of 7890；上一版 500/3987 = 12.5% 偏长)
+#   teacher_forced_every    500   -> 500..7500 共 15 次 + 最后一步必定评测 = 16 个点
+#   autoregressive_every   1000   -> 1000..7000 共 7 次 + 最后一步 = 8 个点
+#   save_every_steps       2000   -> step-2000/4000/6000.pt + 结束时的 last.pt（约 1.1 GiB/个）
+#   log_every                25   -> train/* 约 316 个点，够看 loss 曲线又不撑大 offline wandb
+# 注意 cadence 用取模实现，但 scripts/train.py 的 should_evaluate() 保证**最后一步一定评测**，
+# 所以即使步数不是 500/1000 的整数倍，也不会缺终点数字。
+#
+# 评测口径（两臂一致，且与之前几次 run 对齐，便于横向看）：
+#   validation_max_samples 2000、autoregressive_max_qa 128/rank、max_new_tokens 32（与
+#   scripts/test_icl_baseline.py 的解码预算一致）。teacher forcing 是诊断，AR 才是头条。
+#
+# 显存：比正在跑的 ctx=1024/M=8/batch 12 那版更轻（M=16 但 batch 8、ae/distill 都是采样 128 位置，
+# 不是 0=全位置）。实测峰值请以启动后 nvidia-smi 为准，留出余量。
+#
+# 启动（见 scripts/run_ab.sh，它会按 on -> off 顺序连着跑两臂）：
+#   cd <repo> && NUM_PROCESSES=4 bash scripts/run_ab.sh
+# 单跑这一臂：
+#   CONFIG=configs/qwen-1.7b/ab_h200_on.yaml NUM_PROCESSES=4 WANDB_MODE=offline bash scripts/train.sh
+checkpoint:
+  output_dir: outputs/ab_h200_on
+  save_every_steps: 2000
+data:
+  cache_dataset: true
+  cache_sortish_lengths: true
+  chat_template_enable_thinking: false
+  filter_long_context: true
+  filter_no_qa: true
+  max_answer_tokens: 128
+  max_context_tokens: 1024
+  max_question_tokens: 128
+  qa_per_context: 4
+  root: ${DATA_ROOT:-/data/lz/contexts/aggregated}
+  sortish_bucket_multiplier: 50
+  test_datasets:
+  - squad
+  train_datasets: all
+  train_max_samples: null
+  use_chat_template: false
+  validation_datasets:
+  - squad
+  validation_max_samples: 2000
+evaluation:
+  autoregressive_every: 1000
+  autoregressive_max_qa: 128
+  max_new_tokens: 32
+  qa_batch_size: 4
+  teacher_forced_every: 500
+logging:
+  log_every: 25
+  wandb_mode: offline
+  wandb_project: MemoryQwen
+memory:
+  ae_lm_positions: 128
+  ae_lm_weight: 1.0
+  allow_slot_attention: true
+  context_lm_positions: 128
+  decoder_ffn_ratio: 2
+  decoder_heads: 8
+  decoder_hidden_size: 256
+  distill_entropy_weight: false
+  distill_positions: 128
+  distill_temperature: 1.0
+  distill_topk: 0
+  distill_weight: 0.3
+  head_init: auto
+  head_mode: tied
+  init_mode: token_embed
+  init_seed: 0
+  memory_length: 16
+  qa_weight: 1.0
+  readout_heads: 4
+  readout_hidden_size: 256
+  readout_layers: 2
+  readout_length: 8
+  reconstruction_cosine_weight: 0.5
+  reconstruction_loss: context_lm
+  reconstruction_weight: 1.0
+model:
+  lora_alpha: 16.0
+  lora_dropout: 0.0
+  lora_rank: 8
+  name_or_path: ${MODEL_ROOT:-/data/lz/hf_cache/hub}/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  torch_dtype: bfloat16
+  trainable_dtype: float32
+optimizer:
+  lr: 0.0001
+  name: adamw
+  weight_decay: 0.01
+scheduler:
+  name: cosine
+  warmup_steps: 400
+training:
+  batch_size: 8
+  epochs: 1
+  max_grad_norm: 1.0
+  seed: 42

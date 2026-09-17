@@ -17,3 +17,6 @@ wandb/
 
 # per-machine settings (paths, wandb mode, visible devices)
 scripts/env.local.sh
+
+# A/B launcher logs (scripts/run_ab.sh)
+logs/

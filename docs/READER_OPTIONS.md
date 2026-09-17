@@ -184,3 +184,12 @@ memory:
 把 `head_mode` 改回 `linear`、`init_mode` 改回 `randn`、`allow_slot_attention` 改回 `false`、
 `ae_lm_weight`/`distill_weight`/`readout_length` 全部改回 `0`，即完全回到升级前的数值路径
 （`tests/` 里每个开关都有"关闭即等价"的回归测试）。
+
+---
+
+## 8. 怎么验证这些开关有用
+
+见 [AB_H200.md](AB_H200.md)：`configs/qwen-1.7b/ab_h200_{on,off}.yaml` 两臂除 6 个开关外逐字段
+相同（`tests/test_ab_configs.py` 断言），单 epoch、7,890 步，用 `scripts/run_ab.sh` 顺序跑完两臂。
+之前的 `0rj6x1xc`（ctx2048/M64/1ep）与 `vry7n1sw`（ctx512/M16/3ep）形状不同，只能当规模参照，
+不能用来判断开关的好坏。

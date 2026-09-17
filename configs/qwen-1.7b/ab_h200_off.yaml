@@ -1,0 +1,109 @@
+# H200 A/B 的 OFF 臂：记忆读取侧 6 个开关全关（= 升级前的行为）。
+#
+# 本文件由 ab_h200_on.yaml 生成：除下面 6 个开关与 checkpoint.output_dir 外逐字段相同，
+# tests/test_ab_configs.py 会断言"两臂的差异恰好是这 7 处"，所以别手改其中一份。
+#
+#   memory.head_mode          linear          (关闭 A1 的绑定词表头)
+#   memory.init_mode          randn           (关闭 C2 的 token embedding 初始化)
+#   memory.allow_slot_attention false         (关闭 C2 的 memory 槽间注意力)
+#   memory.ae_lm_weight       0.0             (关闭 B2 的 memory 前缀自编码)
+#   memory.distill_weight     0.0             (关闭 B1 的 KL 蒸馏)
+#   memory.readout_length     0               (关闭 C3 的问题期 resampler)
+#
+# 训练规模与 schedule 与 ON 臂完全一致：train_datasets=all @ ctx=1024 保留 252,465 条 context，
+# 全局 batch = 8 x 4 = 32 => 1 epoch = 7,890 步。
+#   warmup_steps 400 / teacher_forced_every 500 / autoregressive_every 1000 /
+#   save_every_steps 2000 / log_every 25
+# 这些数字的理由写在 ab_h200_on.yaml 顶部；两臂必须一模一样，否则曲线不可比。
+#
+# 注意 train/* 里 OFF 臂只有 qa_loss/reconstruction_loss，没有 ae_loss/distill_loss —— 损失组合
+# 不同，所以**只能比 val_* 指标，不要比 train/loss 的绝对值**。
+#
+# 启动（一般不用手动起，交给 scripts/run_ab.sh 顺序跑两臂）：
+#   CONFIG=configs/qwen-1.7b/ab_h200_off.yaml NUM_PROCESSES=4 WANDB_MODE=offline bash scripts/train.sh
+checkpoint:
+  output_dir: outputs/ab_h200_off
+  save_every_steps: 2000
+data:
+  cache_dataset: true
+  cache_sortish_lengths: true
+  chat_template_enable_thinking: false
+  filter_long_context: true
+  filter_no_qa: true
+  max_answer_tokens: 128
+  max_context_tokens: 1024
+  max_question_tokens: 128
+  qa_per_context: 4
+  root: ${DATA_ROOT:-/data/lz/contexts/aggregated}
+  sortish_bucket_multiplier: 50
+  test_datasets:
+  - squad
+  train_datasets: all
+  train_max_samples: null
+  use_chat_template: false
+  validation_datasets:
+  - squad
+  validation_max_samples: 2000
+evaluation:
+  autoregressive_every: 1000
+  autoregressive_max_qa: 128
+  max_new_tokens: 32
+  qa_batch_size: 4
+  teacher_forced_every: 500
+logging:
+  log_every: 25
+  wandb_mode: offline
+  wandb_project: MemoryQwen
+memory:
+  ae_lm_positions: 128
+  ae_lm_weight: 0.0
+  allow_slot_attention: false
+  context_lm_positions: 128
+  decoder_ffn_ratio: 2
+  decoder_heads: 8
+  decoder_hidden_size: 256
+  distill_entropy_weight: false
+  distill_positions: 128
+  distill_temperature: 1.0
+  distill_topk: 0
+  distill_weight: 0.0
+  head_init: auto
+  head_mode: linear
+  init_mode: randn
+  init_seed: 0
+  memory_length: 16
+  qa_weight: 1.0
+  readout_heads: 4
+  readout_hidden_size: 256
+  readout_layers: 2
+  readout_length: 0
+  reconstruction_cosine_weight: 0.5
+  reconstruction_loss: context_lm
+  reconstruction_weight: 1.0
+model:
+  lora_alpha: 16.0
+  lora_dropout: 0.0
+  lora_rank: 8
+  name_or_path: ${MODEL_ROOT:-/data/lz/hf_cache/hub}/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  torch_dtype: bfloat16
+  trainable_dtype: float32
+optimizer:
+  lr: 0.0001
+  name: adamw
+  weight_decay: 0.01
+scheduler:
+  name: cosine
+  warmup_steps: 400
+training:
+  batch_size: 8
+  epochs: 1
+  max_grad_norm: 1.0
+  seed: 42
