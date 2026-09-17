@@ -776,6 +776,44 @@ class MetaLoRA(nn.Module):
         readout = self.resampler(question_embeds, question_mask, memory)
         return readout.to(dtype=self.dtype)
 
+    def _qa_positions(self, prefix, question_mask, answer_length, readout_length, device):
+        """Absolute positions of ``[question, (read-out), answer]`` behind a memory prefix.
+
+        The numbering is the one the generation path builds row by row
+        (:meth:`generate_answers_with_prefix`), and it deliberately ignores left padding::
+
+            start = context_length + memory_length
+            real question token i (0-based among the real ones) -> start + i
+            read-out slot j                                     -> start + valid + j
+            answer token k                                      -> start + valid + readout_length + k
+
+        It used to be a single ``arange`` over the padded block, so a row's real question
+        tokens sat at ``start + pad + i`` and its answer at ``start + padded_question +
+        readout``. That made the memory-to-question distance depend on the longest question
+        in the batch, and generation -- which compacts the question before decoding -- used
+        a different numbering than training. Both are the same now; with no padding in the
+        batch the result is identical to the old ``arange``, which is why the old form was
+        right for single-row batches.
+        """
+        question_mask = question_mask.bool()
+        valid = question_mask.sum(dim=1)
+        start = int(prefix.context_length) + int(prefix.memory_length)
+        # cumsum-1 is the 0-based rank of each real token; padding slots get -1 and are
+        # parked at ``start`` (they are masked out of attention either way).
+        rank = question_mask.long().cumsum(dim=1) - 1
+        blocks = [torch.where(question_mask, start + rank, torch.full_like(rank, start))]
+        if readout_length:
+            blocks.append(
+                start + valid.unsqueeze(1)
+                + torch.arange(readout_length, device=device).unsqueeze(0)
+            )
+        if answer_length:
+            blocks.append(
+                start + valid.unsqueeze(1) + readout_length
+                + torch.arange(answer_length, device=device).unsqueeze(0)
+            )
+        return torch.cat(blocks, dim=1).to(device)
+
     def forward_qa_with_prefix(self, prefix, qa_context_indices, question_embeds, question_mask, answer_embeds, answer_mask, labels):
         question_embeds, answer_embeds = question_embeds.to(dtype=self.dtype), answer_embeds.to(dtype=self.dtype)
         indices = qa_context_indices.to(question_embeds.device, dtype=torch.long)
@@ -787,8 +825,7 @@ class MetaLoRA(nn.Module):
         else:
             sequence = torch.cat([question_embeds, readout, answer_embeds], dim=1)
         mask = build_continuation_mask(question_mask, answer_mask, prefix.memory_length, sequence.dtype, readout_length=extra)
-        start = prefix.context_length + prefix.memory_length
-        positions = torch.arange(start, start + sequence.size(1), device=sequence.device).unsqueeze(0).expand(sequence.size(0), -1)
+        positions = self._qa_positions(prefix, question_mask, answer_embeds.size(1), extra, sequence.device)
         out = self.qwen(inputs_embeds=sequence, attention_mask=mask, position_ids=positions, past_key_values=cache, use_cache=True, return_dict=True)
         ignored = torch.full((labels.size(0), question_embeds.size(1) + extra), -100, dtype=labels.dtype, device=labels.device)
         return MetaLoRAOutput(
