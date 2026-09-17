@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# Generic wrapper for the ICL baseline (RACE-oriented: 0-shot default, three pinned cards).
+# For the SQuAD validation baseline of Qwen3-1.7B / Qwen3-8B in the memory project's protocol
+# (full split, v1/v2/full subsets, one output directory per run, a results.md table) use
+# `scripts/eval_icl_squad.sh` instead.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
