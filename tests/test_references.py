@@ -4,6 +4,10 @@ The evaluator used to score against the first reference only, while the ICL base
 the max over all of them. On SQuAD that is a systematic gap: of the 16498 answered QA pairs
 in `aggregated/squad/validation.jsonl`, 12728 carry 3 references, 2092 carry 5 and 1384
 carry 4 -- so the evaluator was stricter than the baseline it is compared against.
+
+`first_token_em` had the same kind of quiet strictness: it compared raw token ids, so a
+correct word encoded with a leading space (` cat`, what the model generates) never matched
+the gold token (`cat`, what tokenizing the answer alone yields).
 """
 from __future__ import annotations
 
@@ -44,21 +48,69 @@ def test_references_fall_back_to_the_single_answer():
     assert QARecord("q", "").references == ()
 
 
-class _FirstCharTokenizer:
-    """Minimal stand-in: one 'token' per string, equal to its first character."""
+class _WordTokenizer:
+    """Minimal stand-in: one token per word, and a leading space changes the id.
+
+    That second property is the point. Real byte-level BPE encodes ``cat`` and `` cat``
+    as different tokens for the same word, which is why the evaluator compares the
+    normalized text of a single token as well as its id.
+    """
 
     pad_token_id = 0
 
+    def __init__(self):
+        self.vocabulary: dict[str, int] = {}
+
+    def _id(self, token: str) -> int:
+        return self.vocabulary.setdefault(token, len(self.vocabulary) + 1)
+
     def __call__(self, text, add_special_tokens=False):
-        return SimpleNamespace(input_ids=[ord(text[0])] if text else [])
+        if not text:
+            return SimpleNamespace(input_ids=[])
+        word = text.split()[0]
+        return SimpleNamespace(input_ids=[self._id((" " if text[0].isspace() else "") + word)])
+
+    def decode(self, ids, skip_special_tokens=True):
+        for token, index in self.vocabulary.items():
+            if index == int(ids[0]):
+                return token
+        return ""
 
 
 def test_first_token_em_considers_every_reference():
-    evaluator = Evaluator(_FirstCharTokenizer(), SimpleNamespace())
+    tokenizer = _WordTokenizer()
+    evaluator = Evaluator(tokenizer, SimpleNamespace())
     assert evaluator._first_token_ids(QARecord("q", "cat", answers=("cat", "dog", ""))) == {
-        ord("c"), ord("d"),
+        tokenizer("cat").input_ids[0], tokenizer("dog").input_ids[0],
     }
-    assert evaluator._first_token_ids(QARecord("q", "cat")) == {ord("c")}
+    assert evaluator._first_token_ids(QARecord("q", "cat")) == {tokenizer("cat").input_ids[0]}
+
+
+def test_first_token_em_sees_the_space_prefixed_generation():
+    """The regression: gold ``cat`` vs generated `` cat`` must be a hit.
+
+    A raw token-id comparison reports a miss for every correct answer whose first word is
+    not at the start of a string, which is most of them once the model generates after the
+    prompt's ``Answer:``.
+    """
+    tokenizer = _WordTokenizer()
+    evaluator = Evaluator(tokenizer, SimpleNamespace())
+    record = QARecord("q", "cat", answers=("cat", "dog"))
+    generated = tokenizer(" cat").input_ids[0]
+    assert generated != tokenizer("cat").input_ids[0], "the fake tokenizer must tell them apart"
+    assert evaluator._first_token_hit(generated, record) is True
+    assert evaluator._first_token_hit(tokenizer("cat").input_ids[0], record) is True
+    assert evaluator._first_token_hit(tokenizer(" DOG").input_ids[0], record) is True
+
+
+def test_first_token_em_rejects_wrong_empty_and_padding_tokens():
+    tokenizer = _WordTokenizer()
+    evaluator = Evaluator(tokenizer, SimpleNamespace())
+    record = QARecord("q", "cat")
+    assert evaluator._first_token_hit(tokenizer("bird").input_ids[0], record) is False
+    assert evaluator._first_token_hit(tokenizer.pad_token_id, record) is False
+    # An id the tokenizer cannot decode carries no text, so it cannot match by text either.
+    assert evaluator._first_token_hit(max(tokenizer.vocabulary.values()) + 1, record) is False
 
 
 def test_multi_reference_reduction_is_a_max_not_the_first_reference():

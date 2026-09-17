@@ -10,6 +10,10 @@ arithmetic, the normalizer and the multi-reference reduction all live here.
 The normalizer is the official SQuAD one (lowercase, punctuation stripped, articles
 dropped). It is exposed as the ``normalize`` argument rather than hard-coded, so a future
 variant can be introduced explicitly instead of by editing the metric bodies.
+
+The scored set is ``em``, ``f1`` and ``rouge_l`` (see ``METRIC_KEYS``); ``f1`` is the
+official SQuAD token-level F1, so a number from here is directly comparable with published
+SQuAD results and with ``icl_baseline``.
 """
 
 from collections import Counter
@@ -22,7 +26,16 @@ import string
 # reduction flattens them into a list, so a key appearing in a different order on
 # different ranks would silently mix values up; keeping the canonical order here (and
 # asserting it in tests/test_metrics.py) is what makes that impossible.
-METRIC_KEYS: tuple[str, ...] = ("em", "f1", "rouge_l", "precision")
+#
+# ``precision`` deliberately is not here. It was unigram precision over the prediction
+# (``unigram_precision``), which rewards short answers and has no recall or brevity
+# penalty: a one-token prediction that happens to occur in the reference scores 1.0,
+# and a fully correct but longer answer scores below it. It also moved almost line for
+# line with ``f1`` on this task while being the only metric that a truncated answer can
+# game, so it added a number without adding a signal. ``f1`` (the harmonic mean of the
+# same overlap) already covers that overlap and stays comparable to the SQuAD
+# literature. The real BLEU lives in ``icl_baseline.corpus_bleu``.
+METRIC_KEYS: tuple[str, ...] = ("em", "f1", "rouge_l")
 
 
 def normalize_answer(value) -> str:
@@ -74,27 +87,12 @@ def rouge_l(prediction, reference, normalize=normalize_answer) -> float:
     return 2 * precision * recall / (precision + recall)
 
 
-def unigram_precision(prediction, reference, normalize=normalize_answer) -> float:
-    """Fraction of predicted tokens that also occur in the reference.
-
-    Formerly named ``bleu``, which it is not: BLEU needs n-gram precisions and a
-    brevity penalty (the real thing is ``icl_baseline.corpus_bleu``).
-    """
-    prediction_tokens = normalize(prediction).split()
-    reference_tokens = normalize(reference).split()
-    if not prediction_tokens or not reference_tokens:
-        return 0.0
-    overlap = sum((Counter(prediction_tokens) & Counter(reference_tokens)).values())
-    return overlap / len(prediction_tokens)
-
-
 def qa_metrics(prediction, reference, normalize=normalize_answer) -> dict[str, float]:
-    """The four metrics against a single gold answer."""
+    """The scored metrics against a single gold answer."""
     return {
         "em": exact_match(prediction, reference, normalize),
         "f1": token_f1(prediction, reference, normalize),
         "rouge_l": rouge_l(prediction, reference, normalize),
-        "precision": unigram_precision(prediction, reference, normalize),
     }
 
 

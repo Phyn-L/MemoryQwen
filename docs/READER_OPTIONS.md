@@ -164,8 +164,9 @@ memory:
    用 `first_token_em`、逐位置 EM 曲线，以及**空 memory 基线**（把 memory 置零/置常数的对照）。
 3. **按 context 划分 held-out 问题**：SQuAD 的 16498 个 QA 行只覆盖 10531 个唯一 context，可以按 context 切分，
    用来判断 memory 是否把问题无关的内容真的装进去了。
-4. **wandb 面板**：`val_teacher_forced/{ae_loss, distill_loss, reconstruction_loss, loss}` 看目标，
-   `val_autoregressive/{f,em,first_token_em}` 看下游。两个 section 由 `scripts/train.py::eval_log_payloads` 决定。
+4. **wandb 面板**：`val_teacher_forced/{loss, qa_loss, ppl, reconstruction_loss}` 看目标，
+   `val_autoregressive/{f1, em, rouge_l, first_token_em}` 看下游；训练侧的 `ae_loss` / `distill_loss`
+   只在 `train/*` 里（验证不跑它们），两个 section 由 `scripts/train.py::eval_log_payloads` 决定。
 
 ---
 

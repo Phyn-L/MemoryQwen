@@ -172,7 +172,7 @@ after the last real answer token. `overwrite` remains available to reproduce old
 
 `Evaluator.teacher_forced` feeds the answer tokens as *inputs* (teacher forcing), so
 every answer position after the first can be produced by continuing the prefix it
-already attends to. Its `em`/`f1`/`rouge_l`/`precision` therefore reward lexical continuation more
+already attends to. Its `em`/`f1`/`rouge_l` therefore reward lexical continuation more
 than retrieval, and can even come out below the autoregressive score. Predictions from a
 trained checkpoint:
 
@@ -187,6 +187,17 @@ The word tails are often right while the entity is wrong. Both evaluators now al
 
 - teacher forced: the argmax at the first answer position equals the gold first answer token;
 - autoregressive: the first generated token equals the first token of the gold answer.
+
+"Equals" means the same token id *or* the same normalized text, because the same word has
+two encodings depending on the leading space: the gold answer tokenized on its own gives
+`cat`, while the same word continued after a question is ` cat`. This is not a corner
+case: on Qwen3-1.7B **none** of the 55028 gold first tokens in
+`aggregated/squad/validation.jsonl` keeps its id under a leading space, so the id
+comparison accepts only the bare encoding and every space-encoded generation is a false
+miss. Tokens that normalize to nothing (punctuation, specials) still match by id only, so
+the looser comparison cannot invent hits; and since the id comparison is tried first, the
+change can only *add* hits -- `first_token_em` numbers reported before it are lower bounds,
+not a different scale.
 
 Read the **autoregressive** numbers as the headline result and teacher-forced
 `first_token_em` as the retrieval diagnostic. A large teacher-forced/autoregressive gap
@@ -207,8 +218,8 @@ the panels line up:
 
 | section | contents |
 | --- | --- |
-| `val_teacher_forced/*` | `em` `f1` `rouge_l` `precision` `first_token_em` (lexical-continuation flavoured — a diagnostic) plus the loss scalars `loss` `qa_loss` `ppl` `reconstruction_loss` |
-| `val_autoregressive/*` | the same five answer-quality metrics, produced without feeding the gold answer back — the headline numbers |
+| `val_teacher_forced/*` | `em` `f1` `rouge_l` `first_token_em` (lexical-continuation flavoured — a diagnostic) plus the loss scalars `loss` `qa_loss` `ppl` `reconstruction_loss` |
+| `val_autoregressive/*` | the same four answer-quality metrics, produced without feeding the gold answer back — the headline numbers |
 
 W&B groups panels by the first path component, so the section has to lead the key. The two
 prefixes are the `TEACHER_FORCED_SECTION` / `AUTOREGRESSIVE_SECTION` constants at the top of
@@ -232,7 +243,13 @@ agree key for key on every key in `src.metrics.METRIC_KEYS`:
 | `em` | normalized prediction equals a gold answer exactly |
 | `f1` | token-overlap F1 against the best gold answer |
 | `rouge_l` | LCS F1 against the best gold answer |
-| `precision` | fraction of predicted tokens present in the reference (formerly, and wrongly, called `bleu`) |
+
+There used to be a fourth key, `precision` (unigram precision over the prediction, once
+wrongly called `bleu`). It was dropped because it is gameable in the direction this task
+already leans: a one-token prediction that occurs in the reference scores 1.0 while a
+fully correct longer answer scores below it, and it tracked `f1` almost exactly on the
+runs we have. `f1` is the harmonic mean of the same overlap and stays comparable with the
+SQuAD literature. The real BLEU still lives in `src/icl_baseline.corpus_bleu`.
 
 Both evaluators additionally report `first_token_em`: the first answer token must be
 produced from memory alone, so it is the retrieval signal that `em`/`f1` are not.
@@ -243,7 +260,9 @@ Both evaluators reduce over *every* gold answer with a metric-wise max, and
 the evaluator see one reference where the baseline sees up to six -- of the 16498 answered
 QA pairs in `aggregated/squad/validation.jsonl`, 12728 have 3 references, 2092 have 5 and
 1384 have 4). `first_token_em` uses the same rule: matching any annotator's first token
-counts as a hit. `tests/test_references.py` covers the end-to-end path
+counts as a hit, compared as a token id or as normalized text so the leading-space
+encoding of a generated token does not hide a hit. `tests/test_references.py` covers the
+end-to-end path
 (jsonl -> dataset -> HF cache -> reload), which is where a missed `CACHE_VERSION` bump would
 show up.
 

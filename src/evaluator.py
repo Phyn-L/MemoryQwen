@@ -9,7 +9,7 @@ from tqdm.auto import tqdm
 from utils.ddp import is_main_process
 
 from .losses import combine_losses, context_lm_loss, qa_loss, reconstruction_loss
-from .metrics import METRIC_KEYS, best_reference_metrics
+from .metrics import METRIC_KEYS, best_reference_metrics, normalize_answer
 
 
 def _distributed_sum(values, device):
@@ -48,6 +48,43 @@ class Evaluator:
             if tokens:
                 first_ids.add(int(tokens[0]))
         return first_ids
+
+    def _token_text(self, token_id: int) -> str:
+        """Normalized text of a single token; empty when it carries no content.
+
+        Punctuation and special tokens normalize to the empty string, which is what keeps
+        the text comparison in :meth:`_first_token_hit` from matching two of them.
+        """
+        return normalize_answer(
+            self.tokenizer.decode([int(token_id)], skip_special_tokens=True)
+        )
+
+    def _first_token_hit(self, token_id: int, record) -> bool:
+        """Whether one produced token is the gold first token of *any* reference.
+
+        A token id comparison alone is not enough here. The same word has two encodings
+        depending on the leading space: tokenizing the gold answer on its own yields
+        ``cat``, while the model that generates after ``... Answer:`` emits `` cat``.
+        Comparing the normalized text of the two single tokens closes that gap, and it is
+        the alignment this diagnostic exists to measure -- a correct first word was being
+        counted as a miss whenever the tokenizer placed a space in front of it.
+
+        The comparison is not loosened: ids still match exactly, and the text fallback
+        only applies when both sides normalize to something non-empty, so punctuation or
+        a padding token cannot turn into a hit. Because the id comparison is tried first,
+        this can only ever *add* hits: numbers reported before this change are lower
+        bounds, not a different scale.
+        """
+        produced = int(token_id)
+        if produced == self.tokenizer.pad_token_id:
+            return False
+        produced_text = self._token_text(produced)
+        for gold in self._first_token_ids(record):
+            if produced == gold:
+                return True
+            if produced_text and produced_text == self._token_text(gold):
+                return True
+        return False
 
     def _batch(self, model, prefix, batch, device, start=0, end=None):
         end = end or batch["question_ids"].size(0)
@@ -148,7 +185,9 @@ class Evaluator:
                     # answer position that must be produced from the memory alone
                     # (every later token can copy the teacher-forced prefix it was fed).
                     first_token_hits += int(
-                        int(predictions[i][active][0].item()) in self._first_token_ids(record)
+                        self._first_token_hit(
+                            int(predictions[i][active][0].item()), record
+                        )
                     )
                     text = self.tokenizer.decode(
                         predictions[i][active].tolist(), skip_special_tokens=True
@@ -191,12 +230,11 @@ class Evaluator:
         """Headline evaluation: every answer token is produced by the model itself.
 
         Unlike :meth:`teacher_forced` this never feeds the gold answer back, so these are
-        the numbers to quote. Each metric is reported twice: the unsuffixed key keeps the
-        training-time normalizer (articles preserved) so historical runs stay comparable,
-        and the ``_official`` key uses the official SQuAD normalizer -- that is the one to
-        compare against ``scripts/test_icl_baseline.py``, which scores the same way.
-        ``include_teacher_metrics`` additionally reports the teacher-forced
-        ppl/qa_loss/reconstruction_loss at the cost of a second pass.
+        the numbers to quote. The metrics use the single official SQuAD normalizer from
+        ``src.metrics``, which is also what ``scripts/test_icl_baseline.py`` scores with, so
+        the two numbers are directly comparable. ``include_teacher_metrics`` additionally
+        reports the teacher-forced ppl/qa_loss/reconstruction_loss at the cost of a second
+        pass.
 
         ``max_qa`` caps how many QA rows *this rank* decodes.  Decoding is orders of
         magnitude more expensive than one teacher-forced forward, and a rank that stays
@@ -249,9 +287,7 @@ class Evaluator:
                     break
                 row = generated[i].tolist()
                 first_token_hit += int(
-                    bool(row)
-                    and row[0] in self._first_token_ids(record)
-                    and row[0] != self.tokenizer.pad_token_id
+                    bool(row) and self._first_token_hit(row[0], record)
                 )
                 metrics = best_reference_metrics(
                     self.tokenizer.decode(row, skip_special_tokens=True),

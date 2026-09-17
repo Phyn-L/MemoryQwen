@@ -90,6 +90,19 @@ def test_no_legacy_dual_track_remains():
     assert not hasattr(metrics, "qa_metrics_all"), "the dual-track helper is back"
 
 
+def test_unigram_precision_is_gone():
+    """``precision`` was dropped: short answers gamed it and it tracked ``f1``.
+
+    It also changes the flattened layout of the distributed reduce, so removing it is not
+    a cosmetic change and is asserted rather than left to review.
+    """
+    import src.metrics as metrics
+
+    assert "precision" not in METRIC_KEYS
+    assert not hasattr(metrics, "unigram_precision"), "the dropped metric is back"
+    assert "precision" not in qa_metrics("a cat", "cat")
+
+
 if __name__ == "__main__":
     failures = 0
     for name, function in sorted(globals().items()):
