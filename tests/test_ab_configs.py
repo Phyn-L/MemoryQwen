@@ -6,9 +6,9 @@ silently turns the comparison into "whatever changed" -- which is exactly how th
 pair of runs (0rj6x1xc at ctx=2048/M=64 and vry7n1sw at ctx=512/M=16) ended up
 uninterpretable. So the diff is asserted here rather than left to review.
 
-The schedule is pinned too: both arms are one epoch of 7,890 steps (all @ ctx=1024 with a
-global batch of 32), and every cadence is written against that budget. The loop that consumes
-those numbers is tested in tests/test_train_schedule.py.
+The schedule is pinned too: both arms are one epoch of 3,945 steps (all @ ctx=1024 with a
+global batch of 8 x 8 ranks = 64), and every cadence is written against that budget. The loop
+that consumes those numbers is tested in tests/test_train_schedule.py.
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ SWITCHES = {
 }
 
 # 1 epoch over the 252,465 contexts kept by train_datasets=all at ctx=1024, global batch
-# 8 x 8 ranks = 64 -> ceil(252465 / 64) = 3,945 steps. Second round: M raised to 64 (32:1,
+# 8 x 8 ranks = 64 -> ceil(252465 / 64) = 3,945 steps. Second round: M raised to 64 (16:1,
 # the compression ratio the M=64/ctx=2048 arm won with) and max_answer_tokens cut to 64 to
 # buy back the QA branch's peak (its full-vocab logits halve).
 STEPS_PER_EPOCH = 3945
