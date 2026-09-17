@@ -1,18 +1,41 @@
 from pathlib import Path
+import os
 import random
+import shutil
 import torch
 
 class CheckpointManager:
     def __init__(self, output_dir, save_every=1000):
         self.output_dir, self.save_every = Path(output_dir), save_every
+        # Metadata of the most recent ``load``. A resumed run needs the step (where to pick
+        # up in the data stream) and the rank count it was written with: the sampler is
+        # deterministic *given the same sharding*, so a different world size would shift
+        # every rank's batches and a mid-epoch resume would silently replay other data.
+        self.loaded = {}
 
-    def save(self, model, optimizer, scheduler, step, config, final=False, wandb_run_id=None):
+    def save(self, model, optimizer, scheduler, step, config, final=False,
+             wandb_run_id=None, world_size=1):
         path = self.output_dir / ("last.pt" if final else f"step-{step}.pt")
         path.parent.mkdir(parents=True, exist_ok=True)
         # Only trainable tensors are stored: the frozen Qwen backbone is ~1.7B parameters
         # that never change, so saving it would multiply checkpoint size by roughly ten.
         trainable = {n: p.detach().cpu() for n,p in model.named_parameters() if p.requires_grad}
-        torch.save({"model": trainable, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "step": step, "config": config, "wandb_run_id": wandb_run_id, "rng": {"python": random.getstate(), "torch": torch.get_rng_state()}}, path)
+        state = {"model": trainable, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "step": step, "config": config, "wandb_run_id": wandb_run_id, "world_size": int(world_size), "rng": {"python": random.getstate(), "torch": torch.get_rng_state()}}
+        torch.save(state, path)
+        if not final:
+            # Refresh ``last.pt`` at every periodic save too. It used to be written only by
+            # the final save, so a crash between two intervals left no last.pt at all and
+            # "resume from the newest checkpoint" had to glob step-*.pt. Hard-link when the
+            # filesystem allows it (no second copy of a ~1 GiB file), else copy.
+            last = self.output_dir / "last.pt"
+            try:
+                last.unlink()
+            except FileNotFoundError:
+                pass
+            try:
+                os.link(path, last)
+            except OSError:
+                shutil.copy2(path, last)
         return path
 
     def load(self, path, model, optimizer=None, scheduler=None, allow_missing_trainable=False):
@@ -62,4 +85,9 @@ class CheckpointManager:
         if scheduler is not None and state.get("scheduler") is not None: scheduler.load_state_dict(state["scheduler"])
         if state.get("rng"):
             random.setstate(state["rng"]["python"]); torch.set_rng_state(state["rng"]["torch"])
-        return int(state.get("step", 0)), state.get("wandb_run_id")
+        self.loaded = {
+            "step": int(state.get("step", 0)),
+            "world_size": int(state.get("world_size", 1) or 1),
+            "config": state.get("config") or {},
+        }
+        return self.loaded["step"], state.get("wandb_run_id")

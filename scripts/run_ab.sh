@@ -12,6 +12,8 @@
 #   NUM_PROCESSES=4 bash scripts/run_ab.sh          # 4 ranks x batch 8 = global 32
 #   NUM_PROCESSES=8 bash scripts/run_ab.sh          # 8 ranks, halve training.batch_size
 #   DRYRUN=1 bash scripts/run_ab.sh                 # print what would run, launch nothing
+#   RESUME=1 NUM_PROCESSES=8 bash scripts/run_ab.sh  # continue each arm from its newest
+#                                                   # checkpoint instead of starting over
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -30,6 +32,7 @@ ON_CONFIG="${ON_CONFIG:-configs/qwen-1.7b/ab_h200_on.yaml}"
 OFF_CONFIG="${OFF_CONFIG:-configs/qwen-1.7b/ab_h200_off.yaml}"
 LOG_DIR="${LOG_DIR:-logs}"
 DRYRUN="${DRYRUN:-0}"
+RESUME="${RESUME:-0}"
 
 # Contexts kept by train_datasets=all at max_context_tokens=1024 (see the config header).
 # Used only to print the expected step budget, which is what every cadence is measured
@@ -57,6 +60,26 @@ fi
 GLOBAL_BATCH=$((BATCH * NUM_PROCESSES))
 EXPECTED_STEPS=$(( (CONTEXTS + GLOBAL_BATCH - 1) / GLOBAL_BATCH ))
 
+# Newest checkpoint of one arm, or empty when it has none yet. Sorted by step number,
+# not by mtime: last.pt is a hard link to the newest step file and would tie with it.
+checkpoint_of() {
+    # Newest step-*.pt of one arm, across every run directory under its configured
+    # checkpoint.output_dir (each run gets its own sub-directory), or last.pt when no
+    # periodic save has happened yet. Ordered by step number, not by mtime.
+    local config="$1" out_dir newest
+    out_dir="$(awk '/^checkpoint:/{found=1} found && /^  output_dir:/{print $2; exit}' "$config")"
+    [ -n "$out_dir" ] || return 0
+    newest="$(ls -1 "$out_dir"/step-*.pt "$out_dir"/*/step-*.pt 2>/dev/null | while read -r file; do
+        number="$(printf '%s' "$file" | sed 's#.*/step-##; s#\.pt$##')"
+        printf '%s %s\n' "$number" "$file"
+    done | sort -n | tail -1 | cut -d' ' -f2-)"
+    if [ -n "$newest" ]; then
+        printf '%s\n' "$newest"
+        return 0
+    fi
+    ls -1 "$out_dir"/last.pt "$out_dir"/*/last.pt 2>/dev/null | tail -1
+}
+
 echo "=== reader A/B (on -> off, sequential) ==="
 echo "checkout      : $ROOT"
 echo "HEAD          : $(git log --oneline -1 2>/dev/null || echo 'not a git checkout')"
@@ -69,11 +92,20 @@ if [ "$EXPECTED_STEPS" -ne 7890 ]; then
          "TF every 500 = $((EXPECTED_STEPS / 500)) points." >&2
 fi
 echo "order         : ON then OFF (sequential; the pair is only comparable if both run)"
+if [ "$RESUME" != "0" ]; then
+    echo "resume        : ON -- each arm continues from its newest step-*.pt / last.pt"
+fi
 echo
 
 if [ "$DRYRUN" != "0" ]; then
     for arm in on off; do
-        echo "would run: CONFIG=configs/qwen-1.7b/ab_h200_${arm}.yaml NUM_PROCESSES=$NUM_PROCESSES bash scripts/train.sh"
+        if [ "$arm" = "on" ]; then config="$ON_CONFIG"; else config="$OFF_CONFIG"; fi
+        extra=""
+        if [ "$RESUME" != "0" ]; then
+            checkpoint="$(checkpoint_of "$config")"
+            [ -n "$checkpoint" ] && extra=" --resume $checkpoint"
+        fi
+        echo "would run: CONFIG=$config NUM_PROCESSES=$NUM_PROCESSES bash scripts/train.sh$extra"
     done
     echo "DRYRUN OK (nothing launched)"
     exit 0
@@ -90,7 +122,17 @@ for arm in on off; do
     fi
     log="$LOG_DIR/ab_${arm}_${STAMP}.log"
     echo "=== arm $arm: CONFIG=$config -> $log ==="
-    CONFIG="$config" NUM_PROCESSES="$NUM_PROCESSES" bash scripts/train.sh 2>&1 | tee "$log"
+    resume_args=()
+    if [ "$RESUME" != "0" ]; then
+        checkpoint="$(checkpoint_of "$config")"
+        if [ -n "$checkpoint" ]; then
+            resume_args=(--resume "$checkpoint")
+            echo "resuming from $checkpoint"
+        else
+            echo "no checkpoint for this arm yet -- starting it from scratch"
+        fi
+    fi
+    CONFIG="$config" NUM_PROCESSES="$NUM_PROCESSES" bash scripts/train.sh "${resume_args[@]}" 2>&1 | tee "$log"
     status="${PIPESTATUS[0]}"
     if [ "$status" -ne 0 ]; then
         # A half-run pair cannot be read as an A/B, and a failed arm usually means OOM --
@@ -98,6 +140,8 @@ for arm in on off; do
         echo "run_ab.sh: arm '$arm' exited with status $status; stopping. Last 40 lines:" >&2
         tail -n 40 "$log" >&2
         echo "run_ab.sh: full log: $log" >&2
+        echo "run_ab.sh: to continue this arm from its newest checkpoint (same rank count!):" >&2
+        echo "  cd $ROOT && RESUME=1 NUM_PROCESSES=$NUM_PROCESSES ON_CONFIG=$ON_CONFIG OFF_CONFIG=$OFF_CONFIG bash scripts/run_ab.sh" >&2
         exit "$status"
     fi
     echo "=== arm $arm finished ==="

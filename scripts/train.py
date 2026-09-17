@@ -44,6 +44,23 @@ ANSWER_METRIC_KEYS = (*METRIC_KEYS, "first_token_em")
 LOSS_KEYS = ("loss", "qa_loss", "ppl", "reconstruction_loss", "ae_loss", "distill_loss")
 
 
+def resume_plan(step: int, steps_per_epoch: int, epochs: int) -> tuple[int, int]:
+    """Where a resumed run picks up: ``(epoch to start at, batches to skip inside it)``.
+
+    A checkpoint stores the optimizer/scheduler/step but not the position in the data
+    stream, so before this a resumed run re-consumed the epoch from batch 0 *and* ran
+    another full ``epochs`` pass on top of the loaded step, blowing past ``total_steps``.
+    The sampler is deterministic for a fixed rank count, so the batches the run already
+    saw can simply be skipped and the step budget stays authoritative.
+    """
+    if steps_per_epoch <= 0:
+        return epochs, 0
+    epoch = min(step // steps_per_epoch, epochs)
+    if epoch >= epochs:
+        return epochs, 0
+    return epoch, step - epoch * steps_per_epoch
+
+
 def should_evaluate(step: int, every: int, total_steps: int) -> bool:
     """Whether an evaluation runs at ``step``.
 
@@ -113,7 +130,12 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
         torch.distributed.broadcast_object_list(names, src=0)
         run_name = names[0]
     cfg.logging.wandb_run_name = run_name
-    cfg.checkpoint.output_dir = str(Path("outputs") / run_name)
+    # The run keeps its own directory (a re-run must not clobber the previous one), but it
+    # lives *under* the config's ``checkpoint.output_dir`` instead of replacing it. Before
+    # this, every run went to ``outputs/<auto name>`` and the configured path was silently
+    # ignored -- which is why a crashed A/B arm's checkpoints could not be found afterwards,
+    # let alone resumed. Now an arm's checkpoints are all under ``outputs/ab_h200_on/``.
+    cfg.checkpoint.output_dir = str(Path(cfg.checkpoint.output_dir) / run_name)
 
 
 def main() -> None:
@@ -211,7 +233,8 @@ def main() -> None:
             f"teacher_forced_every={cfg.evaluation.teacher_forced_every} "
             f"autoregressive_every={cfg.evaluation.autoregressive_every} "
             f"save_every_steps={cfg.checkpoint.save_every_steps} "
-            f"log_every={cfg.logging.log_every}",
+            f"log_every={cfg.logging.log_every} "
+            f"output_dir={cfg.checkpoint.output_dir}",
             flush=True,
         )
     manager = CheckpointManager(
@@ -224,6 +247,25 @@ def main() -> None:
         step, saved_run_id = manager.load(args.resume, model, optimizer, scheduler)
         if not cfg.logging.wandb_run_id:
             cfg.logging.wandb_run_id = saved_run_id
+        # The sampler is deterministic only for a fixed sharding; a different rank count
+        # would make "skip the batches this run already saw" skip the wrong ones.
+        ranks = 1 if accelerator is None else accelerator.num_processes
+        saved_ranks = manager.loaded.get("world_size", ranks)
+        if saved_ranks != ranks:
+            print(
+                f"resume: WARNING checkpoint was written with {saved_ranks} ranks but this run "
+                f"uses {ranks}; the batch sharding differs, so the skipped batches are not the "
+                f"ones this run saw.",
+                flush=True,
+            )
+    start_epoch, skip_batches = resume_plan(step, effective_loader_len, cfg.training.epochs)
+    if step:
+        print(
+            f"resume: step {step}/{total_steps} -> epoch {start_epoch + 1}/{cfg.training.epochs}, "
+            f"skipping {skip_batches} already-consumed batches",
+            flush=True,
+        )
+    finished = False
     if args.wandb_run_id:
         cfg.logging.wandb_run_id = args.wandb_run_id
 
@@ -262,9 +304,14 @@ def main() -> None:
         disable=not (accelerator is None or accelerator.is_main_process),
         initial=step,
     )
-    for epoch in range(cfg.training.epochs):
+    for epoch in range(start_epoch, cfg.training.epochs):
         sampler.set_epoch(epoch)
-        for batch in train_loader:
+        for batch_index, batch in enumerate(train_loader):
+            if epoch == start_epoch and batch_index < skip_batches:
+                continue
+            if step >= total_steps:
+                finished = True
+                break
             ids = {k: v.to(device) for k, v in batch.items() if k != "records"}
             base_model = (
                 accelerator.unwrap_model(model) if accelerator is not None else model
@@ -431,7 +478,10 @@ def main() -> None:
                     step,
                     cfg.to_dict(),
                     wandb_run_id=getattr(run, "id", None),
+                    world_size=1 if accelerator is None else accelerator.num_processes,
                 )
+        if finished:
+            break
 
     if accelerator is None or accelerator.is_main_process:
         checkpoint_model = (
@@ -445,6 +495,7 @@ def main() -> None:
             cfg.to_dict(),
             final=True,
             wandb_run_id=getattr(run, "id", None),
+            world_size=1 if accelerator is None else accelerator.num_processes,
         )
     progress.close()
     if run:
