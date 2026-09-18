@@ -1,8 +1,1 @@
-test:
-  datasets:
-  - hotpotqa
-  split: validation
-  batch_size: 2
-  qa_batch_size: 4
-  max_new_tokens: 32
-  max_samples: null
+../h200/evaluation/test_hotpotqa.yaml
