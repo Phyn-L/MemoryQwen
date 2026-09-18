@@ -49,6 +49,11 @@ def resolve_split_limit(cfg, split: str) -> int | None:
 def make_context_dataset(cfg, split: str, tokenizer, limit=None, allow_empty: bool = False, source_version: str | None = None):
     """Build one split. ``limit`` is the resolved sample cap (see :func:`resolve_split_limit`)."""
     names = getattr(cfg.data, f"{split}_datasets") or cfg.data.dataset
+    # Keep HotpotQA held out of the implicit training mixture for now.
+    # Explicit selections and validation/test datasets remain available.
+    if split == "train" and names in (None, "all"):
+        names = [p.name for p in sorted(Path(cfg.data.root).iterdir())
+                 if p.is_dir() and p.name.lower() != "hotpotqa"]
     split_name = getattr(cfg.data, f"{split}_split")
     cache_dir = model_cache_dir(cfg.model.name_or_path) if cfg.data.cache_dataset else None
     return AggregatedContextDataset(
