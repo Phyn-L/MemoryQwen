@@ -47,3 +47,13 @@ L/M 是长度上限与 memory slot 数之比，不是实际压缩率。以下旧
 | [qwen-1.7b/train.yaml](qwen-1.7b/train.yaml) | qwen-1.7b / 通用基线 | 2048 / 8 | 1 | head=linear; AE=0.0; KL=0.0; R=0 | 环境/自动解析 | [实验索引](../docs/experiments/README.md) |
 | [qwen-4b/train.yaml](qwen-4b/train.yaml) | qwen-4b / 通用基线 | 2048 / 8 | 1 | head=linear; AE=0.0; KL=0.0; R=0 | 环境/自动解析 | [实验索引](../docs/experiments/README.md) |
 | [qwen-8b/train.yaml](qwen-8b/train.yaml) | qwen-8b / 通用基线 | 2048 / 8 | 1 | head=linear; AE=0.0; KL=0.0; R=0 | 环境/自动解析 | [实验索引](../docs/experiments/README.md) |
+
+## 两台机器的配置版本
+
+同目录内 `4090_<name>.yaml` 保存本地配置，`h200_<name>.yaml` 保存 H200 配置；两者都纳入仓库。无前缀的原文件保留以兼容现有命令。选择配置时同时显式传入匹配的 `--machine`，例如：
+
+```bash
+bash scripts/train.sh --machine h200 --config configs/qwen-1.7b/h200_train_baseline.yaml
+```
+
+代码以本地工作区为准，通过 `bash scripts/sync_h200.sh` 同步到 H200。修改 H200 参数时先修改本地仓库中的 `h200_` 配置，再同步。

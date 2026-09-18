@@ -1,0 +1,106 @@
+# H200 单跑 ON：ctx=2048 / M=64（32:1），六个 reader 开关全开
+#
+# 为什么是这个形状：两条已跑完的 OFF run 说明形状的收益（+0.13 AR f1）比开关还大，而
+# ctx=2048/M=64 是其中最好的那条（AR f1 0.5445 / em 0.4146 / TF ppl 2.65，1.60 h）。
+# 这一条就是把同一个形状换成 ON 开关，直接和它比 —— 形状相同、只差 6 个开关（外加 batch，
+# 见下），所以是"开关在最好形状下有没有用"的最干净的一次单跑。
+#
+# 每卡 batch 为什么是 4：ctx 是显存主开销（编码 + AE 两趟全 context 前向）。实测（最坏形状、
+# max_answer_tokens=64、ON 全开）：
+#     B=2  → 峰值 reserved 51.3 GiB（在有一张被 82.7 GiB 占用的卡上也跑得下）
+#     B=4  → 按 B=2 的斜率外推约 90-95 GiB  ✓（本配置）
+#     B=6  → 约 130 GiB（余量太小）✗      B=8 → 约 175 GiB ✗
+# 所以 8 ranks x batch 4 = 全局 32，1 epoch = ceil(255143/32) = 7,974 步，约 2.2-2.9 h。
+# 与 OFF 大形状那条（global 64、3987 步）比：数据量相同（都是 1 epoch、255k contexts），
+# 只是优化步数翻倍、batch 减半 —— 报告里按"看过的 context 数"对齐比较。
+#
+# 启动（单跑，不走 run_ab.sh；记得先确认目标卡是空的 —— 节点上有多余进程各占 82.7 GiB）：
+#   cd /home/lijie/proj2/xmu/lz/MemoryQwen
+#   CONFIG=configs/qwen-1.7b/ab_h200_on_ctx2048.yaml NUM_PROCESSES=8 WANDB_MODE=offline bash scripts/train.sh
+machine: h200
+checkpoint:
+  output_dir: outputs/ab_h200_on_ctx2048
+  save_every_steps: 800
+data:
+  cache_dataset: true
+  cache_sortish_lengths: true
+  chat_template_enable_thinking: false
+  filter_long_context: true
+  filter_no_qa: true
+  max_answer_tokens: 64
+  max_context_tokens: 2048
+  max_question_tokens: 128
+  qa_per_context: 4
+  root: ${DATA_ROOT:-/data/lz/contexts/aggregated}
+  sortish_bucket_multiplier: 50
+  test_datasets:
+  - squad
+  train_datasets: all
+  train_max_samples: null
+  use_chat_template: false
+  validation_datasets:
+  - squad
+  validation_max_samples: 2000
+evaluation:
+  autoregressive_every: 400
+  autoregressive_max_qa: 1024
+  max_new_tokens: 32
+  qa_batch_size: 4
+  teacher_forced_every: 200
+logging:
+  log_every: 25
+  wandb_mode: offline
+  wandb_project: MemoryQwen
+memory:
+  ae_lm_positions: 128
+  ae_lm_weight: 1.0
+  allow_slot_attention: true
+  context_lm_positions: 128
+  decoder_ffn_ratio: 2
+  decoder_heads: 8
+  decoder_hidden_size: 256
+  distill_entropy_weight: false
+  distill_positions: 128
+  distill_temperature: 1.0
+  distill_topk: 0
+  distill_weight: 0.3
+  head_init: auto
+  head_mode: tied
+  init_mode: token_embed
+  init_seed: 0
+  memory_length: 64
+  qa_weight: 1.0
+  readout_heads: 4
+  readout_hidden_size: 256
+  readout_layers: 2
+  readout_length: 8
+  reconstruction_cosine_weight: 0.5
+  reconstruction_loss: context_lm
+  reconstruction_weight: 1.0
+model:
+  lora_alpha: 16.0
+  lora_dropout: 0.0
+  lora_rank: 8
+  name_or_path: ${MODEL_ROOT:-/data/lz/hf_cache/hub}/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  torch_dtype: bfloat16
+  trainable_dtype: float32
+optimizer:
+  lr: 0.0001
+  name: adamw
+  weight_decay: 0.01
+scheduler:
+  name: cosine
+  warmup_steps: 400
+training:
+  batch_size: 4
+  epochs: 1
+  max_grad_norm: 1.0
+  seed: 42
