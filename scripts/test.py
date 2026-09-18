@@ -41,6 +41,8 @@ def main():
     )
     parser.add_argument("--checkpoint", "--ckpt", required=True)
     parser.add_argument("--split", choices=("validation", "test"), default="validation")
+    parser.add_argument("--source-version", choices=("ms_marco_v1_1", "ms_marco_v2_1"))
+    parser.add_argument("--no-filter-long-context", action="store_true")
     parser.add_argument("--max-samples", type=int)
     parser.add_argument(
         "--batch-size", "--bs", type=int,
@@ -102,6 +104,8 @@ def main():
         cfg.evaluation.qa_batch_size = args.qa_batch_size
     if args.max_new_tokens is not None:
         cfg.evaluation.max_new_tokens = args.max_new_tokens
+    if args.no_filter_long_context:
+        cfg.data.filter_long_context = False
     cfg.validate()
     checkpoint_path = Path(args.checkpoint).resolve()
     cfg.checkpoint.output_dir = str(checkpoint_path.parent)
@@ -134,7 +138,7 @@ def main():
         # --max-samples is the only cap here: the config's {split}_max_samples belongs to
         # the training loop, and silently applying it would change previous eval numbers.
         limit=args.max_samples,
-        allow_empty=True,
+        allow_empty=True, source_version=args.source_version,
     )
     loader = DataLoader(
         ds, batch_size=cfg.training.batch_size, shuffle=False,

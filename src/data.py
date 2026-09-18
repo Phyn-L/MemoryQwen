@@ -75,12 +75,17 @@ def _answers(qa: dict[str, Any]) -> tuple[str, ...]:
 class AggregatedContextDataset(Dataset):
     """Context-level dataset: one source JSONL row becomes one item."""
 
-    def __init__(self, root, dataset="all", split="train", tokenizer=None, max_context_tokens=2048, max_samples=None, filter_long_context=True, filter_no_qa=True, allow_empty=False, cache_dir=None):
+    def __init__(self, root, dataset="all", split="train", tokenizer=None, max_context_tokens=2048, max_samples=None, filter_long_context=True, filter_no_qa=True, allow_empty=False, cache_dir=None, source_version=None):
         root = Path(root)
         names = [p.name for p in sorted(root.iterdir()) if p.is_dir()] if dataset in (None, "all") else ([dataset] if isinstance(dataset, str) else list(dataset))
         files = [(name, root / name / f"{split}.jsonl") for name in names]
         files = [(name, path) for name, path in files if path.exists()]
         metadata = dataset_cache.build_metadata(files, split=split, max_context_tokens=max_context_tokens, filter_long_context=filter_long_context, filter_no_qa=filter_no_qa)
+        self.source_version = source_version
+        if source_version:
+            import hashlib
+            metadata["fingerprint"] = hashlib.sha256((metadata["fingerprint"] + source_version).encode()).hexdigest()
+            metadata["source_version"] = source_version
         self.cache_metadata = {"root": str(root.resolve()), "datasets": names, "max_samples": max_samples, "filter": metadata}
         split_dir = Path(cache_dir) / dataset_cache.CACHE_DIR_NAME / f"{split}-{metadata['fingerprint'][:16]}" if cache_dir is not None else None
         if split_dir is not None:
@@ -121,6 +126,8 @@ class AggregatedContextDataset(Dataset):
                             continue
                     pairs = []
                     for qa in row.get("qa_pairs", []) or []:
+                        if self.source_version and qa.get("source_dataset") != self.source_version:
+                            continue
                         answers = _answers(qa); question = str(qa.get("question", "")).strip()
                         if filter_no_qa and (not question or not answers):
                             continue

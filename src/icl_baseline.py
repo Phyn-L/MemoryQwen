@@ -54,7 +54,7 @@ def iter_examples(path: str | Path, dataset: str):
                 yield flat, line_number, index
 
 
-def load_jsonl(path: str | Path, dataset: str) -> list[ICLExample]:
+def load_jsonl(path: str | Path, dataset: str, source_version: str | None = None) -> list[ICLExample]:
     """Load an evaluation file, skipping questions that have no gold answer.
 
     The aggregated files are SQuAD v2.0-shaped, i.e. they also carry the unanswerable
@@ -64,6 +64,8 @@ def load_jsonl(path: str | Path, dataset: str) -> list[ICLExample]:
     """
     records = []
     for row, line_number, index in iter_examples(path, dataset):
+        if source_version and str(row.get("source_dataset", "")) != source_version:
+            continue
         example = _from_row(row, dataset, line_number, index)
         if not example.references:
             continue

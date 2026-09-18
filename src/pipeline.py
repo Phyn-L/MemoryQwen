@@ -46,7 +46,7 @@ def resolve_split_limit(cfg, split: str) -> int | None:
     return limit
 
 
-def make_context_dataset(cfg, split: str, tokenizer, limit=None, allow_empty: bool = False):
+def make_context_dataset(cfg, split: str, tokenizer, limit=None, allow_empty: bool = False, source_version: str | None = None):
     """Build one split. ``limit`` is the resolved sample cap (see :func:`resolve_split_limit`)."""
     names = getattr(cfg.data, f"{split}_datasets") or cfg.data.dataset
     split_name = getattr(cfg.data, f"{split}_split")
@@ -55,7 +55,7 @@ def make_context_dataset(cfg, split: str, tokenizer, limit=None, allow_empty: bo
         cfg.data.root, names, split_name, tokenizer,
         cfg.data.max_context_tokens, limit,
         cfg.data.filter_long_context, cfg.data.filter_no_qa,
-        allow_empty=allow_empty, cache_dir=cache_dir,
+        allow_empty=allow_empty, cache_dir=cache_dir, source_version=source_version,
     )
 
 

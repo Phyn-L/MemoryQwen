@@ -77,6 +77,7 @@ def parse_args(argv=None):
     )
     parser.add_argument("--config", help="ICL YAML; controls shot count, decoding, split and output")
     parser.add_argument("--split", choices=("train", "validation", "test"))
+    parser.add_argument("--source-version")
     parser.add_argument("--data-root")
     parser.add_argument("--max-new-tokens", type=int)
     parser.add_argument("--model", default=default_model)
@@ -399,7 +400,7 @@ def main():
     barrier()
     tokenizer, model = load_model(args, device)
     for dataset in args.datasets:
-        records = load_jsonl(paths[dataset][0], dataset)
+        records = load_jsonl(paths[dataset][0], dataset, args.source_version)
         if args.max_samples is not None:
             records = records[: args.max_samples]
         records = limit_examples(
