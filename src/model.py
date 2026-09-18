@@ -436,10 +436,10 @@ class MetaLoRA(nn.Module):
     def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, context_lm=False, use_peft=False, head_mode="linear", head_init="auto", init_mode="randn", init_seed=0, slot_attention="isolated", ae_lm=False, readout_length=0, readout_layers=2, readout_heads=4, readout_hidden_size=256):
         super().__init__()
         self.rank, self.alpha = rank, alpha
-        self.target_modules = tuple(target_modules or ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"))
+        self.target_modules = tuple(("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj") if target_modules is None else target_modules)
         self.trainable_dtype = trainable_dtype
         # Which LoRA implementation is active, recorded so a run is reproducible.
-        self.lora_backend = "peft" if use_peft else "static"
+        self.lora_backend = ("peft" if use_peft else "static") if self.target_modules else "none"
         # Only one of the two auxiliary objectives is active at a time.
         #   context_lm=True  -> decoder hidden states are classified into context tokens
         #   context_lm=False -> decoder outputs are regressed onto context input embeddings
@@ -590,6 +590,10 @@ class MetaLoRA(nn.Module):
         installed -- ``peft`` is in the ``[train]`` extra, so following the README
         install command used to flip the implementation silently.
         """
+        if not self.target_modules:
+            for p in qwen.parameters():
+                p.requires_grad = False
+            return qwen
         if use_peft:
             try:
                 from peft import LoraConfig, get_peft_model
