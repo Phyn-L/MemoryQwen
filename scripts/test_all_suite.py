@@ -21,11 +21,15 @@ def main():
     out = Path(args.output_root) / datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     out.mkdir(parents=True)
     manifest = []
-    for dataset, version in (('squad', None), ('ms_marco', 'ms_marco_v1_1'),
-                             ('ms_marco', 'ms_marco_v2_1'), ('hotpotqa', None), ('race', None)):
+    plans = [('squad', None, None),
+             ('ms_marco', 'ms_marco_v1_1', 'test'),
+             ('ms_marco', 'ms_marco_v1_1', 'validation'),
+             ('ms_marco', 'ms_marco_v2_1', 'validation'),
+             ('hotpotqa', None, None), ('race', None, None)]
+    for dataset, version, requested_split in plans:
         folder = root / dataset
         test = folder / 'test.jsonl'
-        split = 'test' if test.exists() and test.stat().st_size else 'validation'
+        split = requested_split or ('test' if test.exists() and test.stat().st_size else 'validation')
         path = folder / f'{split}.jsonl'
         if not path.exists() or not path.stat().st_size:
             raise FileNotFoundError(f'No nonempty test/validation: {folder}')
@@ -50,12 +54,12 @@ def main():
         for model in ('Qwen3-1.7B', 'Qwen3-8B'):
             commands.append((model, [sys.executable, '-m', 'utils.launcher', 'icl',
                 '--config', 'configs/icl/icl_suite_0shot.yaml', '--model', model,
-                '--bs', str(args.icl_bs), '--output-dir', str(out / name / model), *common]))
+                '--bs', str(args.icl_bs), '--output-dir', str(out / name / split / model), *common]))
         for label, cmd in commands:
             print(dataset, split, label, ' '.join(cmd), flush=True)
             status = 'planned'
             if not args.dry_run:
-                with (out / f'{name}-{label}.log').open('w') as log:
+                with (out / f'{name}-{split}-{label}.log').open('w') as log:
                     result = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT)
                 status = 'ok' if result.returncode == 0 else f'failed:{result.returncode}'
             manifest.append(dict(dataset=name, total=total, answered=answered, split=split, model=label, status=status, command=cmd))

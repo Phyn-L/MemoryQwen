@@ -59,6 +59,6 @@ bash scripts/test_all_suite.sh --machine h200
 bash scripts/test_all_suite.sh --machine 4090 --dry-run
 ```
 
-顺序评测 checkpoint、Qwen3-1.7B、Qwen3-8B；每个任务使用所有可评分 QA，不设采样上限。SQuAD v1/v2 按本地聚合文件合并评测；MS MARCO 按 source_dataset 分开。优先非空 test，否则 validation。无参考答案的 split 标记 unscorable，不自动替换成 validation。SQuAD 无答案题仍遵循当前 loader 被排除，因此不是官方完整 v2 无答案协议。memory 关闭长上下文删除，但仍按 checkpoint 的长度截断；ICL 默认 0-shot、8192 输入上限。两者输入预算不同，报告不能解释为相同上下文预算对照。
+顺序评测 checkpoint、Qwen3-1.7B、Qwen3-8B；每个任务使用所有可评分 QA，不设采样上限。SQuAD v1/v2 按本地聚合文件合并评测；MS MARCO v1.1 分别评测 test 与 validation；v2.1 使用 validation。其他数据集优先非空 test，否则 validation。无参考答案的 split 标记 unscorable，不自动替换成 validation。SQuAD 无答案题仍遵循当前 loader 被排除，因此不是官方完整 v2 无答案协议。memory 关闭长上下文删除，但仍按 checkpoint 的长度截断；ICL 默认 0-shot、8192 输入上限。两者输入预算不同，报告不能解释为相同上下文预算对照。
 
 默认 memory batch 1、ICL batch 2（每卡），自动使用可见 GPU；可设置 CUDA_VISIBLE_DEVICES 和 NUM_PROCESSES。输出在带时间戳的 outputs/all_suite 子目录，包括逐任务日志及 manifest.json。训练 checkpoint、模型缓存、数据不经 Git 同步，运行前需在机器上存在。
