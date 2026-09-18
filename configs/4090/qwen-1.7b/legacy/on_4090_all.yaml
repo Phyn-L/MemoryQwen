@@ -57,7 +57,7 @@ logging:
 memory:
   ae_lm_positions: 256
   ae_lm_weight: 1.0
-  allow_slot_attention: true
+  slot_attention: causal
   context_lm_positions: 64
   decoder_ffn_ratio: 2
   decoder_heads: 8

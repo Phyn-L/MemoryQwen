@@ -26,13 +26,32 @@ from src.model import build_block_causal_mask, build_continuation_mask  # noqa: 
 MIN = torch.finfo(torch.float32).min
 
 
+def test_all_slot_modes_preserve_context_and_qa_visibility():
+    for mode in ("isolated", "causal", "bidirectional"):
+        for c, q, a, m in _random_cases(count=30):
+            for r in (0, 2):
+                got = _allowed(build_block_causal_mask(c, m, q, a, torch.float32,
+                                                      slot_attention=mode, readout_length=r))[:, 0]
+                expected = _block_oracle(c, m, q, a, slot_attention=mode, readout_length=r)
+                assert torch.equal(got, expected)
+
+
+def test_slot_attention_rejects_invalid_values():
+    import pytest
+    c = torch.ones(1, 2, dtype=torch.bool)
+    empty = c[:, :0]
+    for mode in (True, False, "casual", "双向", "unknown", None):
+        with pytest.raises(ValueError, match="slot_attention"):
+            build_block_causal_mask(c, 3, empty, empty, torch.float32, slot_attention=mode)
+
+
 def _allowed(mask: torch.Tensor) -> torch.Tensor:
     """masked_fill writes finfo.min for blocked entries; everything else is exactly 0."""
     return mask == 0
 
 
 def _block_oracle(context_mask, memory_length, question_mask, answer_mask,
-                  allow_slot_attention=False, readout_length=0):
+                  slot_attention="isolated", readout_length=0):
     """Independent transcription of the block-mask rules. Returns [B, T, T] bool."""
     context_mask, question_mask, answer_mask = (
         context_mask.bool(), question_mask.bool(), answer_mask.bool()
@@ -54,8 +73,8 @@ def _block_oracle(context_mask, memory_length, question_mask, answer_mask,
         for k in range(memory_length):
             for j in range(context_len):
                 allowed[b, m0 + k, j] = bool(context_mask[b, j])
-            if allow_slot_attention:
-                for j in range(k + 1):
+            if slot_attention != "isolated":
+                for j in range(memory_length if slot_attention == "bidirectional" else k + 1):
                     allowed[b, m0 + k, m0 + j] = True
         for i in range(question_len):
             if question_mask[b, i]:
@@ -268,7 +287,7 @@ def test_only_memory_rows_can_be_fully_blocked_and_only_with_an_empty_context():
 
 
 def test_slot_attention_only_adds_causal_memory_edges():
-    """``allow_slot_attention`` changes memory rows and nothing else.
+    """``slot_attention`` changes memory rows and nothing else.
 
     Two things are pinned: the exact rule (slot k may read slots <= k), and that no
     other row's allowed set moves -- a leak into the question/answer rows would let the
@@ -280,7 +299,7 @@ def test_slot_attention_only_adds_causal_memory_edges():
         )
         on = build_block_causal_mask(
             context_mask, memory_length, question_mask, answer_mask, torch.float32,
-            allow_slot_attention=True,
+            slot_attention="causal",
         )
         got_off = _allowed(off)[0, 0]
         got_on = _allowed(on)[0, 0]
@@ -288,7 +307,7 @@ def test_slot_attention_only_adds_causal_memory_edges():
             context_mask, memory_length, question_mask, answer_mask
         )[0]), "the default mask is no longer the documented one"
         assert torch.equal(got_on, _block_oracle(
-            context_mask, memory_length, question_mask, answer_mask, allow_slot_attention=True
+            context_mask, memory_length, question_mask, answer_mask, slot_attention="causal"
         )[0]), "slot attention diverged from the documented rule"
 
         context_len = context_mask.size(1)

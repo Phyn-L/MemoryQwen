@@ -270,14 +270,14 @@ def build_block_causal_mask(
     question_mask: torch.Tensor,
     answer_mask: torch.Tensor,
     dtype: torch.dtype,
-    allow_slot_attention: bool = False,
+    slot_attention: str = "isolated",
     readout_length: int = 0,
 ) -> torch.Tensor:
     """Build an additive mask for ``[context, memory, question, readout, answer]``.
 
     Context positions attend only to valid, earlier context positions. Memory
-    positions attend only to valid context positions (never to another memory
-    token, unless ``allow_slot_attention``). Question positions attend to memory and
+    positions attend to valid context positions; slot-to-slot visibility is isolated,
+    causal (including self), or bidirectional (including self). Question positions attend to memory and
     earlier question positions, read-out positions (``readout_length`` > 0) attend to
     memory and the question, and answer positions attend to memory, question, read-out and
     earlier answer positions. Padding keys are blocked. Padded query rows keep a self
@@ -305,6 +305,8 @@ def build_block_causal_mask(
     other measured ~30% slower on the per-step hot path) and pinned together by
     ``tests/test_masks.py``.
     """
+    if slot_attention not in ("isolated", "causal", "bidirectional"):
+        raise ValueError("slot_attention must be isolated, causal, or bidirectional")
     context_mask = context_mask.bool(); question_mask = question_mask.bool(); answer_mask = answer_mask.bool()
     bsz, context_len = context_mask.shape
     question_len, answer_len = question_mask.shape[1], answer_mask.shape[1]
@@ -323,7 +325,7 @@ def build_block_causal_mask(
     allowed[:, :context_len, :context_len] = context_mask[:, None, :] & causal_context
     # memory rows: every valid context key, nothing else (no memory <-> memory)
     allowed[:, m0:q0, :context_len] = context_mask[:, None, :]
-    if allow_slot_attention:
+    if slot_attention == "causal":
         # Let each memory token read the earlier memory tokens too, so the M slots can
         # coordinate instead of being independent bottleneck channels. ICAE's memory
         # tokens are ordinary causal positions and do see each other. Costs no memory
@@ -332,6 +334,8 @@ def build_block_causal_mask(
             torch.ones(memory_length, memory_length, dtype=torch.bool, device=device)
         )
         allowed[:, m0:q0, m0:q0] = causal_memory
+    elif slot_attention == "bidirectional":
+        allowed[:, m0:q0, m0:q0] = True
     causal_qa = torch.tril(torch.ones(question_len + readout_length + answer_len, question_len + readout_length + answer_len, dtype=torch.bool, device=device))
     # question rows: all memory + causal over valid question keys
     allowed[:, q0:r0, m0:q0] = True
@@ -429,7 +433,7 @@ class MetaLoRA(nn.Module):
     ``StaticLoRALinear``/``MemoryDecoder`` cast on entry and exit, and the losses
     upcast before reducing.
     """
-    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, context_lm=False, use_peft=False, head_mode="linear", head_init="auto", init_mode="randn", init_seed=0, allow_slot_attention=False, ae_lm=False, readout_length=0, readout_layers=2, readout_heads=4, readout_hidden_size=256):
+    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, context_lm=False, use_peft=False, head_mode="linear", head_init="auto", init_mode="randn", init_seed=0, slot_attention="isolated", ae_lm=False, readout_length=0, readout_layers=2, readout_heads=4, readout_hidden_size=256):
         super().__init__()
         self.rank, self.alpha = rank, alpha
         self.target_modules = tuple(target_modules or ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"))
@@ -511,7 +515,9 @@ class MetaLoRA(nn.Module):
         # dtype and cannot be overwritten by the dtype casts above.
         self.init_mode = init_mode
         self.init_seed = int(init_seed)
-        self.allow_slot_attention = bool(allow_slot_attention)
+        if slot_attention not in ("isolated", "causal", "bidirectional"):
+            raise ValueError("slot_attention must be isolated, causal, or bidirectional")
+        self.slot_attention = slot_attention
         self._init_memory_tokens(init_mode, init_seed)
 
     def _init_memory_tokens(self, init_mode, init_seed):
@@ -727,7 +733,7 @@ class MetaLoRA(nn.Module):
         memory_inputs = self.memory_tokens.to(dtype=self.dtype).unsqueeze(0).expand(context_embeds.size(0), -1, -1)
         sequence = torch.cat([context_embeds, memory_inputs], dim=1)
         empty = context_mask.new_zeros(context_embeds.size(0), 0)
-        block_mask = build_block_causal_mask(context_mask, memory_inputs.size(1), empty, empty, sequence.dtype, allow_slot_attention=self.allow_slot_attention)
+        block_mask = build_block_causal_mask(context_mask, memory_inputs.size(1), empty, empty, sequence.dtype, slot_attention=self.slot_attention)
         # No logits are read from this pass, so skip the vocabulary head entirely.
         out = self._transformer_body(inputs_embeds=sequence, attention_mask=block_mask, output_hidden_states=True, use_cache=True, return_dict=True)
         states = out.hidden_states or (sequence, out.last_hidden_state)
@@ -1069,7 +1075,7 @@ def load_model(cfg):
         head_init=cfg.memory.head_init,
         init_mode=cfg.memory.init_mode,
         init_seed=cfg.memory.init_seed,
-        allow_slot_attention=cfg.memory.allow_slot_attention,
+        slot_attention=cfg.memory.slot_attention,
         ae_lm=cfg.memory.ae_lm_weight > 0,
         readout_length=cfg.memory.readout_length,
         readout_layers=cfg.memory.readout_layers,

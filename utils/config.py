@@ -120,10 +120,9 @@ class MemoryConfig:
     #   "vocab_mean":      the embedding mean plus the same randn * 0.02 noise.
     init_mode: str = "randn"
     init_seed: int = 0
-    # Let memory slot i attend to slots <= i (causal) inside the encoder pass. ICAE's
-    # memory tokens are ordinary causal positions and do see each other; the default
-    # keeps the historical "each slot reads the context only" behaviour.
-    allow_slot_attention: bool = False
+    # All slots read context. Among slots: isolated blocks all edges; causal allows
+    # j <= i; bidirectional allows all edges (both latter modes include self).
+    slot_attention: str = "isolated"
     # Memory-prefixed autoencoding objective (0 = off). The context is reconstructed
     # through the *frozen* backbone with the memory's per-layer KV as a prefix, i.e.
     # P(t_i | memory, t_<i), scored by the backbone's own (tied) unembedding. This is the
@@ -323,6 +322,8 @@ class TrainConfig:
 
     def validate(self) -> None:
         d, m = self.data, self.memory
+        if m.slot_attention not in ("isolated", "causal", "bidirectional"):
+            raise ValueError("memory.slot_attention must be isolated, causal, or bidirectional")
         if not 0 < d.max_context_tokens <= 2048:
             raise ValueError("data.max_context_tokens must be in (0, 2048]")
         if d.max_question_tokens <= 0 or d.max_answer_tokens <= 0:

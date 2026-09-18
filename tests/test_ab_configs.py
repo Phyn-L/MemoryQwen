@@ -30,7 +30,7 @@ OFF_CONFIG = REPO / "configs" / "4090" / "qwen-1.7b" / "reader" / "train_reader-
 SWITCHES = {
     "head_mode": ("tied", "linear"),
     "init_mode": ("token_embed", "randn"),
-    "allow_slot_attention": (True, False),
+    "slot_attention": ("causal", "isolated"),
     "ae_lm_weight": (1.0, 0.0),
     "distill_weight": (0.3, 0.0),
     "readout_length": (8, 0),

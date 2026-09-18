@@ -206,7 +206,7 @@ if not model_path.exists():
     )
 
 switch = {k: getattr(resolved.memory, k) for k in
-          ("head_mode", "init_mode", "allow_slot_attention", "ae_lm_weight", "distill_weight", "readout_length")}
+          ("head_mode", "init_mode", "slot_attention", "ae_lm_weight", "distill_weight", "readout_length")}
 print("=== 本次配置（继承自 " + env["BASE_CONFIG"] + "） ===")
 print(f"  backbone      : {model_path}")
 print(f"  ON 开关       : {switch}")

@@ -96,7 +96,7 @@ class VocabularyHead(nn.Module):
 
 ### C2｜memory token 初始化 + 放开 memory↔memory 因果注意力
 
-**改什么**：`src/model.py::MetaLoRA.__init__` 末尾按配置初始化 `memory_tokens`；`build_block_causal_mask` 增加 `allow_slot_attention` 参数；`utils/config.py` 增字段。
+**改什么**：`src/model.py::MetaLoRA.__init__` 末尾按配置初始化 `memory_tokens`；`build_block_causal_mask` 增加 `slot_attention` 参数；`utils/config.py` 增字段。
 
 **为什么**：
 1. `randn(M,H)*0.02` 的**量级**与 Qwen embedding init 相当，但**方向**是随机子空间，不在真实 token embedding 的流形上；用真实 embedding 初始化是零风险改进。
@@ -107,14 +107,14 @@ class VocabularyHead(nn.Module):
   - `token_embed`：用固定种子从 `[0, vocab)` 无放回抽 M 个 id，`memory_tokens.data.copy_(E[ids])`（转 trainable_dtype）。
   - `vocab_mean`：`E.mean(0) + 0.02*randn`。
   - 执行位置：`__init__` 末尾（`set_trainable_dtype` 之后），避免被 `self.to(dtype=qwen_dtype)` 冲掉。
-- `memory.allow_slot_attention: bool = False`：致 `build_block_causal_mask(..., allow_slot_attention=...)`，为 `allowed[:, m0:q0, m0:q0]` 填 causal tril（memory token 无 padding，恒为真实位）。
+- `memory.slot_attention: str = "isolated"`：致 `build_block_causal_mask(..., slot_attention=...)`，为 `allowed[:, m0:q0, m0:q0]` 填 causal tril（memory token 无 padding，恒为真实位）。
 - `build_continuation_mask` **不需要改**（它的行只有 question/answer，memory 是外部 KV），所以既有的"空 context 等价"测试继续成立。
 
 **怎么验证**：
-- `tests/test_masks.py` 增：`allow_slot_attention=False` 时新实现与旧实现**逐位相等**（把旧行为写成断言矩阵）；`True` 时 memory 行 i 只见 memory j≤i，且 question/answer 行与 False 时逐位相同。
+- `tests/test_masks.py` 增：`slot_attention="isolated"` 时新实现与旧实现**逐位相等**（把旧行为写成断言矩阵）；`causal` 时 memory 行 i 只见 memory j≤i，且 question/answer 行与 isolated 时逐位相同。
 - 新增 `tests/test_memory_init.py`：三种 init 的形状/dtype；`randn` 默认与旧实现（固定种子）逐位相等；`token_embed` 的值确实来自 `E`（逐行 `isin` 断言）；`vocab_mean` 的均值接近 `E.mean(0)`。
 - 全套 pytest。
-- 冒烟：M=64 下 `allow_slot_attention` 开/关各跑 200 步，比较 loss 与 trainable 参数量（应完全相同）。
+- 冒烟：M=64 下 `slot_attention` causal/isolated各跑 200 步，比较 loss 与 trainable 参数量（应完全相同）。
 
 **风险/回退**：`token_embed` 取到低频/特殊 token 可能不适配，属实验项；默认关闭即回退。
 

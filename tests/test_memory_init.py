@@ -9,7 +9,7 @@ What is asserted
 2. ``token_embed`` really draws distinct rows of the frozen token embedding, is
    reproducible from ``init_seed``, and survives the trainable-dtype cast.
 3. ``vocab_mean`` starts at the embedding mean with the documented 0.02 noise.
-4. ``allow_slot_attention`` defaults to False and is recorded on the model; the mask
+4. ``slot_attention`` defaults to isolated and is recorded on the model; the mask
    rule it turns on is pinned in ``tests/test_masks.py`` (independent oracle).
 """
 from __future__ import annotations
@@ -125,8 +125,28 @@ def test_unknown_init_mode_raises():
 
 
 def test_slot_attention_defaults_off_and_is_recorded():
-    assert _model().allow_slot_attention is False
-    assert _model(allow_slot_attention=True).allow_slot_attention is True
+    assert _model().slot_attention == "isolated"
+    for mode in ("isolated", "causal", "bidirectional"):
+        assert _model(slot_attention=mode).slot_attention == mode
+
+
+def test_slot_attention_config_and_model_reject_legacy_and_typo():
+    import pytest
+    from utils.config import TrainConfig
+    for mode in (True, False, "casual", None, "unknown"):
+        with pytest.raises(ValueError, match="slot_attention"):
+            _model(slot_attention=mode)
+        cfg = TrainConfig.from_dict({"memory": {"slot_attention": mode}})
+        with pytest.raises(ValueError, match="slot_attention"):
+            cfg.validate()
+    for mode in ("isolated", "causal", "bidirectional"):
+        cfg = TrainConfig.from_dict({"memory": {"slot_attention": mode}})
+        cfg.validate()
+        assert cfg.to_dict()["memory"]["slot_attention"] == mode
+    with pytest.raises(TypeError):
+        TrainConfig.from_dict({"memory": {"allow_slot_attention": True}})
+    with pytest.raises(TypeError):
+        _model(allow_slot_attention=True)
 
 
 if __name__ == "__main__":

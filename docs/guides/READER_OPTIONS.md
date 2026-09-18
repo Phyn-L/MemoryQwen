@@ -20,7 +20,7 @@
 | `head_init` | `auto` | tied 时 adapter 用 memory projection 初始化（步 0 logits 就有意义） | 无 | 保持 `auto` |
 | `init_mode` | `randn` | memory slot 初始化：`token_embed` 用真实 token embedding 行 | 无 | 打开 `token_embed` |
 | `init_seed` | `0` | `token_embed` 抽样种子（可复现） | 无 | 随意 |
-| `allow_slot_attention` | `false` | 槽 k 可看到槽 ≤ k（ICAE 的 memory token 是普通因果位置） | 无（只改 mask） | 打开，M 大时更值得 |
+| `slot_attention` | `isolated` | `isolated`：槽间不可见；`causal`：槽 k 看槽 ≤ k；`bidirectional`：槽间全部互见 | 无新增参数（只改 mask） | 因果/双向需分别消融 |
 | `ae_lm_weight` | `0.0` | memory 前缀自编码（冻结 backbone + teacher forcing，500x eq.1） | +1 次 context 长度前向（算力/激活约 +50~100%） | 打开 `1.0` |
 | `ae_lm_positions` | `0` | AE 打分的位置数；0 = 全部 | 位置越多越贵（tied 头单次应用 + 256 行分块） | 先 0，显存紧张写 256 |
 | `distill_weight` | `0.0` | 把 full-context 分布 KL 蒸馏进 memory 路径 | 每次打分位置一次词表头（teacher 免费） | 打开 `0.2~0.5` |
@@ -43,7 +43,7 @@
 memory:
   head_mode: tied            # A1
   init_mode: token_embed     # C2
-  allow_slot_attention: true # C2
+  slot_attention: causal # C2
   ae_lm_weight: 1.0          # B2
   ae_lm_positions: 0
   distill_weight: 0.0        # 先不开蒸馏
@@ -59,7 +59,7 @@ memory:
 memory:
   head_mode: tied
   init_mode: token_embed
-  allow_slot_attention: true
+  slot_attention: causal
   ae_lm_weight: 1.0
   ae_lm_positions: 0
   distill_weight: 0.3
@@ -83,12 +83,16 @@ memory:
   说明瓶颈在 256 维瓶颈本身，下一步该走 B2（冻结 backbone 当解码器）。
 - **坑**：tied 模式的 `state_dict` 与旧 checkpoint 不同（`context_lm_head.adapter.*`）；`linear` 仍是默认且参数名不变。
 
-### C2 `init_mode` / `allow_slot_attention`
+### C2 `init_mode` / `slot_attention`
 
 - **做什么**：`token_embed` 用真实 embedding 行初始化 M 个槽（`init_seed` 可复现）；`vocab_mean` 用 embedding 均值 + 0.02 噪声。
-  `allow_slot_attention` 让槽 k 在 encoder pass 里能看到槽 ≤ k。
+  `slot_attention` 只控制 encoder pass 的槽间可见性；所有模式均可读取有效 context。
+  `isolated` 禁止所有槽间 attention（包括自身）；`causal` 允许槽 k 读取槽 ≤ k；
+  `bidirectional` 允许每个槽读取全部槽（包括自身）。context、question、answer 的可见性不变。
+  配置仅接受这三个英文值，不兼容旧布尔字段或 `casual` 拼写。旧 checkpoint 内嵌配置需手动迁移后才能加载；参数形状不变。
+  `isolated` 与 `causal` 的前部 slots 不依赖后部 slots；`bidirectional` 不保证“完整编码后截断”与“短前缀编码”等价。
 - **为什么**：`randn*0.02` 的量级没问题，但方向是随机子空间；槽间可见性让 M 个大 slot 能分工（ICAE 的 memory token 就是普通因果位置）。
-- **判据**：前 500 步 memory-only 探针的 EM / nats 是否更快起来；`allow_slot_attention` 的收益在 M=64 时最可能出现。
+- **判据**：前 500 步 memory-only 探针的 EM / nats 是否更快起来；`slot_attention` 的收益在 M=64 时最可能出现。
 - **坑**：`token_embed` 抽到低频 token 属实验变量，必要时换 `init_seed`。
 
 ### B2 `ae_lm_weight` / `ae_lm_positions`
@@ -165,7 +169,7 @@ memory:
 
 ## 7. 回退
 
-把 `head_mode` 改回 `linear`、`init_mode` 改回 `randn`、`allow_slot_attention` 改回 `false`、
+把 `head_mode` 改回 `linear`、`init_mode` 改回 `randn`、`slot_attention` 改回 `isolated`、
 `ae_lm_weight`/`distill_weight`/`readout_length` 全部改回 `0`，即完全回到升级前的数值路径
 （`tests/` 里每个开关都有"关闭即等价"的回归测试）。
 

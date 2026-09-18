@@ -273,7 +273,7 @@
         <thead><tr><th>query ＼ key</th><th>context</th><th>memory</th><th>question</th><th>readout</th><th>answer</th></tr></thead>
         <tbody>
           <tr><td>context 行</td><td class="cond">仅更早的（因果）</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td></tr>
-          <tr><td>memory 行</td><td class="yes">✓ 全部有效</td><td class="cond">仅 slot_attention 打开时（因果）</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td></tr>
+          <tr><td>memory 行</td><td class="yes">✓ 全部有效</td><td class="cond">isolated：不可见；causal：因果；bidirectional：双向</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td></tr>
           <tr><td>question 行</td><td class="no">✗</td><td class="yes">✓ 全部</td><td class="cond">因果</td><td class="no">✗</td><td class="no">✗</td></tr>
           <tr><td>readout 行</td><td class="no">✗</td><td class="yes">✓ 全部</td><td class="yes">✓ 全部</td><td class="cond">因果</td><td class="no">✗</td></tr>
           <tr><td>answer 行</td><td class="no">✗</td><td class="yes">✓ 全部</td><td class="yes">✓ 全部</td><td class="yes">✓ 全部</td><td class="cond">因果</td></tr>
@@ -306,7 +306,7 @@
       </tr>
       <tr>
         <td><span class="tag t-c2">C2</span>初始化 + 槽间注意力</td>
-        <td class="mono">memory.init_mode<br>memory.allow_slot_attention</td><td class="mono">token_embed<br>true</td><td class="mono">randn<br>false</td>
+        <td class="mono">memory.init_mode<br>memory.slot_attention</td><td class="mono">token_embed<br>causal</td><td class="mono">randn<br>isolated</td>
         <td>M 个槽从词表里真实 token 的 embedding 取初始值（而不是 randn×0.02 的随机方向）；并且允许 memory 行互相注意（OFF 时槽之间完全独立）</td>
       </tr>
       <tr>
@@ -422,7 +422,7 @@ OFF 臂：ae_lm_weight=0, distill_weight=0，只剩 qa + 探针</pre>
       <tbody>
         <tr><td class="mono">memory.head_mode</td><td class="mono">tied</td><td class="mono">linear</td><td rowspan="6">六个 reader 开关，其余全部相同</td></tr>
         <tr><td class="mono">memory.init_mode</td><td class="mono">token_embed</td><td class="mono">randn</td></tr>
-        <tr><td class="mono">memory.allow_slot_attention</td><td class="mono">true</td><td class="mono">false</td></tr>
+        <tr><td class="mono">memory.slot_attention</td><td class="mono">causal</td><td class="mono">isolated</td></tr>
         <tr><td class="mono">memory.ae_lm_weight</td><td class="mono">1.0</td><td class="mono">0.0</td></tr>
         <tr><td class="mono">memory.distill_weight</td><td class="mono">0.3</td><td class="mono">0.0</td></tr>
         <tr><td class="mono">memory.readout_length</td><td class="mono">8</td><td class="mono">0</td></tr>
