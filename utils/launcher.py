@@ -37,7 +37,7 @@ def main():
     if mode.mode == 'train':
         os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
     if mode.mode == 'icl' and not any(a == '--config' or a.startswith('--config=') for a in args):
-        args = ['--config', 'configs/icl/icl_squad_4shot.yaml', *args]
+        args = ['--config', 'configs/4090/icl/icl_squad_4shot.yaml', *args]
     if any(a in ('-h', '--help') for a in args):
         count = 0
     else:

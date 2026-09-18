@@ -435,7 +435,7 @@ OFF 臂：ae_lm_weight=0, distill_weight=0，只剩 qa + 探针</pre>
 batch 8 × 4 进程 = 全局 32 → 7,890 步/epoch      # 设计稿
 batch 12 × 8 进程 = 全局 96 → 2,630 步/epoch     # 你现在改成的版本
 batch 8 × 8 进程 = 全局 64 → 3,945 步/epoch</pre>
-    <p class="muted">训练脚本启动时会打印一行 <code>schedule: steps=… batch=AxB ranks=… warmup=… teacher_forced_every=… autoregressive_every=… save_every_steps=… log_every=…</code>，
+    <p class="muted">训练脚本启动时会打印一行 <code>schedule: steps=… batch=AxB ranks=… warmup=… teacher_forced_every=… autoregressive_every=… checkpoint_every=… log_every=…</code>，
     那是最快的"我到底在跑什么"确认方式。改 batch/进程数必须重算 cadence（或在测试里更新期望）。</p>
   </div>
 </section>

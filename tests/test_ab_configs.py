@@ -21,8 +21,8 @@ sys.path.insert(0, str(REPO))
 
 from utils.config import TrainConfig  # noqa: E402
 
-ON_CONFIG = REPO / "configs" / "qwen-1.7b" / "ab_h200_on.yaml"
-OFF_CONFIG = REPO / "configs" / "qwen-1.7b" / "ab_h200_off.yaml"
+ON_CONFIG = REPO / "configs" / "4090" / "qwen-1.7b" / "reader" / "train_reader-on_ctx1024_m64.yaml"
+OFF_CONFIG = REPO / "configs" / "4090" / "qwen-1.7b" / "reader" / "train_reader-off_ctx1024_m64.yaml"
 
 # The switches the ON arm turns on, with the value the OFF arm must carry. Everything else
 # -- including checkpoint.output_dir, which only exists so the two runs do not overwrite
@@ -47,7 +47,6 @@ SCHEDULE = {
     "scheduler.warmup_steps": 200,
     "evaluation.teacher_forced_every": 200,
     "evaluation.autoregressive_every": 400,
-    "checkpoint.save_every_steps": 400,
     "logging.log_every": 25,
     "data.max_context_tokens": 1024,
     "data.max_answer_tokens": 64,
@@ -107,7 +106,7 @@ def test_every_cadence_is_written_against_the_single_epoch_budget():
     # useful number of times inside it.
     assert STEPS_PER_EPOCH // SCHEDULE["evaluation.teacher_forced_every"] >= 10
     assert STEPS_PER_EPOCH // SCHEDULE["evaluation.autoregressive_every"] >= 5
-    assert STEPS_PER_EPOCH // SCHEDULE["checkpoint.save_every_steps"] >= 3
+    assert STEPS_PER_EPOCH // SCHEDULE["evaluation.autoregressive_every"] >= 3
     assert SCHEDULE["scheduler.warmup_steps"] < STEPS_PER_EPOCH // 10
 
 

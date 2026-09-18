@@ -141,7 +141,7 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/qwen-1.7b/train_baseline.yaml")
+    parser.add_argument("--config", default="configs/4090/qwen-1.7b/baseline/train_baseline.yaml")
     parser.add_argument(
         "--machine",
         choices=machine_names(),
@@ -253,15 +253,12 @@ def main() -> None:
             f"warmup={cfg.scheduler.warmup_steps} "
             f"teacher_forced_every={cfg.evaluation.teacher_forced_every} "
             f"autoregressive_every={cfg.evaluation.autoregressive_every} "
-            f"save_every_steps={cfg.checkpoint.save_every_steps} "
+            f"checkpoint_every={cfg.evaluation.autoregressive_every} "
             f"log_every={cfg.logging.log_every} "
             f"output_dir={cfg.checkpoint.output_dir}",
             flush=True,
         )
-    manager = CheckpointManager(
-        cfg.checkpoint.output_dir,
-        cfg.checkpoint.save_every_steps,
-    )
+    manager = CheckpointManager(cfg.checkpoint.output_dir)
 
     step = 0
     if args.resume:
@@ -502,7 +499,7 @@ def main() -> None:
                 # driver costs a fraction of a second once per evaluation interval, and only
                 # on the steps that actually evaluated.
                 torch.cuda.empty_cache()
-            if step % cfg.checkpoint.save_every_steps == 0 and is_main:
+            if metrics is not None and is_main:
                 checkpoint_model = (
                     accelerator.unwrap_model(model)
                     if accelerator is not None
@@ -514,6 +511,7 @@ def main() -> None:
                     scheduler,
                     step,
                     cfg.to_dict(),
+                    validation_f1=metrics["f1"],
                     wandb_run_id=getattr(run, "id", None),
                     world_size=1 if accelerator is None else accelerator.num_processes,
                 )

@@ -27,7 +27,7 @@ sys.path.insert(0, str(REPO))
 from utils.config import LoggingConfig, TrainConfig  # noqa: E402
 
 TRAIN_PY = REPO / "scripts" / "train.py"
-CONFIG = REPO / "configs" / "qwen-1.7b" / "ab_h200_on.yaml"
+CONFIG = REPO / "configs" / "4090" / "qwen-1.7b" / "reader" / "train_reader-on_ctx1024_m64.yaml"
 STEPS_PER_EPOCH = 7890
 
 
@@ -79,7 +79,7 @@ def test_the_loop_takes_its_cadences_from_the_config():
 def test_the_loop_echoes_the_resolved_schedule():
     source = _train_source()
     assert '"schedule: "' in source
-    for field in ("steps=", "ranks=", "warmup=", "save_every_steps=", "log_every="):
+    for field in ("steps=", "ranks=", "warmup=", "checkpoint_every=", "log_every="):
         assert field in source, field
 
 

@@ -33,7 +33,7 @@ from utils.machines import (  # noqa: E402
 )
 
 REPO = Path(__file__).resolve().parent.parent
-CONFIG = REPO / "configs" / "qwen-1.7b" / "train.yaml"
+CONFIG = REPO / "configs" / "4090" / "qwen-1.7b" / "baseline" / "train_baseline.yaml"
 MACHINE_VARIABLES = ("MACHINE", "MODEL_ROOT", "DATA_ROOT", "WANDB_MODE")
 
 

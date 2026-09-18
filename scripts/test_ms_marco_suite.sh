@@ -14,12 +14,12 @@ for VERSION in ms_marco_v1_1 ms_marco_v2_1; do
   for SPLIT in "${SPLITS[@]}"; do
   SUB="$OUT_ROOT/$VERSION/$SPLIT"; mkdir -p "$SUB"
   python -m utils.launcher test --machine "$MACHINE" --ckpt "$CKPT" --datasets ms_marco --source-version "$VERSION" --split "$SPLIT" --bs "$MEMORY_BS" --qa-batch-size 4
-  CONFIG="configs/icl/icl_squad_${SHOTS}shot.yaml"
+  CONFIG="configs/4090/icl/icl_squad_${SHOTS}shot.yaml"
   for MODEL in Qwen3-1.7B Qwen3-8B; do LABEL=$(echo "$MODEL" | tr "[:upper:]" "[:lower:]" | tr -d "-"); python -m utils.launcher icl --machine "$MACHINE" --model "$MODEL" --config "$CONFIG" --datasets ms_marco --source-version "$VERSION" --split "$SPLIT" --bs "$ICL_BS" --output-dir "$SUB/$LABEL-${SHOTS}shot"; done
   done
 done
 exit 0
 python -m utils.launcher test --machine "$MACHINE" --ckpt "$CKPT" --datasets ms_marco --split test --bs "$MEMORY_BS" --qa-batch-size 4
-CONFIG="configs/icl/icl_squad_${SHOTS}shot.yaml"
+CONFIG="configs/4090/icl/icl_squad_${SHOTS}shot.yaml"
 for MODEL in Qwen3-1.7B Qwen3-8B; do LABEL=$(echo "$MODEL" | tr '[:upper:]' '[:lower:]' | tr -d '-'); python -m utils.launcher icl --machine "$MACHINE" --model "$MODEL" --config "$CONFIG" --datasets ms_marco --split test --bs "$ICL_BS" --output-dir "$OUT_ROOT/$LABEL-${SHOTS}shot"; done
 echo "Reports contain count, em, f1, rouge_l. v1.1 has 9,650 QA; v2.1 has 101,092 rows but currently empty answers."

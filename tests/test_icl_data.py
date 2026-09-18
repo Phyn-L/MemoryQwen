@@ -20,7 +20,7 @@ from src.data import AggregatedContextDataset  # noqa: E402
 from src.icl_baseline import iter_examples, load_jsonl  # noqa: E402
 from utils.config import TrainConfig  # noqa: E402
 
-CONFIG = REPO / "configs" / "qwen-1.7b" / "train.yaml"
+CONFIG = REPO / "configs" / "4090" / "qwen-1.7b" / "baseline" / "train_baseline.yaml"
 
 
 def _key(context: str, question: str) -> tuple[str, str]:

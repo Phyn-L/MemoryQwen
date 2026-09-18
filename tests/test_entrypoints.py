@@ -24,7 +24,7 @@ def script(name):
 
 
 def test_checkpoint_preserves_architecture_and_rebases_machine(tmp_path):
-    cfg = TrainConfig.from_file(ROOT / 'configs/qwen-1.7b/train_reader-on_ctx1024_m32.yaml', machine='4090')
+    cfg = TrainConfig.from_file(ROOT / 'configs/4090/qwen-1.7b/memory_length/train_reader-on_ctx1024_m32.yaml', machine='4090')
     checkpoint = tmp_path / 'last.pt'
     torch.save({'config': cfg.to_dict()}, checkpoint)
     actual = script('test').evaluation_config(checkpoint, machine='h200')
@@ -32,7 +32,7 @@ def test_checkpoint_preserves_architecture_and_rebases_machine(tmp_path):
     assert actual.model.name_or_path.endswith(cfg.model.name_or_path.split('/snapshots/')[1])
     assert actual.model.name_or_path.startswith(MACHINES['h200']['MODEL_ROOT'])
     assert actual.data.root == MACHINES['h200']['DATA_ROOT']
-    preset = ROOT / 'configs/evaluation/test_hotpotqa.yaml'
+    preset = ROOT / 'configs/4090/evaluation/test_hotpotqa.yaml'
     assert script('test').evaluation_config(checkpoint, preset, '4090').memory.memory_length == 32
 
 
@@ -62,14 +62,14 @@ def test_model_resolution_uses_ref_and_rejects_ambiguous_cache(tmp_path):
 def test_icl_yaml_cli_precedence_and_hotpot_paths(tmp_path):
     model = tmp_path / 'model'; model.mkdir(); (model / 'config.json').write_text('{}')
     module = script('test_icl_baseline')
-    args = module.parse_args(['--config', str(ROOT / 'configs/icl/icl_hotpotqa_4shot.yaml'),
+    args = module.parse_args(['--config', str(ROOT / 'configs/4090/icl/icl_hotpotqa_4shot.yaml'),
                               '--machine', 'h200', '--model', str(model), '--bs', '7'])
     assert args.batch_size == 7 and args.num_shots == 4
     assert args.datasets == ['hotpotqa'] and args.max_new_tokens == 32
     assert module.dataset_paths(args)['hotpotqa'][0] == MACHINES['h200']['DATA_ROOT'] + '/hotpotqa/validation.jsonl'
     assert args.model == str(model)
     with pytest.raises(SystemExit):
-        module.parse_args(['--config', str(ROOT / 'configs/icl/icl_hotpotqa_4shot.yaml'), '--bs', '0'])
+        module.parse_args(['--config', str(ROOT / 'configs/4090/icl/icl_hotpotqa_4shot.yaml'), '--bs', '0'])
 
 
 def test_hotpot_aggregated_records_shared_by_memory_and_icl(tmp_path):
@@ -102,12 +102,12 @@ def test_launch_uses_current_interpreter_and_gpu_count(monkeypatch):
 
 
 def test_presets_valid_and_legacy_aliases_equivalent():
-    for p in ROOT.glob('configs/qwen-*/*.yaml'):
+    for p in ROOT.glob('configs/[4h]*/qwen-*/*/*.yaml'):
         cfg = TrainConfig.from_file(p)
         cfg.validate()
         if p.is_symlink():
             assert cfg.to_dict() == TrainConfig.from_file(p.resolve()).to_dict()
-    for p in ROOT.glob('configs/icl/*.yaml'):
+    for p in ROOT.glob('configs/4090/icl/*.yaml'):
         assert load_icl_defaults(p)['batch_size'] > 0
 
 
@@ -126,3 +126,18 @@ def test_icl_machine_defaults_preserve_explicit_model(monkeypatch):
     explicit = module.DEFAULT_MODEL
     args = module.parse_args(['--machine', 'h200', '--model', explicit])
     assert args.model == explicit
+
+
+def test_historical_training_paths_resolve():
+    import json
+    aliases = json.loads((ROOT / 'utils/config_paths.json').read_text())
+    assert aliases
+    for old, new in aliases.items():
+        assert (ROOT / new).is_file()
+        if '/evaluation/' in old:
+            from utils.config_paths import resolve_config_path
+            assert resolve_config_path(ROOT / old).read_bytes() == (ROOT / new).read_bytes()
+        elif '/icl/' in old:
+            assert load_icl_defaults(ROOT / old) == load_icl_defaults(ROOT / new)
+        else:
+            assert TrainConfig.from_file(ROOT / old).to_dict() == TrainConfig.from_file(ROOT / new).to_dict()

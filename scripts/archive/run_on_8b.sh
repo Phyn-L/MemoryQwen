@@ -31,7 +31,7 @@
 #   AE_POSITIONS=128    AE / context-LM / distill 的采样位置数（显存紧张就降到 64）
 #   TRAIN_DATASETS=all  训练集（"all" 或逗号分隔，如 "squad,coqa,drop"）
 #   WORK=outputs/on_8b  生成的配置 + checkpoint 的父目录
-#   BASE_CONFIG=configs/qwen-1.7b/ab_h200_on.yaml   逐字段继承的 ON 臂配置
+#   BASE_CONFIG=configs/4090/qwen-1.7b/reader/train_reader-on_ctx1024_m64.yaml   逐字段继承的 ON 臂配置
 #   MODEL=...           8B 快照（默认 ${MODEL_ROOT}/models--Qwen--Qwen3-8B/snapshots/b968826d...）
 #   SMOKE=1 DRYRUN=1 RESUME=1
 #
@@ -68,7 +68,7 @@ M="${M:-64}"
 AE_POSITIONS="${AE_POSITIONS:-128}"
 TRAIN_DATASETS="${TRAIN_DATASETS:-all}"
 WORK="${WORK:-outputs/on_8b}"
-BASE_CONFIG="${BASE_CONFIG:-configs/qwen-1.7b/ab_h200_on.yaml}"
+BASE_CONFIG="${BASE_CONFIG:-configs/4090/qwen-1.7b/reader/train_reader-on_ctx1024_m64.yaml}"
 MODEL="${MODEL:-}"
 SMOKE="${SMOKE:-0}"
 DRYRUN="${DRYRUN:-0}"
@@ -135,7 +135,7 @@ mkdir -p "$WORK" logs
 GEN_CONFIG="$WORK/train.yaml"
 
 # 生成配置：从 ON 臂逐字段继承，只改 backbone / 形状 / 显存 / 规模这些字段，并按
-# "1 epoch 的步数" 推导 cadence（warmup 5%、TF 20 点、AR 10 点、save 约 8 个点）。
+# "1 epoch 的步数" 推导 cadence（warmup 5%、TF 20 点、AR 10 点、checkpoint 跟随 AR）。
 python - "$ROOT/$BASE_CONFIG" "$GEN_CONFIG" <<'PY'
 import math, os, sys
 from pathlib import Path
@@ -161,9 +161,9 @@ def nice(x: float) -> int:
     return int(round(x / 1000.0)) * 1000
 
 if smoke:
-    warmup, tf, ar, save = 1, steps, steps, steps
+    warmup, tf, ar = 1, steps, steps
 else:
-    warmup, tf, ar, save = nice(steps * 0.05), nice(steps / 20), nice(steps / 10), nice(steps / 8)
+    warmup, tf, ar = nice(steps * 0.05), nice(steps / 20), nice(steps / 10)
 
 datasets = env["TRAIN_DATASETS"].strip()
 cfg["data"]["train_datasets"] = datasets if datasets == "all" else [d.strip() for d in datasets.split(",") if d.strip()]
@@ -177,7 +177,6 @@ cfg["training"]["batch_size"] = batch
 cfg["scheduler"]["warmup_steps"] = warmup
 cfg["evaluation"]["teacher_forced_every"] = tf
 cfg["evaluation"]["autoregressive_every"] = ar
-cfg["checkpoint"]["save_every_steps"] = save
 cfg["checkpoint"]["output_dir"] = env["WORK"]
 cfg["logging"]["log_every"] = 25
 if env["MODEL"]:
@@ -219,7 +218,7 @@ print(f"  采样位置      : ae/context_lm/distill = {resolved.memory.ae_lm_pos
 print(f"  数据          : train_datasets={resolved.data.train_datasets} train_max_samples={resolved.data.train_max_samples}")
 print(f"  规模(估算)    : contexts={contexts} global batch={batch}x{ranks}={batch * ranks}"
       f" -> 1 epoch = {steps} 步")
-print(f"  cadence       : warmup={warmup} TF={tf} AR={ar} save={save} log={resolved.logging.log_every}")
+print(f"  cadence       : warmup={warmup} TF={tf} AR={ar} checkpoint={ar} log={resolved.logging.log_every}")
 print(f"  评测口径      : val_max_samples={resolved.data.validation_max_samples}"
       f" AR_max_qa={resolved.evaluation.autoregressive_max_qa} max_new_tokens={resolved.evaluation.max_new_tokens}")
 print(f"  输出          : {resolved.checkpoint.output_dir}/Qwen8B_<时间戳>/")

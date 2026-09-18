@@ -36,7 +36,8 @@ class ICLInference:
 
 
 def load_icl_defaults(path, machine=None):
-    raw = yaml.safe_load(Path(path).read_text())
+    from utils.config_paths import resolve_config_path
+    raw = yaml.safe_load(resolve_config_path(path).read_text())
     if not isinstance(raw, dict):
         raise ValueError('ICL config must be a mapping')
     unknown = set(raw) - {'model', 'data', 'inference', 'output_dir', 'machine'}

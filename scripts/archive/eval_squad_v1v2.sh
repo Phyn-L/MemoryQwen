@@ -20,7 +20,7 @@
 #   CHECKPOINT=outputs/Qwen1.7B_20260917_213648.pt bash scripts/archive/eval_squad_v1v2.sh
 #   CHECKPOINT=... SAMPLE_CAP=8 bash scripts/archive/eval_squad_v1v2.sh      # quick plumbing check
 #   CHECKPOINT=... DRYRUN=1 bash scripts/archive/eval_squad_v1v2.sh          # print the plan only
-#   CHECKPOINT=... CONFIG=configs/qwen-1.7b/train.yaml bash ...      # override the derived config
+#   CHECKPOINT=... CONFIG=configs/4090/qwen-1.7b/baseline/train_baseline.yaml bash ...      # override the derived config
 #   CHECKPOINT=... CUDA_VISIBLE_DEVICES=1 bash ...
 set -euo pipefail
 

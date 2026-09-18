@@ -378,8 +378,8 @@ memory:
   context_lm_positions: 256         # 0 scores every context position
 ```
 
-`configs/qwen-1.7b/train.yaml`, `configs/qwen-4b/train.yaml` and
-`configs/qwen-8b/train.yaml` all select `context_lm`. Changing the single
+`configs/4090/qwen-1.7b/baseline/train_baseline.yaml`, `configs/4090/qwen-4b/baseline/train_baseline.yaml` and
+`configs/4090/qwen-8b/baseline/train_baseline.yaml` all select `context_lm`. Changing the single
 `reconstruction_loss` line back to `mse_cosine` restores the previous behaviour; the
 checkpoint format is identical either way apart from the head, and `load_state_dict`
 runs with `strict=False`, so an old checkpoint still loads (its `output_projection`

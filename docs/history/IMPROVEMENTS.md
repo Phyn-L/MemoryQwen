@@ -191,7 +191,7 @@ batch 内最长的答案 —— 这些样本的最后一个答案 token 被 EOS 
 - `src/model.py:255-258`：prefix 编码后**只保留 memory 位置的 KV**（`keys[..., context_len:, :]`），
   continuation 的 attention 掩码（`build_continuation_mask`）**不允许 question/answer 看到任何 context token**。
 - memory 在 **`encode_context_prefix`（只看 context）时就固定下来**，question 还没出现。
-  `configs/qwen-1.7b/train.yaml:9` `memory_length: 8`。
+  `configs/4090/qwen-1.7b/baseline/train_baseline.yaml:9` `memory_length: 8`。
 - 训练集长度分布（`outputs/Qwen1.7B/sortish_lengths.json`，255143 个 context）：
   均值 177 token，p50 108，p90 433，max 2048。
 

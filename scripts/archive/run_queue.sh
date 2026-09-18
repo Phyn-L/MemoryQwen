@@ -10,8 +10,8 @@
 # 阶段：
 #   8b       Qwen3-8B + ON 开关（scripts/archive/run_on_8b.sh，默认 batch 4 x 8 卡 = global 32 / 7890 步）
 #   eval8b   对 outputs/on_8b 下最新的 last.pt 跑全集 SQuAD v1/v2（4 卡）
-#   m32      ctx1024/M=32（32:1）ON 单臂：configs/qwen-1.7b/ab_h200_on_m32.yaml
-#   m16      ctx1024/M=16（64:1）ON 单臂：configs/qwen-1.7b/ab_h200_on_m16.yaml
+#   m32      ctx1024/M=32（32:1）ON 单臂：configs/4090/qwen-1.7b/memory_length/train_reader-on_ctx1024_m32.yaml
+#   m16      ctx1024/M=16（64:1）ON 单臂：configs/4090/qwen-1.7b/memory_length/train_reader-on_ctx1024_m16.yaml
 #
 # 环境变量（都会透传给对应阶段）：
 #   MACHINE=h200   NUM_PROCESSES=8   BATCH_SIZE=4（只影响 8b 阶段）  RESUME=1  SMOKE=1
@@ -53,8 +53,8 @@ valid_stage() {
 }
 stage_config() {
   case "$1" in
-    m32) echo "configs/qwen-1.7b/ab_h200_on_m32.yaml" ;;
-    m16) echo "configs/qwen-1.7b/ab_h200_on_m16.yaml" ;;
+    m32) echo "configs/4090/qwen-1.7b/memory_length/train_reader-on_ctx1024_m32.yaml" ;;
+    m16) echo "configs/4090/qwen-1.7b/memory_length/train_reader-on_ctx1024_m16.yaml" ;;
   esac
 }
 stage_outdir() {

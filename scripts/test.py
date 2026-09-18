@@ -4,6 +4,7 @@ import argparse
 import json
 import yaml
 from pathlib import Path
+from utils.config_paths import resolve_config_path
 import torch
 from torch.utils.data import DataLoader
 
@@ -18,7 +19,7 @@ from utils.model_paths import relocate_saved_paths
 
 def evaluation_config(checkpoint, config=None, machine=None):
     if config:
-        raw_config = yaml.safe_load(Path(config).read_text())
+        raw_config = yaml.safe_load(resolve_config_path(config).read_text())
         if 'test' not in raw_config:
             return TrainConfig.from_file(config, machine=machine)
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
@@ -72,7 +73,7 @@ def main():
     bootstrap.add_argument("--config")
     preliminary, _ = bootstrap.parse_known_args()
     if preliminary.config:
-        raw = yaml.safe_load(Path(preliminary.config).read_text())
+        raw = yaml.safe_load(resolve_config_path(preliminary.config).read_text())
         if 'test' in raw:
             if set(raw) - {'test', 'machine'}:
                 parser.error("Test YAML supports only test and machine sections")

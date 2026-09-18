@@ -10,9 +10,9 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 ## 1. train.sh
 
 ```bash
-bash scripts/train.sh --machine 4090 --config configs/qwen-1.7b/train_baseline.yaml
-bash scripts/train.sh --machine h200 --config configs/qwen-1.7b/train_reader-on_ctx1024_m32.yaml
-bash scripts/train.sh --machine h200 --config configs/qwen-8b/train_reader-on_ctx1024_m64.yaml --resume outputs/<run>/last.pt
+bash scripts/train.sh --machine 4090 --config configs/4090/qwen-1.7b/baseline/train_baseline.yaml
+bash scripts/train.sh --machine h200 --config configs/4090/qwen-1.7b/memory_length/train_reader-on_ctx1024_m32.yaml
+bash scripts/train.sh --machine h200 --config configs/4090/qwen-8b/reader/train_reader-on_ctx1024_m64.yaml --resume outputs/<run>/last.pt
 ```
 
 学习率、batch size、数据集、memory 大小、reader 开关、dtype、调度、日志和 checkpoint 路径均来自完整训练 YAML。恢复训练必须使用与原运行相符的配置。`<run>` 替换为实际路径。
@@ -23,7 +23,7 @@ bash scripts/train.sh --machine h200 --config configs/qwen-8b/train_reader-on_ct
 
 ```bash
 bash scripts/test.sh --machine 4090 --ckpt outputs/<run>/last.pt --datasets hotpotqa --bs 2
-bash scripts/test.sh --machine h200 --ckpt outputs/<run>/last.pt --config configs/evaluation/test_hotpotqa.yaml --bs 4
+bash scripts/test.sh --machine h200 --ckpt outputs/<run>/last.pt --config configs/4090/evaluation/test_hotpotqa.yaml --bs 4
 bash scripts/test.sh --machine 4090 --ckpt outputs/<run>/last.pt --datasets squad hotpotqa --split validation --bs 2
 ```
 
@@ -36,12 +36,12 @@ bash scripts/test.sh --machine 4090 --ckpt outputs/<run>/last.pt --datasets squa
 ## 3. icl_baseline_test.sh
 
 ```bash
-bash scripts/icl_baseline_test.sh --machine 4090 --model Qwen3-1.7B --config configs/icl/icl_hotpotqa_4shot.yaml --bs 2
-bash scripts/icl_baseline_test.sh --machine h200 --model Qwen3-8B --datasets hotpotqa --config configs/icl/icl_hotpotqa_0shot.yaml --bs 4
-bash scripts/icl_baseline_test.sh --machine 4090 --model Qwen3-4B-Instruct-2507 --config configs/icl/icl_squad_4shot.yaml
+bash scripts/icl_baseline_test.sh --machine 4090 --model Qwen3-1.7B --config configs/4090/icl/icl_hotpotqa_4shot.yaml --bs 2
+bash scripts/icl_baseline_test.sh --machine h200 --model Qwen3-8B --datasets hotpotqa --config configs/4090/icl/icl_hotpotqa_0shot.yaml --bs 4
+bash scripts/icl_baseline_test.sh --machine 4090 --model Qwen3-4B-Instruct-2507 --config configs/4090/icl/icl_squad_4shot.yaml
 ```
 
-`icl_test.sh` 是同一入口的简短别名。未传 `--config` 时使用 `configs/icl/icl_squad_4shot.yaml`。shot 数、生成长度、输入长度、dtype、seed、chat template、数据 split 和输出目录均写入 ICL YAML；模型、数据集和 batch size 可由 CLI 覆盖。ICL 的 bs 是每 GPU 的 QA 数。
+`icl_test.sh` 是同一入口的简短别名。未传 `--config` 时使用 `configs/4090/icl/icl_squad_4shot.yaml`。shot 数、生成长度、输入长度、dtype、seed、chat template、数据 split 和输出目录均写入 ICL YAML；模型、数据集和 batch size 可由 CLI 覆盖。ICL 的 bs 是每 GPU 的 QA 数。
 
 模型名在当前机器 MODEL_ROOT 中匹配普通模型目录或 Hugging Face `models--Qwen--<模型名>` 缓存目录；优先 `refs/main`，无 ref 时要求仅有一个 snapshot。支持本地已有的 Qwen family 名称（大小写不敏感）和完整路径，不自动下载、不任意选择多个 revision 中的一个。实际架构兼容性仍取决于安装的 transformers 版本。
 

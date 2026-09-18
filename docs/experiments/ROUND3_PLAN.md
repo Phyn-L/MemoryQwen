@@ -57,15 +57,15 @@
 
 | 跑 | 配置 | 压缩比 | 预期墙钟 |
 | --- | --- | --- | --- |
-| R3-1 | `configs/qwen-1.7b/ab_h200_on_m32.yaml` | 32:1 | ~1.1 h |
-| R3-2 | `configs/qwen-1.7b/ab_h200_on_m16.yaml` | 64:1 | ~1.0 h |
+| R3-1 | `configs/4090/qwen-1.7b/memory_length/train_reader-on_ctx1024_m32.yaml` | 32:1 | ~1.1 h |
+| R3-2 | `configs/4090/qwen-1.7b/memory_length/train_reader-on_ctx1024_m16.yaml` | 64:1 | ~1.0 h |
 
 ```bash
 cd /home/lijie/proj2/xmu/lz/MemoryQwen
 export PATH=/home/lijie/proj2/.conda/envs/shine/bin:$PATH   # python 与 accelerate 必须同环境
-CONFIG=configs/qwen-1.7b/ab_h200_on_m32.yaml NUM_PROCESSES=8 bash scripts/train.sh
+CONFIG=configs/4090/qwen-1.7b/memory_length/train_reader-on_ctx1024_m32.yaml NUM_PROCESSES=8 bash scripts/train.sh
 # 跑完接着第二条（也可以在另一个 tmux 窗口里排队）：
-CONFIG=configs/qwen-1.7b/ab_h200_on_m16.yaml NUM_PROCESSES=8 bash scripts/train.sh
+CONFIG=configs/4090/qwen-1.7b/memory_length/train_reader-on_ctx1024_m16.yaml NUM_PROCESSES=8 bash scripts/train.sh
 ```
 
 跑起来先看两行：`schedule: machine=h200 steps=3945 batch=8x8 ranks=8 ...`（不对就停），
@@ -86,13 +86,13 @@ OFF 值即可，~1.0 h）→ 得到"开关收益随压缩比变化"的交互图�
 
 ## 3. 次选：上下文长度轴（R3-1 之后，约 2.5 h）
 
-`configs/qwen-1.7b/ab_h200_on_ctx2048.yaml`（ctx2048 / M64 = **32:1**，batch 4 × 8 = global 32，
+`configs/4090/qwen-1.7b/context_length/train_reader-on_ctx2048_m64.yaml`（ctx2048 / M64 = **32:1**，batch 4 × 8 = global 32，
 1 epoch = 7,974 步，2.2-2.9 h）早就写好了，一直没跑。它和 R3-1（ctx1024/M32 = 32:1）在**同一压缩比**
 下只差上下文长度：两条都跑完，才能把"比值"和"长度"分开——否则第三轮结束时仍然不知道
 第二轮 OFF 大形状（ctx2048/M64）赢在小形状（ctx1024/M16）上，是因为上下文更长还是因为压缩更浅。
 
 ```bash
-CONFIG=configs/qwen-1.7b/ab_h200_on_ctx2048.yaml NUM_PROCESSES=8 bash scripts/train.sh
+CONFIG=configs/4090/qwen-1.7b/context_length/train_reader-on_ctx2048_m64.yaml NUM_PROCESSES=8 bash scripts/train.sh
 ```
 
 （它 batch 4、global 32、warmup 400、save 800；和 global 64 的那几条按"看过的 context 数"对齐比较，

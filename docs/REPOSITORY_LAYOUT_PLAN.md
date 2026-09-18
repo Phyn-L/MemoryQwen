@@ -64,15 +64,15 @@ MemoryQwen/
 | `ENGINEERING.md` | `docs/history/ENGINEERING.md` | 迁移并修复链接；核对状态/版本标记 |
 | `IMPROVEMENTS.md` | `docs/history/IMPROVEMENTS.md` | 迁移并修复链接；核对状态/版本标记 |
 | `README.md` | 原位 | 精简为入口；内容拆分规则见第 4 节 |
-| `configs/qwen-1.7b/ab_h200_off.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
-| `configs/qwen-1.7b/ab_h200_on.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
-| `configs/qwen-1.7b/ab_h200_on_ctx2048.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
-| `configs/qwen-1.7b/ab_h200_on_m16.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
-| `configs/qwen-1.7b/ab_h200_on_m32.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
-| `configs/qwen-1.7b/on_4090_all.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
-| `configs/qwen-1.7b/train.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
-| `configs/qwen-4b/train.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
-| `configs/qwen-8b/train.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
+| `configs/4090/qwen-1.7b/reader/train_reader-off_ctx1024_m64.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
+| `configs/4090/qwen-1.7b/reader/train_reader-on_ctx1024_m64.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
+| `configs/4090/qwen-1.7b/context_length/train_reader-on_ctx2048_m64.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
+| `configs/4090/qwen-1.7b/memory_length/train_reader-on_ctx1024_m16.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
+| `configs/4090/qwen-1.7b/memory_length/train_reader-on_ctx1024_m32.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
+| `configs/4090/qwen-1.7b/memory_length/train_reader-on_ctx1024_m8.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
+| `configs/4090/qwen-1.7b/baseline/train_baseline.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
+| `configs/4090/qwen-4b/baseline/train_baseline.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
+| `configs/4090/qwen-8b/baseline/train_baseline.yaml` | 原位 | 配置内容与路径不变；纳入配置索引 |
 | `docs/AB_H200.md` | `docs/experiments/AB_H200.md` | 迁移并修复链接；核对状态/版本标记 |
 | `docs/EVAL_ANOMALIES.md` | `docs/experiments/EVAL_ANOMALIES.md` | 迁移并修复链接；核对状态/版本标记 |
 | `docs/PLAN_reader_upgrade.md` | `docs/history/PLAN_reader_upgrade.md` | 迁移并修复链接；核对状态/版本标记 |

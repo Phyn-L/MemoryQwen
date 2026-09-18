@@ -33,7 +33,7 @@
 
 - **P1｜默认关闭**：所有新行为由新增配置字段控制，默认值 = 现状。关闭时数值路径必须与改动前一致，并有测试钉住（不是"看起来一样"）。
 - **P2｜逐项提交**：每项一个 commit；commit 前必须 `pytest tests/ -q` 全绿 + 跑一次短程冒烟。
-- **P3｜不碰用户未提交改动**：`configs/qwen-1.7b/train.yaml`、`configs/qwen-8b/train.yaml` 在工作区是未暂存状态，全程保持不动；只 `git add <显式路径>`，禁止 `git add -A`。
+- **P3｜不碰用户未提交改动**：`configs/4090/qwen-1.7b/baseline/train_baseline.yaml`、`configs/4090/qwen-8b/baseline/train_baseline.yaml` 在工作区是未暂存状态，全程保持不动；只 `git add <显式路径>`，禁止 `git add -A`。
 - **P4｜状态字典兼容**：A1 的 `linear` 模式参数名必须仍是 `context_lm_head.weight`，旧 checkpoint 可直接加载。
 - **P5｜每项都要有等价性/形状/梯度三类测试**，等价性测试用**微缩 Qwen3**（`Qwen3Config` 随机初始化，无下载）或 `_FakeQwen`。
 

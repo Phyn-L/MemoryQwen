@@ -27,7 +27,7 @@ mkdir -p "$OUT_ROOT"
 export NUM_PROCESSES="${NUM_PROCESSES:-4}"
 echo "[1/3] memory checkpoint: $CKPT"
 python -m utils.launcher test --machine "$MACHINE" --ckpt "$CKPT" --datasets hotpotqa --split validation --bs "$MEMORY_BS" --qa-batch-size 4
-CONFIG="configs/icl/icl_hotpotqa_${SHOTS}shot.yaml"
+CONFIG="configs/4090/icl/icl_hotpotqa_${SHOTS}shot.yaml"
 for MODEL in Qwen3-1.7B Qwen3-8B; do
   LABEL=$(echo "$MODEL" | tr '[:upper:]' '[:lower:]' | tr -d '-')
   echo "[2/3] ICL $MODEL (${SHOTS}-shot)"

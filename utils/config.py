@@ -233,7 +233,6 @@ class TrainingConfig:
 @dataclass
 class CheckpointConfig:
     output_dir: str = "outputs/qwen-metalora"
-    save_every_steps: int = 1000
 
 
 @dataclass
@@ -274,6 +273,8 @@ class TrainConfig:
         recognised from the hostname just fills in what the environment did not set.
         """
         path = Path(path)
+        from utils.config_paths import resolve_config_path
+        path = resolve_config_path(path)
         if path.suffix.lower() not in {".yaml", ".yml"}:
             raise ValueError(f"configuration must be a YAML file (.yaml/.yml), got: {path}")
         text = path.read_text(encoding="utf-8")
@@ -301,6 +302,9 @@ class TrainConfig:
         model_values = dict(values.get("model", {}))
         if isinstance(model_values.get("target_modules"), list):
             model_values["target_modules"] = tuple(model_values["target_modules"])
+        checkpoint_values = dict(values.get("checkpoint", {}))
+        # Legacy checkpoints embed this removed scheduling field.
+        checkpoint_values.pop("save_every_steps", None)
         return cls(
             model=ModelConfig(**model_values),
             memory=MemoryConfig(**values.get("memory", {})),
@@ -309,7 +313,7 @@ class TrainConfig:
             scheduler=SchedulerConfig(**values.get("scheduler", {})),
             evaluation=EvaluationConfig(**values.get("evaluation", {})),
             training=TrainingConfig(**values.get("training", {})),
-            checkpoint=CheckpointConfig(**values.get("checkpoint", {})),
+            checkpoint=CheckpointConfig(**checkpoint_values),
             logging=LoggingConfig(**values.get("logging", {})),
             machine=resolved,
         )
@@ -386,8 +390,6 @@ class TrainConfig:
             raise ValueError("batch_size and epochs must be positive")
         if t.max_grad_norm <= 0:
             raise ValueError("training.max_grad_norm must be positive")
-        if self.checkpoint.save_every_steps <= 0:
-            raise ValueError("checkpoint.save_every_steps must be positive")
         if self.evaluation.teacher_forced_every <= 0 or self.evaluation.autoregressive_every <= 0:
             raise ValueError("evaluation intervals must be positive")
         if self.evaluation.qa_batch_size <= 0:
