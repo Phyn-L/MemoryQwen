@@ -754,13 +754,9 @@ class MetaLoRA(nn.Module):
             raise RuntimeError("Qwen did not return a KV cache for prefix encoding")
         memory_layers = []
         for layer in cache.layers:
-            # Qwen3's DynamicCache stores keys/values as [B, heads, head_dim, seq].
-            # The sequence axis is the last dimension; slicing ``[..., context_len:, :]``
-            # removes head dimensions instead and leaves the full context cache behind.
-            # That later makes the QA mask (memory + question + answer) shorter than the
-            # cache, e.g. 98 vs 314 keys during validation.
-            keys = layer.keys[..., context_embeds.size(1):]
-            values = layer.values[..., context_embeds.size(1):]
+            # DynamicCache uses [batch, kv_heads, sequence, head_dim].
+            keys = layer.keys[..., context_embeds.size(1):, :]
+            values = layer.values[..., context_embeds.size(1):, :]
             memory_layers.append((keys, values))
         memory_cache = DynamicCache(ddp_cache_data=memory_layers, config=self.qwen.config)
         recon = self._recon(layer_memory, context_embeds, context_mask) if self.embedding_recon else None
@@ -878,11 +874,15 @@ class MetaLoRA(nn.Module):
         start = prefix.context_length + prefix.memory_length
         positions = torch.arange(start, start + context_embeds.size(1), device=context_embeds.device)
         positions = positions.unsqueeze(0).expand(context_embeds.size(0), -1)
+        # Qwen updates a supplied DynamicCache even with use_cache=False. Keep
+        # reconstruction's context tokens out of the reusable memory-only prefix.
+        indices = torch.arange(context_embeds.size(0), device=context_embeds.device)
+        cache = self._select_cache(prefix.memory_cache, indices, self.qwen.config)
         out = self._transformer_body(
             inputs_embeds=context_embeds,
             attention_mask=mask,
             position_ids=positions,
-            past_key_values=prefix.memory_cache,
+            past_key_values=cache,
             use_cache=False,
             return_dict=True,
         )
