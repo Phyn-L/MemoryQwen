@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Pull the GitHub main branch on H200 without overwriting local work.
+# Pull the GitHub main branch on A800 without overwriting local work.
 set -euo pipefail
-REMOTE_HOST="${H200_SSH_HOST:-h200}"
-REMOTE_REPO="${H200_REPO:-~/proj2/xmu/lz/MemoryQwen}"
+REMOTE_HOST="${A800_SSH_HOST:-A800}"
+REMOTE_REPO="${A800_REPO:-~/MemoryQwen}"
 ssh "$REMOTE_HOST" "REPO=$REMOTE_REPO bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 cd "$REPO"
