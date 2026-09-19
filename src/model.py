@@ -999,6 +999,11 @@ class MetaLoRA(nn.Module):
                     readout_positions = start + valid.unsqueeze(1) + torch.arange(extra, device=device).unsqueeze(0)
                     sequence = torch.cat([question, readout], dim=1)
                     sequence_positions = torch.cat([positions, readout_positions], dim=1)
+                # Evaluation may run outside Accelerate's autocast context.  Keep the
+                # complete embedding sequence in the frozen backbone dtype before it
+                # enters Qwen/LoRA; otherwise a float32 readout or adapter branch can
+                # reach a bf16 linear layer and fail with ``mat1 and mat2`` dtype errors.
+                sequence = sequence.to(dtype=self.dtype)
                 empty = q_mask.new_zeros(count, 0)
                 mask = build_continuation_mask(q_mask, empty, prefix.memory_length, question.dtype, readout_length=extra)
                 output = self.qwen(inputs_embeds=sequence, attention_mask=mask, position_ids=sequence_positions,
