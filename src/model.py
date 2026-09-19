@@ -754,8 +754,13 @@ class MetaLoRA(nn.Module):
             raise RuntimeError("Qwen did not return a KV cache for prefix encoding")
         memory_layers = []
         for layer in cache.layers:
-            keys = layer.keys[..., context_embeds.size(1):, :]
-            values = layer.values[..., context_embeds.size(1):, :]
+            # Qwen3's DynamicCache stores keys/values as [B, heads, head_dim, seq].
+            # The sequence axis is the last dimension; slicing ``[..., context_len:, :]``
+            # removes head dimensions instead and leaves the full context cache behind.
+            # That later makes the QA mask (memory + question + answer) shorter than the
+            # cache, e.g. 98 vs 314 keys during validation.
+            keys = layer.keys[..., context_embeds.size(1):]
+            values = layer.values[..., context_embeds.size(1):]
             memory_layers.append((keys, values))
         memory_cache = DynamicCache(ddp_cache_data=memory_layers, config=self.qwen.config)
         recon = self._recon(layer_memory, context_embeds, context_mask) if self.embedding_recon else None
