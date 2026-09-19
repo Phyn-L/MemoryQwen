@@ -19,7 +19,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.losses import context_lm_loss, qa_loss  # noqa: E402
+from src.losses import token_recon_loss, qa_loss  # noqa: E402
 from src.model import MetaLoRA, is_trainable_parameter_name  # noqa: E402
 
 try:
@@ -57,7 +57,7 @@ def _build(head_mode):
         dropout=0.0,
         max_context_tokens=16,
         trainable_dtype=torch.float32,
-        context_lm=True,
+        token_recon=True,
         head_mode=head_mode,
         head_init="auto",
     )
@@ -90,17 +90,17 @@ def _forward_losses(model, batch):
         batch["answer_ids"],          # labels: every answer token is supervised
         torch.arange(batch["context_ids"].size(0)),
         context_ids=batch["context_ids"],
-        context_lm_positions=4,
+        token_recon_positions=4,
     )
     qa = qa_loss(output.logits, output.labels)
-    reconstruction = context_lm_loss(
-        output.context_lm_hidden,
-        output.context_lm_labels,
-        model.context_lm_head,
-        output.context_lm_mask,
+    recon = token_recon_loss(
+        output.token_recon_hidden,
+        output.token_recon_labels,
+        model.token_recon_head,
+        output.token_recon_mask,
         max_logits_rows=8,
     )
-    return output, qa, reconstruction
+    return output, qa, recon
 
 
 def test_real_backbone_ties_its_head_to_the_input_embedding():
@@ -111,9 +111,9 @@ def test_real_backbone_ties_its_head_to_the_input_embedding():
     embedding = model.qwen.get_input_embeddings().weight
     assert model.qwen.lm_head.weight is embedding
     # The tied head must score with that very tensor.
-    assert model.context_lm_head.materialized_weight().shape == (64, 16)
-    expected = embedding @ model.context_lm_head.adapter.weight
-    assert torch.allclose(model.context_lm_head.materialized_weight(), expected, atol=1e-6)
+    assert model.token_recon_head.materialized_weight().shape == (64, 16)
+    expected = embedding @ model.token_recon_head.adapter.weight
+    assert torch.allclose(model.token_recon_head.materialized_weight(), expected, atol=1e-6)
 
 
 def test_tied_head_trains_end_to_end_on_a_real_backbone():
@@ -125,12 +125,12 @@ def test_tied_head_trains_end_to_end_on_a_real_backbone():
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad], lr=1e-3
     )
-    _, qa, reconstruction = _forward_losses(model, batch)
-    total = qa + reconstruction
+    _, qa, recon = _forward_losses(model, batch)
+    total = qa + recon
     assert torch.isfinite(total)
     total.backward()
 
-    adapter_grad = model.context_lm_head.adapter.weight.grad
+    adapter_grad = model.token_recon_head.adapter.weight.grad
     assert adapter_grad is not None and adapter_grad.abs().sum() > 0
     assert model.memory_tokens.grad is not None and model.memory_tokens.grad.abs().sum() > 0
     # The frozen backbone must not accumulate gradient.
@@ -140,8 +140,8 @@ def test_tied_head_trains_end_to_end_on_a_real_backbone():
 
     optimizer.step()
     # A second step must not reuse the pre-step materialised weight.
-    _, qa_after, reconstruction_after = _forward_losses(model, batch)
-    assert torch.isfinite(qa_after + reconstruction_after)
+    _, qa_after, recon_after = _forward_losses(model, batch)
+    assert torch.isfinite(qa_after + recon_after)
 
 
 def test_linear_and_tied_heads_train_and_differ():
@@ -152,9 +152,9 @@ def test_linear_and_tied_heads_train_and_differ():
     for mode in ("linear", "tied"):
         model = _build(mode)
         batch = _batch()
-        _, qa, reconstruction = _forward_losses(model, batch)
-        (qa + reconstruction).backward()
-        losses[mode] = float((qa + reconstruction).detach())
+        _, qa, recon = _forward_losses(model, batch)
+        (qa + recon).backward()
+        losses[mode] = float((qa + recon).detach())
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         losses[f"{mode}_trainable"] = trainable
     # tied replaces 16*64 = 1024 head weights with an adapter of 32*16 = 512.
@@ -192,9 +192,9 @@ def test_slot_attention_changes_the_encoder_pass_deterministically():
     bidirectional = model.encode_context_prefix(context, batch["context_mask"])
     assert not torch.allclose(on.layer_memory, bidirectional.layer_memory)
     model.zero_grad(set_to_none=True)
-    _, qa, reconstruction = _forward_losses(model, batch)
-    (qa + reconstruction).backward()
-    assert torch.isfinite(qa + reconstruction)
+    _, qa, recon = _forward_losses(model, batch)
+    (qa + recon).backward()
+    assert torch.isfinite(qa + recon)
     assert model.memory_tokens.grad is not None
     assert torch.isfinite(model.memory_tokens.grad).all()
     assert model.memory_tokens.grad.abs().sum() > 0

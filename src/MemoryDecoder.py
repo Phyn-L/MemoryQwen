@@ -86,7 +86,7 @@ class MemoryDecoder(nn.Module):
         if self.output_projection is None:
             raise RuntimeError(
                 "this decoder was built with reconstruct_embeddings=False; "
-                "use decode() and the shared context_lm_head instead"
+                "use decode() and the shared token_recon_head instead"
             )
         positions = torch.arange(context_length, device=memory_embedding.device)
         with no_autocast(memory_embedding.device):

@@ -20,16 +20,17 @@ class MetaLoRAOutput:
     labels: torch.LongTensor
     memory: torch.Tensor
     layer_memory: torch.Tensor
-    reconstruction: torch.Tensor
+    recon: torch.Tensor
     context_target: torch.Tensor
     context_mask: torch.Tensor
     # Context next-token prediction terms. Populated only when the auxiliary
-    # objective is "context_lm"; ``reconstruction``/``context_target`` are None then.
-    context_lm_hidden: torch.Tensor | None = None
-    context_lm_labels: torch.LongTensor | None = None
-    context_lm_mask: torch.Tensor | None = None
-    # Memory-prefixed teacher-forced reconstruction of the context (the autoencoding
-    # objective). Populated only when ``memory.ae_lm_weight`` is non-zero.
+    # objective is "token_recon"; ``recon``/``context_target`` are None then.
+    token_recon_hidden: torch.Tensor | None = None
+    token_recon_labels: torch.LongTensor | None = None
+    token_recon_mask: torch.Tensor | None = None
+    # Memory-prefixed teacher-forced recon of the context (the autoencoding
+    # objective). Populated only when ``memory.causal_recon_weight`` is non-zero.
+    objective_terms: dict | None = None
     ae_hidden: torch.Tensor | None = None
     ae_labels: torch.LongTensor | None = None
     ae_mask: torch.Tensor | None = None
@@ -51,7 +52,7 @@ class ContextPrefix:
     layer_memory: torch.Tensor
     memory: torch.Tensor
     memory_cache: object
-    reconstruction: torch.Tensor
+    recon: torch.Tensor
     context_target: torch.Tensor
     context_mask: torch.Tensor
     context_length: int
@@ -72,7 +73,7 @@ def is_trainable_parameter_name(name: str) -> bool:
         "lora_A" in name
         or "lora_B" in name
         or name == "memory_tokens"
-        or name.startswith(("decoders.", "context_lm_head.", "resampler."))
+        or name.startswith(("decoders.", "token_recon_head.", "resampler."))
     )
 
 
@@ -83,7 +84,7 @@ class TiedUnembedding(nn.Module):
     that is exactly the read-out the context-compression papers use for their
     autoencoding objective. Using it here introduces no parameters, so the autoencoding
     loss trains only the memory slots / LoRA adapters and never a fresh classifier; the
-    memory-side ``context_lm_head`` stays dedicated to the memory-only probe objective.
+    memory-side ``token_recon_head`` stays dedicated to the memory-only probe objective.
     """
 
     def __init__(self, embedding_getter):
@@ -143,7 +144,7 @@ class VocabularyHead(nn.Module):
         self._cache_key = None
         if mode == "linear":
             # Same shape and same init as the nn.Linear this replaces, so parameter
-            # names (context_lm_head.weight) and RNG consumption stay identical.
+            # names (token_recon_head.weight) and RNG consumption stay identical.
             self.weight = nn.Parameter(torch.empty(self.vocab_size, self.hidden_size))
             nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
         else:
@@ -421,19 +422,19 @@ def build_continuation_mask(
 
 
 class MetaLoRA(nn.Module):
-    """Qwen encoder/decoder with ordinary (static) PEFT LoRA and reconstruction decoders.
+    """Qwen encoder/decoder with ordinary (static) PEFT LoRA and recon decoders.
 
     Two dtypes coexist. The frozen Qwen backbone stays in its checkpoint dtype
     (``qwen_dtype``, bfloat16 for Qwen3) and every tensor that enters it is cast to
     that dtype. The trainable pieces -- ``memory_tokens``, ``lora_A``/``lora_B`` and
-    the reconstruction decoders -- can be kept in ``trainable_dtype`` (float32 by
+    the recon decoders -- can be kept in ``trainable_dtype`` (float32 by
     default) so that AdamW's moments and its ``param.add_(update, alpha=-lr)`` step
     are not quantised to bfloat16 resolution. The casts that reconcile the two dtypes
     live in three places: ``memory_tokens`` is cast down when it is used as an input,
     ``StaticLoRALinear``/``MemoryDecoder`` cast on entry and exit, and the losses
     upcast before reducing.
     """
-    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, context_lm=False, use_peft=False, head_mode="linear", head_init="auto", init_mode="randn", init_seed=0, slot_attention="isolated", ae_lm=False, readout_length=0, readout_layers=2, readout_heads=4, readout_hidden_size=256):
+    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, token_recon=False, embedding_recon=True, use_peft=False, head_mode="linear", head_init="auto", init_mode="randn", init_seed=0, slot_attention="isolated", ae_lm=False, readout_length=0, readout_layers=2, readout_heads=4, readout_hidden_size=256):
         super().__init__()
         self.rank, self.alpha = rank, alpha
         self.target_modules = tuple(("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj") if target_modules is None else target_modules)
@@ -441,9 +442,10 @@ class MetaLoRA(nn.Module):
         # Which LoRA implementation is active, recorded so a run is reproducible.
         self.lora_backend = ("peft" if use_peft else "static") if self.target_modules else "none"
         # Only one of the two auxiliary objectives is active at a time.
-        #   context_lm=True  -> decoder hidden states are classified into context tokens
-        #   context_lm=False -> decoder outputs are regressed onto context input embeddings
-        self.context_lm = bool(context_lm)
+        #   token_recon=True  -> decoder hidden states are classified into context tokens
+        #   token_recon=False -> decoder outputs are regressed onto context input embeddings
+        self.token_recon = bool(token_recon)
+        self.embedding_recon = bool(embedding_recon)
         self.qwen = self._add_peft_lora(qwen, rank, alpha, dropout, bool(use_peft))
         self.qwen_hidden_size = self.qwen.config.hidden_size
         qwen_dtype = self.qwen.get_input_embeddings().weight.dtype
@@ -459,9 +461,9 @@ class MetaLoRA(nn.Module):
             MemoryDecoder(
                 self.qwen_hidden_size, decoder_hidden_size, decoder_heads,
                 decoder_ffn_ratio, max_context_tokens,
-                reconstruct_embeddings=not self.context_lm,
+                reconstruct_embeddings=self.embedding_recon,
             )
-            for _ in range(layers)
+            for _ in range(layers if self.embedding_recon or self.token_recon else 0)
         ])
         # Shared unembedding for the context next-token objective. One head is shared
         # by every layer decoder: a per-layer head would add
@@ -475,7 +477,7 @@ class MetaLoRA(nn.Module):
         # projection, so the first logits already mean "the token whose embedding the
         # memory points at" instead of a random direction.
         self.head_mode = head_mode
-        self.context_lm_head = (
+        self.token_recon_head = (
             VocabularyHead(
                 decoder_hidden_size,
                 int(self.qwen.get_input_embeddings().weight.size(0)),
@@ -484,7 +486,7 @@ class MetaLoRA(nn.Module):
                 backbone_hidden_size=self.qwen_hidden_size,
                 init_adapter=self._head_adapter_init(head_init, decoder_hidden_size),
             )
-            if self.context_lm else None
+            if self.token_recon else None
         )
         # Qwen's embedding weight is the single source of truth for the frozen
         # backbone dtype. It must not drag the trainable modules back to bfloat16,
@@ -654,7 +656,7 @@ class MetaLoRA(nn.Module):
     def _memory_prefix(self, layer_memory):
         return layer_memory[:, -1]  # final Qwen layer memory is the input prefix
 
-    def _reconstruction(self, layer_memory, context_embeds, context_mask):
+    def _recon(self, layer_memory, context_embeds, context_mask):
         return torch.stack([decoder(layer_memory[:, i], context_embeds.size(1)) for i, decoder in enumerate(self.decoders)], dim=1)
 
     def sample_context_targets(self, context_ids, context_mask, positions_per_context=None):
@@ -688,7 +690,7 @@ class MetaLoRA(nn.Module):
         positions = positions.masked_fill(~keep, 0)
         return positions, keep
 
-    def context_lm_terms(self, context_ids, context_mask, layer_memory, positions_per_context=None):
+    def token_recon_terms(self, context_ids, context_mask, layer_memory, positions_per_context=None):
         """Build the context next-token prediction terms from the memory.
 
         The query for target position ``t`` sits at ``t - 1``, so the decoder has to
@@ -697,7 +699,7 @@ class MetaLoRA(nn.Module):
         content into the memory instead of into the decoder.
         """
         if layer_memory is None:
-            raise ValueError("context_lm requires the prefix layer_memory")
+            raise ValueError("token_recon requires the prefix layer_memory")
         positions, keep = self.sample_context_targets(context_ids, context_mask, positions_per_context)
         query_positions = (positions - 1).clamp_min(0)
         labels = context_ids.gather(1, positions).masked_fill(~keep, -100)
@@ -742,9 +744,9 @@ class MetaLoRA(nn.Module):
         out = self._transformer_body(inputs_embeds=sequence, attention_mask=block_mask, output_hidden_states=True, use_cache=True, return_dict=True)
         states = out.hidden_states or (sequence, out.last_hidden_state)
         layer_memory = []
-        for state in states[1:1 + len(self.decoders)]:
+        for state in states[1:1 + int(self.qwen.config.num_hidden_layers)]:
             layer_memory.append(state[:, context_embeds.size(1):context_embeds.size(1) + memory_inputs.size(1)])
-        while len(layer_memory) < len(self.decoders):
+        while len(layer_memory) < int(self.qwen.config.num_hidden_layers):
             layer_memory.append(layer_memory[-1])
         layer_memory = torch.stack(layer_memory, dim=1)
         cache = out.past_key_values
@@ -756,13 +758,8 @@ class MetaLoRA(nn.Module):
             values = layer.values[..., context_embeds.size(1):, :]
             memory_layers.append((keys, values))
         memory_cache = DynamicCache(ddp_cache_data=memory_layers, config=self.qwen.config)
-        if self.context_lm:
-            # The embedding-regression decoders are replaced by the context
-            # next-token objective, so the full-length decoder pass is not needed.
-            reconstruction = None
-        else:
-            reconstruction = self._reconstruction(layer_memory, context_embeds, context_mask)
-        return ContextPrefix(layer_memory, self._memory_prefix(layer_memory), memory_cache, reconstruction, context_embeds, context_mask, context_embeds.size(1), memory_inputs.size(1), context_hidden=states[-1][:, :context_embeds.size(1)])
+        recon = self._recon(layer_memory, context_embeds, context_mask) if self.embedding_recon else None
+        return ContextPrefix(layer_memory, self._memory_prefix(layer_memory), memory_cache, recon, context_embeds, context_mask, context_embeds.size(1), memory_inputs.size(1), context_hidden=states[-1][:, :context_embeds.size(1)])
 
     @staticmethod
     def _select_cache(cache, indices, config):
@@ -843,13 +840,13 @@ class MetaLoRA(nn.Module):
             labels=torch.cat([ignored, labels], dim=1),
             memory=prefix.memory,
             layer_memory=prefix.layer_memory,
-            reconstruction=prefix.reconstruction,
+            recon=prefix.recon,
             context_target=prefix.context_target,
             context_mask=prefix.context_mask,
         )
 
     def autoencode_with_memory(self, prefix, context_embeds, context_mask):
-        """Teacher-forced reconstruction of the context through the memory prefix.
+        """Teacher-forced recon of the context through the memory prefix.
 
         This is the autoencoding objective the context-compression literature uses (e.g.
         500xCompressor eq. 1): the *frozen backbone* is the decoder, the per-layer key/value
@@ -857,7 +854,7 @@ class MetaLoRA(nn.Module):
         plus the teacher-forced prefix, ``P(t_i | memory, t_<i)``. The memory slots and the LoRA
         adapters still receive gradient because the prefix is differentiable, but no
         decoder has to be learned from scratch -- which is exactly what separates this from
-        the memory-only ``context_lm`` objective (where every token must be produced from
+        the memory-only ``token_recon`` objective (where every token must be produced from
         the memory alone).
 
         The continuation mask is reused: its "question rows" rule is "read all memory, then
@@ -886,10 +883,10 @@ class MetaLoRA(nn.Module):
         )
         return out.last_hidden_state
 
-    def forward(self, context_embeds, context_mask, question_embeds, question_mask, answer_embeds, answer_mask, labels, qa_context_indices=None, context_ids=None, context_lm_positions=None):
+    def forward(self, context_embeds, context_mask, question_embeds, question_mask, answer_embeds, answer_mask, labels, qa_context_indices=None, context_ids=None, token_recon_positions=None, objective_config=None):
         """Training path.
 
-        ``context_ids`` is required when the auxiliary objective is ``context_lm``: the
+        ``context_ids`` is required when the auxiliary objective is ``token_recon``: the
         regression target could be read back out of ``context_embeds`` but a token
         classification target cannot, because the embedding lookup is not invertible. It is
         also required for the autoencoding objective (``ae_lm``).
@@ -897,16 +894,20 @@ class MetaLoRA(nn.Module):
         prefix = self.encode_context_prefix(context_embeds, context_mask)
         indices = qa_context_indices if qa_context_indices is not None else torch.arange(question_embeds.size(0), device=question_embeds.device)
         output = self.forward_qa_with_prefix(prefix, indices, question_embeds, question_mask, answer_embeds, answer_mask, labels)
-        if self.context_lm:
+        if objective_config is not None:
+            from .losses import memory_objectives
+            output.objective_terms = memory_objectives(self, prefix, context_ids, context_mask, objective_config)
+            return output
+        if self.token_recon:
             if context_ids is None:
-                raise ValueError("context_lm needs context_ids, but forward() received none")
-            terms = self.context_lm_terms(
+                raise ValueError("token_recon needs context_ids, but forward() received none")
+            terms = self.token_recon_terms(
                 context_ids.to(context_embeds.device), context_mask.to(context_embeds.device),
-                prefix.layer_memory, context_lm_positions,
+                prefix.layer_memory, token_recon_positions,
             )
-            output.context_lm_hidden = terms.hidden
-            output.context_lm_labels = terms.labels
-            output.context_lm_mask = terms.mask
+            output.token_recon_hidden = terms.hidden
+            output.token_recon_labels = terms.labels
+            output.token_recon_mask = terms.mask
         if self.ae_lm:
             if context_ids is None:
                 raise ValueError("the autoencoding objective needs context_ids, but forward() received none")
@@ -1073,14 +1074,15 @@ def load_model(cfg):
         target_modules=cfg.model.target_modules, dropout=cfg.model.lora_dropout,
         max_context_tokens=cfg.data.max_context_tokens,
         trainable_dtype=dtype_from_name(cfg.model.trainable_dtype),
-        context_lm=cfg.memory.reconstruction_loss == "context_lm",
+        token_recon=cfg.memory.token_recon_weight > 0,
+        embedding_recon=cfg.memory.embedding_recon_weight > 0,
         use_peft=cfg.model.use_peft,
         head_mode=cfg.memory.head_mode,
         head_init=cfg.memory.head_init,
         init_mode=cfg.memory.init_mode,
         init_seed=cfg.memory.init_seed,
         slot_attention=cfg.memory.slot_attention,
-        ae_lm=cfg.memory.ae_lm_weight > 0,
+        ae_lm=cfg.memory.causal_recon_weight > 0 or cfg.memory.distill_weight > 0,
         readout_length=cfg.memory.readout_length,
         readout_layers=cfg.memory.readout_layers,
         readout_heads=cfg.memory.readout_heads,

@@ -69,7 +69,7 @@ class ModelConfig:
         "snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
     )
     torch_dtype: str = "bfloat16"
-    # Dtype of the trainable pieces (memory tokens, LoRA, reconstruction decoders).
+    # Dtype of the trainable pieces (memory tokens, LoRA, recon decoders).
     # Kept separate from torch_dtype so that AdamW keeps float32 parameters and
     # moments while the frozen backbone stays at its checkpoint dtype.
     trainable_dtype: str = "float32"
@@ -96,11 +96,12 @@ class MemoryConfig:
     decoder_hidden_size: int = 256
     decoder_ffn_ratio: int = 2
     decoder_heads: int = 8
-    reconstruction_weight: float = 1.0
+    embedding_recon_weight: float = 1.0
+    token_recon_weight: float = 0.0
     qa_weight: float = 1.0
-    reconstruction_loss: str = "mse_cosine"
-    reconstruction_cosine_weight: float = 0.1
-    # How the shared context_lm unembedding is parameterised.
+    embedding_recon_loss: str = "mse_cosine"
+    embedding_recon_cosine_weight: float = 0.1
+    # How the shared token_recon unembedding is parameterised.
     #   "linear" (default): a from-scratch [vocab, D] weight matrix -- the original
     #                       behaviour, kept as the default so nothing changes silently.
     #   "tied":             W = E @ adapter, with E the frozen (tied) input embedding of
@@ -127,14 +128,14 @@ class MemoryConfig:
     # through the *frozen* backbone with the memory's per-layer KV as a prefix, i.e.
     # P(t_i | memory, t_<i), scored by the backbone's own (tied) unembedding. This is the
     # objective the context-compression literature uses; the memory-only diagnostic
-    # (reconstruction_loss="context_lm") stays available next to it.
-    ae_lm_weight: float = 0.0
+    # (token_recon_weight > 0) stays available next to it.
+    causal_recon_weight: float = 0.0
     # Context targets scored by the autoencoding objective; <= 0 scores every position.
-    ae_lm_positions: int = 0
+    causal_recon_positions: int = 0
     # Distil the *full-context* distribution into the memory-conditioned one:
     # T^2 * KL(p_teacher || p_student) where the teacher is the plain causal LM over the
     # context (free: the encoder pass's context rows) and the student is the memory-prefixed
-    # autoencoding pass. 0 = off. Requires ae_lm_weight > 0.
+    # autoencoding pass. 0 = off. Runs the prefix-KV path independently of its CE weight.
     distill_weight: float = 0.0
     distill_temperature: float = 1.0
     # Positions scored by the distillation objective; <= 0 scores every position.
@@ -152,10 +153,10 @@ class MemoryConfig:
     # Bottleneck width of the resampler (the same 256 the per-layer decoders use). A
     # full-width cross-attention block would cost ~34M parameters per layer.
     readout_hidden_size: int = 256
-    # context_lm: number of context positions scored per context per step. The shared
-    # vocabulary head is applied to num_layers * context_lm_positions rows, so this is
+    # token_recon: number of context positions scored per context per step. The shared
+    # vocabulary head is applied to num_layers * token_recon_positions rows, so this is
     # the knob that bounds the auxiliary objective's cost. <= 0 means "all positions".
-    context_lm_positions: int = 256
+    token_recon_positions: int = 256
 
 
 @dataclass
@@ -344,18 +345,22 @@ class TrainConfig:
             raise ValueError("decoder_hidden_size, decoder_ffn_ratio and decoder_heads must be positive")
         if m.decoder_hidden_size % m.decoder_heads:
             raise ValueError("memory.decoder_hidden_size must be divisible by memory.decoder_heads")
-        if m.reconstruction_loss not in {"mse", "cosine", "mse_cosine", "context_lm"}:
-            raise ValueError("reconstruction_loss must be mse, cosine, mse_cosine, or context_lm")
+        if m.embedding_recon_loss not in {"mse", "cosine", "mse_cosine"}:
+            raise ValueError("embedding_recon_loss must be mse, cosine, or mse_cosine")
+        if m.token_recon_weight < 0:
+            raise ValueError("token_recon_weight must be non-negative")
+        if m.embedding_recon_cosine_weight < 0:
+            raise ValueError("embedding_recon_cosine_weight must be non-negative")
         if m.head_mode not in {"linear", "tied"}:
             raise ValueError("memory.head_mode must be linear or tied")
         if m.head_init not in {"auto", "random", "memory_projection"}:
             raise ValueError("memory.head_init must be auto, random or memory_projection")
         if m.init_mode not in {"randn", "token_embed", "vocab_mean"}:
             raise ValueError("memory.init_mode must be randn, token_embed or vocab_mean")
-        if m.ae_lm_weight < 0:
-            raise ValueError("memory.ae_lm_weight must be non-negative")
-        if m.ae_lm_positions < 0:
-            raise ValueError("memory.ae_lm_positions must be >= 0 (0 scores every position)")
+        if m.causal_recon_weight < 0:
+            raise ValueError("memory.causal_recon_weight must be non-negative")
+        if m.causal_recon_positions < 0:
+            raise ValueError("memory.causal_recon_positions must be >= 0 (0 scores every position)")
         if m.distill_weight < 0:
             raise ValueError("memory.distill_weight must be non-negative")
         if m.distill_temperature <= 0:
@@ -364,11 +369,6 @@ class TrainConfig:
             raise ValueError("memory.distill_positions must be >= 0 (0 scores every position)")
         if m.distill_topk < 0:
             raise ValueError("memory.distill_topk must be >= 0")
-        if m.distill_weight > 0 and m.ae_lm_weight <= 0:
-            raise ValueError(
-                "memory.distill_weight needs the memory-prefixed autoencoding pass to "
-                "distil into: set memory.ae_lm_weight > 0 as well"
-            )
         if m.readout_length < 0:
             raise ValueError("memory.readout_length must be >= 0 (0 disables the read-out)")
         if m.readout_length > 0:
@@ -380,11 +380,11 @@ class TrainConfig:
                 raise ValueError("memory.readout_hidden_size must be positive")
             if m.readout_hidden_size % m.readout_heads:
                 raise ValueError("memory.readout_hidden_size must be divisible by readout_heads")
-        if m.context_lm_positions < 0:
-            raise ValueError("memory.context_lm_positions must be >= 0 (0 scores every position)")
-        if m.qa_weight < 0 or m.reconstruction_weight < 0:
+        if m.token_recon_positions < 0:
+            raise ValueError("memory.token_recon_positions must be >= 0 (0 scores every position)")
+        if m.qa_weight < 0 or m.embedding_recon_weight < 0:
             raise ValueError("loss weights must be non-negative")
-        if m.qa_weight == 0 and m.reconstruction_weight == 0:
+        if m.qa_weight == 0 and m.embedding_recon_weight == 0 and m.token_recon_weight == 0 and m.causal_recon_weight == 0 and m.distill_weight == 0:
             raise ValueError("at least one main loss weight must be positive")
         t = self.training
         if t.batch_size <= 0 or t.epochs <= 0:

@@ -31,7 +31,7 @@
 #   AE_POSITIONS=128    AE / context-LM / distill 的采样位置数（显存紧张就降到 64）
 #   TRAIN_DATASETS=all  训练集（"all" 或逗号分隔，如 "squad,coqa,drop"）
 #   WORK=outputs/on_8b  生成的配置 + checkpoint 的父目录
-#   BASE_CONFIG=configs/4090/qwen-1.7b/reader/train_reader-on_ctx1024_m64.yaml   逐字段继承的 ON 臂配置
+#   BASE_CONFIG=configs/train_baseline.yaml   逐字段继承的 ON 臂配置
 #   MODEL=...           8B 快照（默认 ${MODEL_ROOT}/models--Qwen--Qwen3-8B/snapshots/b968826d...）
 #   SMOKE=1 DRYRUN=1 RESUME=1
 #
@@ -68,7 +68,7 @@ M="${M:-64}"
 AE_POSITIONS="${AE_POSITIONS:-128}"
 TRAIN_DATASETS="${TRAIN_DATASETS:-all}"
 WORK="${WORK:-outputs/on_8b}"
-BASE_CONFIG="${BASE_CONFIG:-configs/4090/qwen-1.7b/reader/train_reader-on_ctx1024_m64.yaml}"
+BASE_CONFIG="${BASE_CONFIG:-configs/train_baseline.yaml}"
 MODEL="${MODEL:-}"
 SMOKE="${SMOKE:-0}"
 DRYRUN="${DRYRUN:-0}"

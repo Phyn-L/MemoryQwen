@@ -100,14 +100,14 @@ def test_a_fresh_run_nests_its_directory_under_the_configured_output_dir():
     from utils.config import TrainConfig
 
     train = _train_module()
-    config = TrainConfig.from_file(REPO / "configs" / "4090" / "qwen-1.7b" / "reader" / "train_reader-on_ctx1024_m64.yaml")
+    config = TrainConfig.from_file(REPO / "configs/train_baseline.yaml")
     train._configure_run_paths(config, None, None)
     assert config.checkpoint.output_dir.startswith("outputs/ab_h200_on/")
     assert config.checkpoint.output_dir.count("/") == 2, config.checkpoint.output_dir
     assert config.logging.wandb_run_name in config.checkpoint.output_dir
 
     # Resuming keeps the checkpoint's own directory instead of making a new one.
-    resumed = TrainConfig.from_file(REPO / "configs" / "4090" / "qwen-1.7b" / "reader" / "train_reader-on_ctx1024_m64.yaml")
+    resumed = TrainConfig.from_file(REPO / "configs/train_baseline.yaml")
     train._configure_run_paths(resumed, None, "outputs/ab_h200_on/Qwen1.7B_x/step-400.pt")
     # Resolve()d on purpose: continuing a run must land in the same absolute directory the
     # checkpoint came from, not in a path relative to wherever the launcher happens to be.

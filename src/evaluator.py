@@ -8,7 +8,7 @@ from tqdm.auto import tqdm
 
 from utils.ddp import is_main_process
 
-from .losses import combine_losses, context_lm_loss, qa_loss, reconstruction_loss
+from .losses import memory_objectives, objective_total, qa_loss
 from .metrics import METRIC_KEYS, answer_line, best_reference_metrics, normalize_answer
 
 
@@ -140,31 +140,14 @@ class Evaluator:
         return range(0, batch["question_ids"].size(0), size)
 
     def auxiliary_loss(self, model, prefix, ids):
-        """The objective that shapes the memory, whichever one the config selected.
-
-        Both variants are reported under ``reconstruction_loss`` so that run
-        dashboards stay comparable across the two objectives. The context-LM value is
-        nats per context token and therefore not numerically comparable with the
-        embedding-regression value; only its trend matters.
-        """
-        if self.cfg.memory.reconstruction_loss == "context_lm":
-            terms = model.context_lm_terms(
-                ids["context_ids"], ids["context_mask"], prefix.layer_memory,
-                self.cfg.memory.context_lm_positions,
-            )
-            return context_lm_loss(
-                terms.hidden, terms.labels, model.context_lm_head, terms.mask,
-            )
-        return reconstruction_loss(
-            prefix.reconstruction, prefix.context_target, prefix.context_mask,
-            self.cfg.memory.reconstruction_cosine_weight,
-            self.cfg.memory.reconstruction_loss,
-        )
+        return memory_objectives(model, prefix, ids["context_ids"], ids["context_mask"], self.cfg.memory)
 
     @torch.no_grad()
     def teacher_forced(self, model, loader, device):
+        was_training = model.training
         model.eval()
-        qa_sum = reconstruction_sum = 0.0
+        qa_sum = 0.0
+        auxiliary_sums = dict.fromkeys(("embedding_recon_loss", "token_recon_loss", "causal_recon_loss", "distill_loss"), 0.0)
         totals = {key: 0.0 for key in METRIC_KEYS}
         samples = 0
         first_token_hits = 0
@@ -194,9 +177,10 @@ class Evaluator:
             prefix = model.encode_context_prefix(
                 embed(ids["context_ids"]), ids["context_mask"]
             )
-            reconstruction = self.auxiliary_loss(model, prefix, ids)
+            auxiliary = self.auxiliary_loss(model, prefix, ids)
             contexts = ids["context_ids"].size(0)
-            reconstruction_sum += float(reconstruction) * contexts
+            for key, value in auxiliary.items():
+                auxiliary_sums[key] += float(value) * contexts
             context_weight += contexts
             for start in self._chunks(batch):
                 end = min(
@@ -235,10 +219,10 @@ class Evaluator:
                     samples += 1
             progress.set_postfix({"contexts": context_weight, "qa_rows": samples}, refresh=False)
         progress.close()
-        model.train()
-        qa_sum, reconstruction_sum, first_token_hits, qa_weight, context_weight, samples = (
+        model.train(was_training)
+        qa_sum, first_token_hits, qa_weight, context_weight, samples = (
             _distributed_sum(
-                [qa_sum, reconstruction_sum, first_token_hits, qa_weight, context_weight, samples],
+                [qa_sum, first_token_hits, qa_weight, context_weight, samples],
                 device,
             )
         )
@@ -246,15 +230,12 @@ class Evaluator:
             zip(METRIC_KEYS, _distributed_sum([totals[key] for key in METRIC_KEYS], device))
         )
         qa_value = qa_sum / max(1, qa_weight)
-        reconstruction_value = reconstruction_sum / max(1, context_weight)
-        total_value = (
-            self.cfg.memory.qa_weight * qa_value
-            + self.cfg.memory.reconstruction_weight * reconstruction_value
-        )
+        auxiliary_values = dict(zip(auxiliary_sums, (value / max(1, context_weight) for value in _distributed_sum(list(auxiliary_sums.values()), device))))
+        total_value = objective_total(qa_value, auxiliary_values, self.cfg.memory)
         return {
             "qa_loss": qa_value,
             "ppl": math.exp(min(qa_value, 20)),
-            "reconstruction_loss": reconstruction_value,
+            **auxiliary_values,
             "loss": total_value,
             **{key: value / max(1, samples) for key, value in metric_totals.items()},
             # Not an answer-quality score: teacher forcing feeds the gold answer
@@ -271,9 +252,9 @@ class Evaluator:
 
         Unlike :meth:`teacher_forced` this never feeds the gold answer back, so these are
         the numbers to quote. The metrics use the single official SQuAD normalizer from
-        ``src.metrics``, which is also what ``scripts/test_icl_baseline.py`` scores with, so
+        ``src.metrics``, which is also what ``scripts/evaluation/test_icl_baseline.py`` scores with, so
         the two numbers are directly comparable. ``include_teacher_metrics`` additionally
-        reports the teacher-forced ppl/qa_loss/reconstruction_loss at the cost of a second
+        reports the teacher-forced ppl/qa_loss/recon_loss at the cost of a second
         pass.
 
         ``max_qa`` caps how many QA rows the *whole* evaluation decodes: the budget is split
@@ -288,6 +269,7 @@ class Evaluator:
         across the whole split). Without it a distributed run cannot honour a global budget,
         so it falls back to the historical per-rank cap and says so.
         """
+        was_training = model.training
         model.eval()
         sums = {key: 0.0 for key in METRIC_KEYS}
         samples = 0
@@ -375,7 +357,7 @@ class Evaluator:
             if window[1] is not None and cursor >= window[1]:
                 break
         progress.close()
-        model.train()
+        model.train(was_training)
         first_token_hit, samples = _distributed_sum([first_token_hit, samples], device)
         sums = dict(
             zip(METRIC_KEYS, _distributed_sum([sums[key] for key in METRIC_KEYS], device))
@@ -397,7 +379,7 @@ class Evaluator:
                 {
                     "ppl": teacher["ppl"],
                     "qa_loss": teacher["qa_loss"],
-                    "reconstruction_loss": teacher["reconstruction_loss"],
+                    **{key: teacher[key] for key in ("embedding_recon_loss", "token_recon_loss", "causal_recon_loss", "distill_loss")},
                 }
             )
         return result

@@ -53,7 +53,7 @@ def _model(**kwargs):
         target_modules=["q_proj"],
         max_context_tokens=8,
         trainable_dtype=torch.float32,
-        context_lm=False,
+        token_recon=False,
     )
     options.update(kwargs)
     return MetaLoRA(_FakeQwen(), **options)

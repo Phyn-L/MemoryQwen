@@ -181,3 +181,11 @@ memory:
 相同（`tests/test_ab_configs.py` 断言），步数以所选配置、进程数和实际数据量打印的 schedule 为准，用 `scripts/archive/run_ab.sh` 顺序跑完两臂。
 之前的 `0rj6x1xc`（ctx2048/M64/1ep）与 `vry7n1sw`（ctx512/M16/3ep）形状不同，只能当规模参照，
 不能用来判断开关的好坏。
+
+## 2026-09-19 字段替换
+
+上文的旧 YAML 字段已废弃。当前配置以 `configs/README.md` 为准：
+`ae_lm_weight/ae_lm_positions` 对应 `prefix_kv_recon_weight/prefix_kv_recon_positions`；
+原 `reconstruction_loss=context_lm` 由 `memory_token_recon_weight` 独立控制；
+表征回归由 `embedding_recon_weight/embedding_recon_loss/embedding_recon_cosine_weight` 控制。
+没有旧 YAML 自动迁移。三种目标可同时使用，distill 可在 prefix CE 权重为 0 时独立启用。

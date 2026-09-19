@@ -212,7 +212,7 @@ for shots in $SHOTS; do
       echo "=== qwen3-$tag / ${shots}-shot / $subset -> $out"
       if [ "$DRYRUN" != "0" ]; then
         echo "  $PYTHON -m torch.distributed.run --standalone --nproc-per-node=$NUM_GPUS \\"
-        echo "    scripts/test_icl_baseline.py --datasets squad --model $model \\"
+        echo "    scripts/evaluation/test_icl_baseline.py --datasets squad --model $model \\"
         echo "    --squad-validation-file $file --squad-train-file $DATA_ROOT/squad/train.jsonl \\"
         echo "    --num-shots $shots --batch-size $batch --num-workers $NUM_WORKERS \\"
         echo "    --max-input-tokens $MAX_INPUT_TOKENS --squad-max-new-tokens $MAX_NEW_TOKENS \\"
@@ -221,7 +221,7 @@ for shots in $SHOTS; do
       fi
       if "$PYTHON" -m torch.distributed.run \
           --standalone --nproc-per-node="$NUM_GPUS" \
-          scripts/test_icl_baseline.py \
+          scripts/evaluation/test_icl_baseline.py \
           --datasets squad \
           --model "$model" \
           --squad-validation-file "$file" \

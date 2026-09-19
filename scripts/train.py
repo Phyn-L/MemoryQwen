@@ -12,15 +12,7 @@ from utils.config import TrainConfig, dtype_from_name
 from utils.machines import machine_names
 from src.data import SortishSampler
 from src.evaluator import Evaluator
-from src.losses import (
-    combine_losses,
-    context_lm_loss,
-    kl_distill_loss,
-    qa_loss,
-    reconstruction_loss,
-    sample_positions,
-    sequence_lm_loss,
-)
+from src.losses import objective_total, qa_loss
 from src.model import load_model
 from src.metrics import METRIC_KEYS
 from src.pipeline import (
@@ -42,7 +34,7 @@ AUTOREGRESSIVE_SECTION = "val_autoregressive"
 ANSWER_METRIC_KEYS = (*METRIC_KEYS, "first_token_em")
 # Loss-like scalars only exist on the teacher-forced pass (the autoregressive pass can run
 # one internally to obtain them, but they are still that pass's numbers).
-LOSS_KEYS = ("loss", "qa_loss", "ppl", "reconstruction_loss", "ae_loss", "distill_loss")
+LOSS_KEYS = ("loss", "qa_loss", "ppl", "embedding_recon_loss", "token_recon_loss", "causal_recon_loss", "distill_loss")
 
 
 def resume_plan(step: int, steps_per_epoch: int, epochs: int) -> tuple[int, int]:
@@ -81,7 +73,7 @@ def eval_log_payloads(teacher_metrics=None, autoregressive_metrics=None):
     when `teacher_metrics` is None the autoregressive pass computed them internally, but
     they are still that pass's numbers and must not be duplicated under the other section.
 
-    Training-side losses (including ``ae_loss``/``distill_loss``) are logged separately as
+    Training-side losses (including ``causal_recon_loss``/``distill_loss``) are logged separately as
     ``train/*`` every ``logging.log_every`` steps by the training loop, so they must not be
     folded in here.
     """
@@ -141,7 +133,7 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="configs/4090/qwen-1.7b/baseline/train_baseline.yaml")
+    parser.add_argument("--config", default="configs/train_baseline.yaml")
     parser.add_argument(
         "--machine",
         choices=machine_names(),
@@ -344,82 +336,16 @@ def main() -> None:
             )
             embedding = base_model.qwen.get_input_embeddings()
             output = model(
-                embedding(ids["context_ids"]),
-                ids["context_mask"],
-                embedding(ids["question_ids"]),
-                ids["question_mask"],
-                embedding(ids["answer_ids"]),
-                ids["answer_mask"],
-                ids["labels"],
-                ids["qa_context_indices"],
-                context_ids=ids["context_ids"],
-                context_lm_positions=cfg.memory.context_lm_positions,
+                embedding(ids["context_ids"]), ids["context_mask"],
+                embedding(ids["question_ids"]), ids["question_mask"],
+                embedding(ids["answer_ids"]), ids["answer_mask"], ids["labels"],
+                ids["qa_context_indices"], context_ids=ids["context_ids"],
+                objective_config=cfg.memory,
             )
             qa = qa_loss(output.logits, output.labels)
-            if cfg.memory.reconstruction_loss == "context_lm":
-                # Context next-token prediction through the memory, in nats/token.
-                # Starts near ln(vocab_size) ~= 11.9, so reconstruction_weight may
-                # want to be smaller than for the embedding regression (which sits
-                # near 0.08) to keep the two terms on comparable gradient scales.
-                reconstruction = context_lm_loss(
-                    output.context_lm_hidden,
-                    output.context_lm_labels,
-                    base_model.context_lm_head,
-                    output.context_lm_mask,
-                )
-            else:
-                reconstruction = reconstruction_loss(
-                    output.reconstruction,
-                    output.context_target,
-                    output.context_mask,
-                    cfg.memory.reconstruction_cosine_weight,
-                    cfg.memory.reconstruction_loss,
-                )
-            # Memory-prefixed autoencoding: reconstruct the context through the frozen
-            # backbone, scored by its own (tied) unembedding. This is the objective the
-            # compression literature uses; it starts near the LM's own nats/token instead of
-            # near ln(vocab), so its weight is comparable to qa_weight.
-            ae = None
-            if cfg.memory.ae_lm_weight and output.ae_hidden is not None:
-                positions = None
-                if cfg.memory.ae_lm_positions > 0:
-                    positions = sample_positions(output.ae_mask, cfg.memory.ae_lm_positions)[0]
-                ae = sequence_lm_loss(
-                    output.ae_hidden,
-                    output.ae_labels,
-                    base_model.ae_head,
-                    output.ae_mask,
-                    positions=positions,
-                )
-            # Distribution-level distillation of the full-context model into the
-            # memory-conditioned one. The teacher is the encoder pass's own context rows
-            # (plain causal LM, no extra forward), so this costs one vocabulary pass per
-            # scored position and no additional backbone pass.
-            distill = None
-            if cfg.memory.distill_weight and output.ae_teacher_hidden is not None:
-                positions = None
-                if cfg.memory.distill_positions > 0:
-                    positions = sample_positions(output.ae_mask, cfg.memory.distill_positions)[0]
-                distill = kl_distill_loss(
-                    output.ae_hidden,
-                    output.ae_teacher_hidden,
-                    base_model.ae_head,
-                    output.ae_mask,
-                    cfg.memory.distill_temperature,
-                    positions=positions,
-                    topk=cfg.memory.distill_topk,
-                    entropy_weight=cfg.memory.distill_entropy_weight,
-                )
-            total, terms = combine_losses(
-                qa,
-                reconstruction,
-                cfg.memory.qa_weight,
-                cfg.memory.reconstruction_weight,
-                ae,
-                cfg.memory.ae_lm_weight,
-                distill,
-                cfg.memory.distill_weight,
-            )
+            terms = output.objective_terms
+            total = objective_total(qa, terms, cfg.memory)
+            terms = {**terms, "qa_loss": qa, "loss": total}
             if accelerator is not None:
                 accelerator.backward(total)
             else:
@@ -436,7 +362,7 @@ def main() -> None:
             progress.set_postfix(
                 loss=f"{float(total.detach()):.4f}",
                 qa=f"{float(qa.detach()):.4f}",
-                recon=f"{float(reconstruction.detach()):.4f}",
+                embedding_recon=f"{float(terms['embedding_recon_loss'].detach()):.4f}",
             )
 
             if run and step % cfg.logging.log_every == 0:

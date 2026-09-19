@@ -90,7 +90,7 @@ class CheckpointManager:
             raise RuntimeError(
                 f"checkpoint {path} holds {len(unexpected)} tensors this model has no place for, "
                 f"e.g. {sorted(unexpected)[:8]}. The architecture or the objective changed "
-                "(for example reconstruction_loss switched between context_lm and mse_cosine)."
+                "(for example embedding_recon_weight or token_recon_weight changed)."
             )
 
         trainable = {name for name, p in model.named_parameters() if p.requires_grad}

@@ -6,7 +6,7 @@ What is asserted
 ----------------
 1. ``VocabularyHead(mode="linear")`` is indistinguishable from the ``nn.Linear`` it
    replaces: same parameter name, same shape, same forward value, and a default
-   ``MetaLoRA`` still exposes ``context_lm_head.weight`` so old checkpoints load.
+   ``MetaLoRA`` still exposes ``token_recon_head.weight`` so old checkpoints load.
 2. ``mode="tied"`` really scores with the frozen embedding (``W == E @ adapter``),
    keeps the per-row cost at ``D*vocab`` by materialising ``W``, and trains only the
    ``D -> H`` adapter: gradient reaches the adapter, never ``E``.
@@ -14,7 +14,7 @@ What is asserted
    optimizer step), so a stale head cannot score a later forward.
 4. ``head_init="memory_projection"`` starts from the decoders' memory projection, so
    the step-0 logits already score the tokens the memory points at.
-5. ``context_lm_loss`` runs end to end with a tied head and backpropagates into it.
+5. ``token_recon_loss`` runs end to end with a tied head and backpropagates into it.
 6. A materialisation performed under ``torch.no_grad()`` (every evaluation) never becomes
    the cached weight a later training step scores with -- that is what made the ON arm die
    on the first step after its first validation with DDP's "did not receive grad" error.
@@ -31,7 +31,7 @@ from torch.nn import functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.losses import context_lm_loss  # noqa: E402
+from src.losses import token_recon_loss  # noqa: E402
 from src.model import (  # noqa: E402
     MetaLoRA,
     VocabularyHead,
@@ -66,7 +66,7 @@ def _fake_metaloRA(**kwargs):
         target_modules=["q_proj"],
         max_context_tokens=8,
         trainable_dtype=torch.float32,
-        context_lm=True,
+        token_recon=True,
     )
     options.update(kwargs)
     return MetaLoRA(_FakeQwen(), **options)
@@ -97,20 +97,20 @@ def test_linear_mode_is_a_plain_linear():
 
 def test_default_model_exposes_the_old_parameter_name():
     model = _fake_metaloRA()
-    assert isinstance(model.context_lm_head, VocabularyHead)
-    assert model.context_lm_head.mode == "linear"
+    assert isinstance(model.token_recon_head, VocabularyHead)
+    assert model.token_recon_head.mode == "linear"
     parameters = dict(model.named_parameters())
-    assert "context_lm_head.weight" in parameters
-    assert parameters["context_lm_head.weight"].shape == (32, 8)
-    assert not any(name.startswith("context_lm_head.adapter") for name in parameters)
+    assert "token_recon_head.weight" in parameters
+    assert parameters["token_recon_head.weight"].shape == (32, 8)
+    assert not any(name.startswith("token_recon_head.adapter") for name in parameters)
 
 
 def test_linear_state_dict_matches_a_fresh_nn_linear_layout():
     """A default run must stay checkpoint-compatible with the pre-A1 layout."""
     model = _fake_metaloRA()
     reference = nn.Linear(8, 32, bias=False)
-    assert model.context_lm_head.weight.shape == reference.weight.shape
-    assert model.context_lm_head.weight.dtype == torch.float32
+    assert model.token_recon_head.weight.shape == reference.weight.shape
+    assert model.token_recon_head.weight.dtype == torch.float32
 
 
 # --- 2. tied mode scores with the frozen embedding ---------------------------------
@@ -219,7 +219,7 @@ def test_a_no_grad_materialisation_does_not_poison_the_next_training_step():
         RuntimeError: Expected to have finished reduction in the prior iteration ...
         Parameter indices which did not receive grad for rank 3: 757
 
-    757 is ``context_lm_head.adapter.weight`` in the 1.7B ON configuration. This test is
+    757 is ``token_recon_head.adapter.weight`` in the 1.7B ON configuration. This test is
     the single-process version of that failure: materialise under ``no_grad`` and check
     that the very next grad-enabled forward still reaches the adapter.
     """
@@ -247,7 +247,7 @@ def test_a_grad_enabled_materialisation_is_still_cached():
 
 def test_memory_projection_init_is_the_up_projection():
     model = _fake_metaloRA(head_mode="tied", head_init="memory_projection")
-    head = model.context_lm_head
+    head = model.token_recon_head
     embedding = model.qwen.get_input_embeddings().weight
     stacked = torch.stack(
         [decoder.memory_projection.weight for decoder in model.decoders], dim=0
@@ -261,9 +261,9 @@ def test_auto_init_resolves_to_memory_projection_only_when_tied():
     stacked = torch.stack(
         [decoder.memory_projection.weight for decoder in tied.decoders], dim=0
     ).mean(dim=0)
-    assert torch.allclose(tied.context_lm_head.adapter.weight, stacked.t(), atol=1e-6)
+    assert torch.allclose(tied.token_recon_head.adapter.weight, stacked.t(), atol=1e-6)
     linear = _fake_metaloRA(head_mode="linear", head_init="auto")
-    assert linear.context_lm_head.mode == "linear"
+    assert linear.token_recon_head.mode == "linear"
 
 
 def test_random_init_is_not_the_memory_projection():
@@ -271,26 +271,26 @@ def test_random_init_is_not_the_memory_projection():
     stacked = torch.stack(
         [decoder.memory_projection.weight for decoder in model.decoders], dim=0
     ).mean(dim=0)
-    assert not torch.allclose(model.context_lm_head.adapter.weight, stacked.t())
+    assert not torch.allclose(model.token_recon_head.adapter.weight, stacked.t())
 
 
 def test_tied_head_is_trainable_by_name():
     model = _fake_metaloRA(head_mode="tied")
     names = [name for name, _ in model.named_parameters()]
-    assert "context_lm_head.adapter.weight" in names
-    assert is_trainable_parameter_name("context_lm_head.adapter.weight")
+    assert "token_recon_head.adapter.weight" in names
+    assert is_trainable_parameter_name("token_recon_head.adapter.weight")
     model.set_trainable_dtype(torch.float32)
-    assert model.context_lm_head.adapter.weight.dtype == torch.float32
+    assert model.token_recon_head.adapter.weight.dtype == torch.float32
 
 
 # --- 5. the loss path --------------------------------------------------------------
 
 
-def test_context_lm_loss_runs_and_backpropagates_through_a_tied_head():
+def test_token_recon_loss_runs_and_backpropagates_through_a_tied_head():
     embedding, head = _tied_head()
     hidden = torch.randn(2, 2, 4, 8, requires_grad=True)   # [B, layers, P, D]
     labels = torch.tensor([[3, 4, 5, 6], [7, 8, 9, 10]])
-    loss = context_lm_loss(hidden, labels, head, None, max_logits_rows=2)
+    loss = token_recon_loss(hidden, labels, head, None, max_logits_rows=2)
     assert torch.isfinite(loss)
     loss.backward()
     assert head.adapter.weight.grad is not None

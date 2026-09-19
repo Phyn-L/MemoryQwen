@@ -57,7 +57,7 @@ def main():
         "--max-new-tokens", type=int,
         help="Upper bound on the tokens the autoregressive pass decodes per answer (default: "
              "evaluation.max_new_tokens from the checkpoint config, 32 in the shipped configs). "
-             "Keep it at 32 to stay comparable with scripts/test_icl_baseline.py, which uses "
+             "Keep it at 32 to stay comparable with scripts/evaluation/test_icl_baseline.py, which uses "
              "--squad-max-new-tokens 32.",
     )
     parser.add_argument(
@@ -67,7 +67,7 @@ def main():
     parser.add_argument(
         "--allow-missing-trainable", action="store_true",
         help="Load a checkpoint that does not cover every trainable tensor (for example an "
-             "older run without the context_lm head) instead of failing.",
+             "older run without the token_recon head) instead of failing.",
     )
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config")

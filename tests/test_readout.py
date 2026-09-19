@@ -154,7 +154,7 @@ def _model(readout_length=0):
         _tiny_qwen3(), rank=2, alpha=4.0, memory_length=4, decoder_hidden_size=16,
         decoder_heads=4, decoder_ffn_ratio=2,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], dropout=0.0,
-        max_context_tokens=16, trainable_dtype=torch.float32, context_lm=True,
+        max_context_tokens=16, trainable_dtype=torch.float32, token_recon=True,
         readout_length=readout_length, readout_layers=2, readout_heads=4,
     )
     for name, parameter in model.named_parameters():
@@ -181,7 +181,7 @@ def _forward(model, batch):
         embedding(batch["question_ids"]), batch["question_mask"],
         embedding(batch["answer_ids"]), batch["answer_mask"], batch["answer_ids"],
         torch.arange(batch["context_ids"].size(0)),
-        context_ids=batch["context_ids"], context_lm_positions=4,
+        context_ids=batch["context_ids"], token_recon_positions=4,
     )
 
 

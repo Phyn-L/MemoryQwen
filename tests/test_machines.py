@@ -33,7 +33,7 @@ from utils.machines import (  # noqa: E402
 )
 
 REPO = Path(__file__).resolve().parent.parent
-CONFIG = REPO / "configs" / "4090" / "qwen-1.7b" / "baseline" / "train_baseline.yaml"
+CONFIG = REPO / "configs/train_baseline.yaml"
 MACHINE_VARIABLES = ("MACHINE", "MODEL_ROOT", "DATA_ROOT", "WANDB_MODE")
 
 
@@ -65,7 +65,7 @@ class _Hidden:
 
 
 def test_the_table_holds_both_machines_with_distinct_paths():
-    assert set(MACHINES) == {"4090", "h200"}
+    assert set(MACHINES) == {"4090", "h200", "a800"}
     for name, entry in MACHINES.items():
         assert entry["MODEL_ROOT"].startswith("/"), name
         assert entry["DATA_ROOT"].startswith("/"), name

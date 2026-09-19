@@ -84,7 +84,7 @@ MemoryQwen/
 | `package-lock.json` | 原位 | 暂留；核实工具用途后再决定删除 |
 | `package.json` | 原位 | 暂留；核实工具用途后再决定删除 |
 | `pyproject.toml` | 原位 | 保持内容与接口 |
-| `scripts/download_hotpotqa.py` | 原位 | 候选迁移至 `scripts/data/download_hotpotqa.py`；检查路径推导及调用者 |
+| `scripts/data/download_hotpotqa.py` | 原位 | 候选迁移至 `scripts/data/download_hotpotqa.py`；检查路径推导及调用者 |
 | `scripts/archive/eval_icl_squad.sh` | 原位 | 候选迁移至 `scripts/evaluation/eval_icl_squad.sh`；旧 shell 入口保留转发兼容 |
 | `scripts/archive/eval_squad_v1v2.sh` | 原位 | 候选迁移至 `scripts/evaluation/eval_squad_v1v2.sh`；旧 shell 入口保留转发兼容 |
 | `scripts/archive/run_ab.sh` | 原位 | 候选迁移至 `scripts/experiments/run_ab.sh`；旧 shell 入口保留转发兼容 |
@@ -92,7 +92,7 @@ MemoryQwen/
 | `scripts/archive/run_queue.sh` | 原位 | 候选迁移至 `scripts/experiments/run_queue.sh`；旧 shell 入口保留转发兼容 |
 | `scripts/test.py` | 原位 | 保持内容与接口 |
 | `scripts/test.sh` | 原位 | 保持内容与接口 |
-| `scripts/test_icl_baseline.py` | 原位 | 保持内容与接口 |
+| `scripts/evaluation/test_icl_baseline.py` | 原位 | 保持内容与接口 |
 | `scripts/archive/test_icl_baseline.sh` | 原位 | 保持内容与接口 |
 | `scripts/train.py` | 原位 | 保持内容与接口 |
 | `scripts/train.sh` | 原位 | 保持内容与接口 |

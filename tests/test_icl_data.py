@@ -1,6 +1,6 @@
 """The ICL baseline and the training evaluator must read the same questions.
 
-`scripts/test_icl_baseline.py` used to default to `contexts/standardized/` while the
+`scripts/evaluation/test_icl_baseline.py` used to default to `contexts/standardized/` while the
 training pipeline read `contexts/aggregated/`, and the two files do not contain the same
 rows (10570 vs 16498 answered), so the two means were over differently weighted sets. The
 aggregated tree is now the only supported schema -- `iter_examples` raises on anything else
@@ -20,7 +20,7 @@ from src.data import AggregatedContextDataset  # noqa: E402
 from src.icl_baseline import iter_examples, load_jsonl  # noqa: E402
 from utils.config import TrainConfig  # noqa: E402
 
-CONFIG = REPO / "configs" / "4090" / "qwen-1.7b" / "baseline" / "train_baseline.yaml"
+CONFIG = REPO / "configs/train_baseline.yaml"
 
 
 def _key(context: str, question: str) -> tuple[str, str]:

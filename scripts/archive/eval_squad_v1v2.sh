@@ -20,7 +20,7 @@
 #   CHECKPOINT=outputs/Qwen1.7B_20260917_213648.pt bash scripts/archive/eval_squad_v1v2.sh
 #   CHECKPOINT=... SAMPLE_CAP=8 bash scripts/archive/eval_squad_v1v2.sh      # quick plumbing check
 #   CHECKPOINT=... DRYRUN=1 bash scripts/archive/eval_squad_v1v2.sh          # print the plan only
-#   CHECKPOINT=... CONFIG=configs/4090/qwen-1.7b/baseline/train_baseline.yaml bash ...      # override the derived config
+#   CHECKPOINT=... CONFIG=configs/train_baseline.yaml bash ...      # override the derived config
 #   CHECKPOINT=... CUDA_VISIBLE_DEVICES=1 bash ...
 set -euo pipefail
 
@@ -44,7 +44,7 @@ BATCH_SIZE="${BATCH_SIZE:-}"
 QA_BATCH_SIZE="${QA_BATCH_SIZE:-}"
 # Generation budget. Empty = the checkpoint config's evaluation.max_new_tokens (32 in the
 # shipped configs, which is what the ICL baseline decodes too -- changing it makes the AR
-# numbers no longer comparable with scripts/test_icl_baseline.py).
+# numbers no longer comparable with scripts/evaluation/test_icl_baseline.py).
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-}"
 CONFIG="${CONFIG:-}"
 MACHINE="${MACHINE:-4090}"

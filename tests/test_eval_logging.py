@@ -111,9 +111,9 @@ def test_training_losses_are_not_folded_into_the_evaluation_sections():
     for key in (key for payload in payloads for key in payload):
         assert not key.startswith("train/"), f"{key!r} leaked into the evaluation payloads"
     # and the training terms keep their own prefix in the loop's own payload
-    terms = {"loss": 1.0, "qa_loss": 0.5, "ae_loss": 2.0, "distill_loss": 0.25}
+    terms = {"loss": 1.0, "qa_loss": 0.5, "causal_recon_loss": 2.0, "distill_loss": 0.25}
     training_payload = {f"train/{key}": value for key, value in terms.items()}
-    assert set(training_payload) == {"train/loss", "train/qa_loss", "train/ae_loss", "train/distill_loss"}
+    assert set(training_payload) == {"train/loss", "train/qa_loss", "train/causal_recon_loss", "train/distill_loss"}
 
 
 if __name__ == "__main__":

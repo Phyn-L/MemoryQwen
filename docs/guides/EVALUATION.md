@@ -48,7 +48,7 @@ already runs it.
 Because the autoregressive number is the only one that is comparable with an ICL
 baseline, training must actually measure it: `evaluation.autoregressive_every` controls how
 often it runs, and `evaluation.max_new_tokens` is 32 to match
-`scripts/test_icl_baseline.py --squad-max-new-tokens 32`. Setting `autoregressive_every` to
+`scripts/evaluation/test_icl_baseline.py --squad-max-new-tokens 32`. Setting `autoregressive_every` to
 a huge number is how the `pgw1382s` run ended up with no trustworthy score at all.
 
 Both evaluation modes are logged into their own W&B section, with identical metric keys so
@@ -105,7 +105,7 @@ end-to-end path
 show up.
 
 Both harnesses read the same file, and it is the only supported one:
-`scripts/test_icl_baseline.py` defaults to `<data.root>/squad/validation.jsonl` and reads it
+`scripts/evaluation/test_icl_baseline.py` defaults to `<data.root>/squad/validation.jsonl` and reads it
 through `src.icl_baseline.iter_examples`, which understands the aggregated context schema and
 **raises** on the old one-question-per-line layout instead of yielding an empty evaluation
 set. `tests/test_icl_data.py` asserts the parity against the training split on the real files.
@@ -162,3 +162,14 @@ here -- the current file is the one every recorded run used:
 3. fix the aggregation that produced these files: merge by `(context, question)` and reconcile
    `answer_starts`/`answers`. Only this option also addresses the fragment answers, and it
    belongs in whichever script built the aggregated tree.
+
+## 当前 recon 指标（2026-09-19）
+
+以下定义取代本文历史 `reconstruction_loss`/`ae_loss` 字段：
+
+- `val_teacher_forced/embedding_recon_loss`：MemoryDecoder 输出与原文输入 embedding 的 MSE/cosine/MSE+cosine。
+- `val_teacher_forced/memory_token_recon_loss`：MemoryDecoder 从 memory hidden states 和位置查询预测原文 token 的 CE。
+- `val_teacher_forced/prefix_kv_recon_loss`：原 AE，Qwen 使用 memory KV 和真实原文前缀预测下一 token 的 CE。
+- `val_teacher_forced/distill_loss`：同一 prefix-KV student 的 KL 蒸馏。
+
+各指标是未加权均值，关闭的项记 0；`loss` 按配置权重求和。辅助损失按 context 计数，QA 按问答行计数，分别跨进程汇总。训练使用相同目标实现和 `train/` 名称。详见 `configs/README.md`。

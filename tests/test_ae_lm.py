@@ -113,7 +113,7 @@ def test_a_row_with_fewer_positions_than_the_budget_scores_each_one_once():
 
     ``sample_positions`` fills them with index 0 and marks them False. The keep-mask has to
     be gathered alongside the hidden states: before it was, those duplicates pointed at a
-    valid label and were counted, so a context shorter than ``ae_lm_positions`` was trained
+    valid label and were counted, so a context shorter than ``causal_recon_positions`` was trained
     mostly on its own first token (3 valid positions under a budget of 5 put token 0 into 3
     of the 5 loss terms).
     """
@@ -221,7 +221,7 @@ def _model(ae_lm=True, memory_length=4):
         dropout=0.0,
         max_context_tokens=16,
         trainable_dtype=torch.float32,
-        context_lm=True,
+        token_recon=True,
         ae_lm=ae_lm,
     )
     for name, parameter in model.named_parameters():
@@ -253,7 +253,7 @@ def _forward(model, batch):
         batch["answer_ids"],
         torch.arange(batch["context_ids"].size(0)),
         context_ids=batch["context_ids"],
-        context_lm_positions=4,
+        token_recon_positions=4,
     )
 
 

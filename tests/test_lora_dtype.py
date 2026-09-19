@@ -163,7 +163,7 @@ def _fake_metaloRA(use_peft=False):
         target_modules=["q_proj"],
         max_context_tokens=8,
         trainable_dtype=torch.float32,
-        context_lm=True,
+        token_recon=True,
         use_peft=use_peft,
     )
 

@@ -1,0 +1,86 @@
+checkpoint:
+  output_dir: outputs/ab_h200_on
+data:
+  cache_dataset: true
+  cache_sortish_lengths: true
+  chat_template_enable_thinking: false
+  filter_long_context: true
+  filter_no_qa: true
+  max_answer_tokens: 64
+  max_context_tokens: 1024
+  max_question_tokens: 128
+  qa_per_context: 4
+  root: ${DATA_ROOT:-/data/lz/contexts/aggregated}
+  sortish_bucket_multiplier: 50
+  test_datasets:
+  - squad
+  train_datasets: all
+  train_max_samples: null
+  use_chat_template: false
+  validation_datasets:
+  - squad
+  validation_max_samples: 2000
+evaluation:
+  autoregressive_every: 400
+  autoregressive_max_qa: 1024
+  max_new_tokens: 32
+  qa_batch_size: 4
+  teacher_forced_every: 200
+logging:
+  log_every: 25
+  wandb_mode: offline
+  wandb_project: MemoryQwen
+memory:
+  slot_attention: causal
+  token_recon_positions: 128
+  decoder_ffn_ratio: 2
+  decoder_heads: 8
+  decoder_hidden_size: 256
+  distill_entropy_weight: false
+  distill_positions: 128
+  distill_temperature: 1.0
+  distill_topk: 0
+  distill_weight: 0.3
+  head_init: auto
+  head_mode: tied
+  init_mode: token_embed
+  init_seed: 0
+  memory_length: 64
+  qa_weight: 1.0
+  readout_heads: 4
+  readout_hidden_size: 256
+  readout_layers: 2
+  readout_length: 8
+  embedding_recon_weight: 0.0
+  embedding_recon_loss: mse_cosine
+  embedding_recon_cosine_weight: 0.5
+  token_recon_weight: 1.0
+  causal_recon_weight: 1.0
+  causal_recon_positions: 128
+model:
+  lora_alpha: 16.0
+  lora_dropout: 0.0
+  lora_rank: 8
+  name_or_path: ${MODEL_ROOT:-/data/lz/hf_cache/hub}/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  torch_dtype: bfloat16
+  trainable_dtype: float32
+optimizer:
+  lr: 0.0001
+  name: adamw
+  weight_decay: 0.01
+scheduler:
+  name: cosine
+  warmup_steps: 200
+training:
+  batch_size: 8
+  epochs: 1
+  max_grad_norm: 1.0
+  seed: 42

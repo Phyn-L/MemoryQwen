@@ -77,7 +77,7 @@ def _model(readout_length: int = 0) -> MetaLoRA:
         target_modules=["q_proj"],
         max_context_tokens=CONTEXT_LENGTH,
         trainable_dtype=torch.float32,
-        context_lm=True,
+        token_recon=True,
         readout_length=readout_length,
     )
     model.eval()

@@ -39,7 +39,7 @@ fi
 python -m torch.distributed.run \
   --standalone \
   --nproc-per-node="$NUM_GPUS" \
-  scripts/test_icl_baseline.py \
+  scripts/evaluation/test_icl_baseline.py \
   --model "$MODEL" \
   --datasets $DATASETS \
   --num-shots "$NUM_SHOTS" \

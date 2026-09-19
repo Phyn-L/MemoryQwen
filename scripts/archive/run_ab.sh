@@ -28,8 +28,8 @@ if [ -d "$H200_ENV" ]; then
 fi
 
 NUM_PROCESSES="${NUM_PROCESSES:-4}"
-ON_CONFIG="${ON_CONFIG:-configs/4090/qwen-1.7b/reader/train_reader-on_ctx1024_m64.yaml}"
-OFF_CONFIG="${OFF_CONFIG:-configs/4090/qwen-1.7b/reader/train_reader-off_ctx1024_m64.yaml}"
+ON_CONFIG="${ON_CONFIG:-configs/train_baseline.yaml}"
+OFF_CONFIG="${OFF_CONFIG:-configs/ablations/reader_off.yaml}"
 LOG_DIR="${LOG_DIR:-logs}"
 DRYRUN="${DRYRUN:-0}"
 RESUME="${RESUME:-0}"

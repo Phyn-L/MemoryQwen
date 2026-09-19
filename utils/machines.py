@@ -19,6 +19,7 @@ mechanism:
 
 Edit ``MACHINES`` to add a machine.
 """
+
 from __future__ import annotations
 
 import os
@@ -38,12 +39,17 @@ MACHINES: dict[str, dict[str, str]] = {
         "DATA_ROOT": "/home/lijie/proj2/xmu/lz/aggregated",
         "WANDB_MODE": "offline",
     },
+    "a800": {
+        "MODEL_ROOT": "/mnt/beegfs-storage-a8002/seanlz/Qwen",
+        "DATA_ROOT": "/mnt/beegfs-storage-a8002/seanlz/aggregated",
+        "WANDB_MODE": "offline",
+    },
 }
 
 # Names that appear in hostnames or that people type for the same machine.
 ALIASES: dict[str, str] = {
     "4x4090": "4090",
-    "xmu90": "4090",          # the 4090 box's hostname
+    "xmu90": "4090",  # the 4090 box's hostname
     "h200-gateway": "h200",
 }
 
@@ -99,7 +105,9 @@ def resolve_machine(explicit: str | None = None) -> tuple[str | None, bool]:
     return None, False
 
 
-def fill_missing(machine_values: Mapping[str, str], environ: Mapping[str, str]) -> dict[str, str]:
+def fill_missing(
+    machine_values: Mapping[str, str], environ: Mapping[str, str]
+) -> dict[str, str]:
     """Drop the values whose variable is already set in ``environ``."""
     return {key: value for key, value in machine_values.items() if not environ.get(key)}
 

@@ -27,7 +27,7 @@ sys.path.insert(0, str(REPO))
 from utils.config import LoggingConfig, TrainConfig  # noqa: E402
 
 TRAIN_PY = REPO / "scripts" / "train.py"
-CONFIG = REPO / "configs" / "4090" / "qwen-1.7b" / "reader" / "train_reader-on_ctx1024_m64.yaml"
+CONFIG = REPO / "configs/train_baseline.yaml"
 STEPS_PER_EPOCH = 7890
 
 

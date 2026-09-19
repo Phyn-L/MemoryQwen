@@ -16,10 +16,10 @@ def qa_loss(logits, labels):
     row_counts = active.view(token_labels.shape).sum(dim=1).clamp_min(1)
     row_loss = token_loss.sum(dim=1) / row_counts
     return row_loss.mean()
-def reconstruction_loss(predicted,target,mask=None,cosine_weight=0.1,mode="mse_cosine"):
+def recon_loss(predicted,target,mask=None,cosine_weight=0.1,mode="mse_cosine"):
     if predicted.ndim == target.ndim + 1:
         target=target.unsqueeze(1).expand_as(predicted)
-    if predicted.shape != target.shape: raise ValueError(f"reconstruction shape mismatch: {predicted.shape} vs {target.shape}")
+    if predicted.shape != target.shape: raise ValueError(f"recon shape mismatch: {predicted.shape} vs {target.shape}")
     # The decoders may run in float32 while the context target is the backbone's
     # bfloat16 input embedding; reduce in float32 so the comparison is meaningful.
     predicted, target = predicted.float(), target.float()
@@ -50,7 +50,7 @@ def _chunk_cross_entropy(hidden_chunk, labels_chunk, weight):
     return F.cross_entropy(logits, labels_chunk, ignore_index=-100, reduction="sum")
 
 
-def context_lm_loss(hidden, labels, head, mask=None, max_logits_rows=256):
+def token_recon_loss(hidden, labels, head, mask=None, max_logits_rows=256):
     """Context next-token prediction through the memory.
 
     ``hidden`` is ``[B, num_layers, P, D]``: for every Qwen layer, the bottleneck
@@ -76,9 +76,9 @@ def context_lm_loss(hidden, labels, head, mask=None, max_logits_rows=256):
     backbone) and removes essentially all of that.
     """
     if hidden.ndim != 4:
-        raise ValueError("context_lm hidden must have shape [B, num_layers, P, D]")
+        raise ValueError("token_recon hidden must have shape [B, num_layers, P, D]")
     if labels.shape != hidden.shape[:1] + hidden.shape[2:3]:
-        raise ValueError(f"context_lm labels {tuple(labels.shape)} do not match hidden {tuple(hidden.shape)}")
+        raise ValueError(f"token_recon labels {tuple(labels.shape)} do not match hidden {tuple(hidden.shape)}")
     if mask is None:
         mask = labels.ne(-100)
     else:
@@ -162,13 +162,13 @@ def sequence_lm_loss(hidden, labels, head, mask=None, positions=None, max_logits
     -- this function does *not* shift, unlike :func:`qa_loss` -- so the caller shifts once
     and any ``positions`` it passes index the same aligned pair that is scored.
 
-    Unlike :func:`context_lm_loss` the vocabulary head is applied once (the sequence has one
+    Unlike :func:`token_recon_loss` the vocabulary head is applied once (the sequence has one
     hidden state per position, not one per layer), so scoring every position costs a single
     head pass. ``positions`` gathers first, then chunks and checkpoints, so a dense
     objective still respects the logits budget.
 
     The head is materialised outside the checkpointed chunks for the same reason as in
-    :func:`context_lm_loss`: a lazily materialised weight would make the recomputation save
+    :func:`token_recon_loss`: a lazily materialised weight would make the recomputation save
     a different number of tensors than the forward.
     """
     if hidden.ndim != 3:
@@ -312,12 +312,37 @@ def kl_distill_loss(student_hidden, teacher_hidden, head, mask=None, temperature
     return total / weight_sum
 
 
-def combine_losses(qa, reconstruction, qa_weight=1., reconstruction_weight=1., ae=None, ae_weight=0., distill=None, distill_weight=0.):
-    total=qa_weight*qa+reconstruction_weight*reconstruction
-    terms={"loss":total,"qa_loss":qa,"reconstruction_loss":reconstruction}
+def combine_losses(qa, recon, qa_weight=1., recon_weight=1., ae=None, ae_weight=0., distill=None, distill_weight=0.):
+    total=qa_weight*qa+recon_weight*recon
+    terms={"loss":total,"qa_loss":qa,"recon_loss":recon}
     if ae is not None and ae_weight:
-        total=total+ae_weight*ae; terms["ae_loss"]=ae
+        total=total+ae_weight*ae; terms["causal_recon_loss"]=ae
     if distill is not None and distill_weight:
         total=total+distill_weight*distill; terms["distill_loss"]=distill
     terms["loss"]=total
     return total,terms
+
+
+def memory_objectives(model, prefix, context_ids, context_mask, cfg):
+    """Unweighted context-level losses; disabled branches do no decoder work."""
+    zero = prefix.memory.sum() * 0.0
+    terms = {name: zero for name in ("embedding_recon_loss", "token_recon_loss", "causal_recon_loss", "distill_loss")}
+    if cfg.embedding_recon_weight:
+        terms["embedding_recon_loss"] = recon_loss(prefix.recon, prefix.context_target, context_mask, cfg.embedding_recon_cosine_weight, cfg.embedding_recon_loss)
+    if cfg.token_recon_weight:
+        t = model.token_recon_terms(context_ids, context_mask, prefix.layer_memory, cfg.token_recon_positions)
+        terms["token_recon_loss"] = token_recon_loss(t.hidden, t.labels, model.token_recon_head, t.mask)
+    if cfg.causal_recon_weight or cfg.distill_weight:
+        hidden = model.autoencode_with_memory(prefix, model.qwen.get_input_embeddings()(context_ids), context_mask)[:, :-1]
+        mask = context_mask[:, 1:]
+        if cfg.causal_recon_weight:
+            positions = sample_positions(mask, cfg.causal_recon_positions)[0] if cfg.causal_recon_positions else None
+            terms["causal_recon_loss"] = sequence_lm_loss(hidden, context_ids[:, 1:], model.ae_head, mask, positions=positions)
+        if cfg.distill_weight:
+            positions = sample_positions(mask, cfg.distill_positions)[0] if cfg.distill_positions else None
+            terms["distill_loss"] = kl_distill_loss(hidden, prefix.context_hidden[:, :-1], model.ae_head, mask, cfg.distill_temperature, positions=positions, topk=cfg.distill_topk, entropy_weight=cfg.distill_entropy_weight)
+    return terms
+
+
+def objective_total(qa, terms, cfg):
+    return cfg.qa_weight * qa + sum(getattr(cfg, name.removesuffix("_loss") + "_weight") * loss for name, loss in terms.items())
