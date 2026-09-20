@@ -1,3 +1,5 @@
+> 历史记录：文中 scripts/archive/ 脚本已删除，仅可从 Git 历史恢复；当前评测入口是 scripts/evaluation/test_all_suite.sh。
+
 # 实验索引
 
 整理日期：2026-09-18。以下状态来自已保存文档，本次没有读取远端训练进度或重算结果。“已记录”不等于本次复验；预测与待执行步骤保留为历史计划。配置明细见[配置索引](../../configs/README.md)，评分规则见[评测指南](../guides/EVALUATION.md)。

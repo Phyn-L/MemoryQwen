@@ -8,8 +8,8 @@
 
 ```bash
 bash scripts/train.sh --machine 4090 --config configs/4090/qwen-1.7b/baseline/train_baseline.yaml
-bash scripts/test.sh --machine 4090 --ckpt outputs/<run>/last.pt --datasets hotpotqa --bs 2
-bash scripts/icl_baseline_test.sh --machine h200 --model Qwen3-8B --config configs/4090/icl/icl_hotpotqa_4shot.yaml --bs 4
+python -m utils.launcher test --machine 4090 --ckpt outputs/<run>/last.pt --datasets hotpotqa --bs 2
+python -m utils.launcher icl --machine h200 --model Qwen3-8B --config configs/4090/icl/icl_hotpotqa_4shot.yaml --bs 4
 ```
 
 `<run>` 替换为实际运行目录。test 默认恢复 checkpoint 配置；HotpotQA 预设使用带答案的 validation split。完整参数、机器路径与 batch 语义见[运行指南](docs/guides/RUNNING.md)。
@@ -36,3 +36,5 @@ bash scripts/icl_baseline_test.sh --machine h200 --model Qwen3-8B --config confi
 - `outputs/`、`logs/`、`wandb/`：本地运行产物，保持现有路径并由 Git 忽略。
 
 文档中的历史实验数字不代表当前重新测量；当前使用说明、历史证据和待验证计划分别索引。目录整理范围见[整理方案](docs/REPOSITORY_LAYOUT_PLAN.md)。
+
+当前推荐 checkpoint 编排入口为 `bash scripts/evaluation/test_all_suite.sh`。旧 shell wrappers 和 `scripts/archive/` 已删除；文中的历史配置路径需按 configs/README.md 选择当前配置。

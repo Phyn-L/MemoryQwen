@@ -1,1 +1,0 @@
-evaluation/test_hotpotqa_suite.sh

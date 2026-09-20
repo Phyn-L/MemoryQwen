@@ -116,12 +116,6 @@ def test_a_fresh_run_nests_its_directory_under_the_configured_output_dir():
     ).resolve()
 
 
-def test_the_launcher_finds_checkpoints_in_every_run_directory():
-    source = (REPO / "scripts" / "archive" / "run_ab.sh").read_text(encoding="utf-8")
-    assert '"$out_dir"/*/step-*.pt' in source, "the launcher must look inside the run dirs"
-    assert "RESUME=" in source and "--resume" in source
-
-
 def test_the_training_loop_honours_the_resumed_position_and_the_step_budget():
     source = TRAIN_PY.read_text(encoding="utf-8")
     assert "resume_plan(step, effective_loader_len, cfg.training.epochs)" in source

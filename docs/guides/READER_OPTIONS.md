@@ -178,7 +178,7 @@ memory:
 ## 8. 怎么验证这些开关有用
 
 见 [AB_H200.md](../experiments/AB_H200.md)：`configs/qwen-1.7b/ab_h200_{on,off}.yaml` 两臂除 6 个开关外逐字段
-相同（`tests/test_ab_configs.py` 断言），步数以所选配置、进程数和实际数据量打印的 schedule 为准，用 `scripts/archive/run_ab.sh` 顺序跑完两臂。
+相同（`tests/test_ab_configs.py` 断言），步数以所选配置、进程数和实际数据量打印的 schedule 为准，分别通过 `scripts/train.sh --config <配置路径>` 顺序运行两臂。
 之前的 `0rj6x1xc`（ctx2048/M64/1ep）与 `vry7n1sw`（ctx512/M16/3ep）形状不同，只能当规模参照，
 不能用来判断开关的好坏。
 

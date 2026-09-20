@@ -116,7 +116,7 @@ def main():
     cfg.checkpoint.output_dir = str(checkpoint_path.parent)
     if not cfg.logging.wandb_run_name:
         cfg.logging.wandb_run_name = checkpoint_path.parent.name
-    # Multi-GPU evaluation: `accelerate launch --num_processes N` (scripts/test.sh does it)
+    # Multi-GPU evaluation: `torchrun` (utils.launcher starts one worker per GPU)
     # gives every rank one card, and only the *loader* is sharded here. The evaluator
     # all-reduces its own accumulators (src/evaluator.py::_distributed_sum), so sharding the
     # batches is all that is needed to divide the work.

@@ -1,1 +1,0 @@
-evaluation/test_all_suite.sh

@@ -1,1 +1,0 @@
-evaluation/test_ms_marco_suite.sh

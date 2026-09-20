@@ -1,3 +1,5 @@
+> 历史记录：文中 scripts/archive/ 脚本已删除，仅可从 Git 历史恢复；当前评测入口是 scripts/evaluation/test_all_suite.sh。
+
 # 第三轮运行计划（2026-09-17 夜 → 次日）
 
 > 历史快照：2026-09-18 归档。正文状态、数值、路径和预计完成时间属于当时记录，本次未重新运行实验或核实远端状态。当前操作见[运行指南](../guides/RUNNING.md)，实验状态见[实验索引](../experiments/README.md)。

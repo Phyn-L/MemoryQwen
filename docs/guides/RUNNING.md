@@ -19,12 +19,12 @@ bash scripts/train.sh --machine h200 --config configs/4090/qwen-8b/reader/train_
 
 默认每张可见 GPU 一个进程；Python launcher 使用当前解释器的 torchrun，训练代码依据 YAML dtype 初始化 Accelerator。不再在 shell 固定 bf16 或实验超参数。旧 `CONFIG=...`、`MACHINE=...` 和 `NUM_PROCESSES=...` 命令仍可用；新命令推荐通过 CUDA_VISIBLE_DEVICES 选择 GPU。
 
-## 2. test.sh
+## 2. checkpoint evaluator
 
 ```bash
-bash scripts/test.sh --machine 4090 --ckpt outputs/<run>/last.pt --datasets hotpotqa --bs 2
-bash scripts/test.sh --machine h200 --ckpt outputs/<run>/last.pt --config configs/4090/evaluation/test_hotpotqa.yaml --bs 4
-bash scripts/test.sh --machine 4090 --ckpt outputs/<run>/last.pt --datasets squad hotpotqa --split validation --bs 2
+python -m utils.launcher test --machine 4090 --ckpt outputs/<run>/last.pt --datasets hotpotqa --bs 2
+python -m utils.launcher test --machine h200 --ckpt outputs/<run>/last.pt --config configs/4090/evaluation/test_hotpotqa.yaml --bs 4
+python -m utils.launcher test --machine 4090 --ckpt outputs/<run>/last.pt --datasets squad hotpotqa --split validation --bs 2
 ```
 
 默认从 checkpoint 保存的配置恢复模型结构和预处理，默认 split 为 validation。`--machine` 将已知机器的模型/数据根目录替换为目标机器根目录，保留模型 snapshot revision 和子目录；不能推断的路径报错或要求显式完整配置。没有 config 的旧 checkpoint 必须提供完整训练 YAML。
@@ -33,12 +33,12 @@ bash scripts/test.sh --machine 4090 --ckpt outputs/<run>/last.pt --datasets squa
 
 `--bs` / `--batch-size` 是每进程的 context batch；一个 context 可能有多个 QA，`--qa-batch-size` 控制内部 QA 分组。测试不继承训练时的 validation 样本上限，只有显式 `max_samples` 才限制数量。结果和完整解析配置保存到 checkpoint 所在目录的 `eval_<split>_<timestamp>.json`。多数据集同时选择时输出聚合分数；需要逐数据集分数时分别运行。
 
-## 3. icl_baseline_test.sh
+## 3. 独立 ICL evaluator
 
 ```bash
-bash scripts/icl_baseline_test.sh --machine 4090 --model Qwen3-1.7B --config configs/4090/icl/icl_hotpotqa_4shot.yaml --bs 2
-bash scripts/icl_baseline_test.sh --machine h200 --model Qwen3-8B --datasets hotpotqa --config configs/4090/icl/icl_hotpotqa_0shot.yaml --bs 4
-bash scripts/icl_baseline_test.sh --machine 4090 --model Qwen3-4B-Instruct-2507 --config configs/4090/icl/icl_squad_4shot.yaml
+python -m utils.launcher icl --machine 4090 --model Qwen3-1.7B --config configs/4090/icl/icl_hotpotqa_4shot.yaml --bs 2
+python -m utils.launcher icl --machine h200 --model Qwen3-8B --datasets hotpotqa --config configs/4090/icl/icl_hotpotqa_0shot.yaml --bs 4
+python -m utils.launcher icl --machine 4090 --model Qwen3-4B-Instruct-2507 --config configs/4090/icl/icl_squad_4shot.yaml
 ```
 
 `icl_test.sh` 是同一入口的简短别名。未传 `--config` 时使用 `configs/4090/icl/icl_squad_4shot.yaml`。shot 数、生成长度、输入长度、dtype、seed、chat template、数据 split 和输出目录均写入 ICL YAML；模型、数据集和 batch size 可由 CLI 覆盖。ICL 的 bs 是每 GPU 的 QA 数。
@@ -59,3 +59,5 @@ bash scripts/icl_baseline_test.sh --machine 4090 --model Qwen3-4B-Instruct-2507 
 两条路径均使用现有答案评分，不计算 supporting-fact/joint 指标。memory 会按 checkpoint 的 context 长度规则过滤；ICL 的对应限制写在 YAML 的 `data.max_context_tokens`，默认 null。公平比较时需对齐这个限制与样本集合，不能只对齐 bs。
 
 更多变体与旧名映射见[配置索引](../../configs/README.md)。原 A/B、8B、队列和 SQuAD 专用脚本暂作历史兼容工具；日常运行使用上述三个入口，不再新增专用变体 shell。旧脚本具有各自历史默认值，不等同于新预设。
+
+当前推荐 checkpoint 编排入口为 `bash scripts/evaluation/test_all_suite.sh`。旧 shell wrappers 和 `scripts/archive/` 已删除；文中的历史配置路径需按 configs/README.md 选择当前配置。
