@@ -14,6 +14,35 @@ python -m utils.launcher icl --machine h200 --model Qwen3-8B --config configs/40
 
 `<run>` 替换为实际运行目录。test 默认恢复 checkpoint 配置；HotpotQA 预设使用带答案的 validation split。完整参数、机器路径与 batch 语义见[运行指南](docs/guides/RUNNING.md)。
 
+## 从 4090 同步到 H200 / A800
+
+**4090 是代码和 YAML 配置的开发基准，H200/A800 只负责执行计算任务。** 在 4090 的项目根目录提交修改后，通过增量 Git bundle 同步，无需计算服务器访问 GitHub，也无需先 push：
+
+```bash
+# 先提交本次需要同步的代码和 YAML（将路径替换为实际修改文件）
+git add <文件路径...>
+git commit -m "说明本次修改"
+
+# 选择一个目标，或同步两台服务器
+bash scripts/sync_remote.sh h200
+bash scripts/sync_remote.sh a800
+bash scripts/sync_remote.sh all
+```
+
+| 目标 | 默认 SSH 主机 | 默认仓库目录 |
+|---|---|---|
+| h200 | `h200` | `/home/lijie/proj2/xmu/lz/MemoryQwen` |
+| a800 | `A800` | `/mnt/beegfs-storage-a8002/seanlz/MemoryQwen` |
+
+脚本查询远端 HEAD，确认它是本地 HEAD 的祖先，生成增量 bundle，经 SSH 传输后执行快进更新；两端提交相同时不传输 bundle。同步包含所有已提交文件的新增、修改和删除，包括 YAML，不包含未提交修改、未跟踪数据、模型权重或运行产物。
+
+- 本地存在未提交修改时停止，请先整理并提交。
+- 远端存在未提交修改、历史分叉或本地未知的提交时停止，不自动 stash 或 reset。需要保留的远端代码/配置改动应先整理回 4090，再提交同步。
+- `all` 会尝试两台服务器，任一失败则最终返回非零退出码。
+- 运行任务时通过 `--machine h200` 或 `--machine a800` 选择机器路径，避免在计算服务器修改公共 YAML。同步前确认正在运行的任务不会受到代码更新影响；脚本不停止或重启任务。
+
+需要 SSH 非交互认证和远端 Git、Bash、`flock`。可通过 `H200_SSH_HOST`、`H200_REPO`、`A800_SSH_HOST`、`A800_REPO` 覆盖目标，仓库路径使用绝对路径。日常统一使用 [sync_remote.sh](scripts/sync_remote.sh)；旧 `sync_h200.sh` / `sync_a800.sh` 仍采用 GitHub 拉取。更多脚本说明见 [Scripts 使用指南](scripts/README.md)。
+
 ## 从这里查找
 
 | 想了解什么 | 入口 |

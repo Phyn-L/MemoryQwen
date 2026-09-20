@@ -444,11 +444,13 @@ def suite_main(argv=None):
     parser.add_argument('--output-dir')
     parser.add_argument('--bs', type=int, default=2)
     parser.add_argument('--max-input-tokens', type=int, default=8192)
+    parser.add_argument('--max-context-tokens', type=int, default=1024,
+                        help='Drop examples whose full context exceeds this tokenizer length')
     parser.add_argument('--max-new-tokens', type=int, default=32)
     parser.add_argument('--max-samples', type=int)
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
-    for key in ('bs', 'max_input_tokens', 'max_new_tokens', 'max_samples'):
+    for key in ('bs', 'max_input_tokens', 'max_new_tokens', 'max_context_tokens', 'max_samples'):
         value = getattr(args, key)
         if value is not None and value < 1:
             parser.error(f'{key} must be positive')
@@ -467,7 +469,8 @@ def suite_main(argv=None):
                    '--num-shots', '0', '--datasets', plan['dataset'], '--split', plan['split'],
                    '--data-root', str(root), '--output-dir', str(destination),
                    '--bs', str(args.bs), '--max-input-tokens', str(args.max_input_tokens),
-                   '--max-new-tokens', str(args.max_new_tokens)]
+                   '--max-new-tokens', str(args.max_new_tokens),
+                   '--max-context-tokens', str(args.max_context_tokens)]
         if machine:
             command += ['--machine', machine]
         if plan['version']:

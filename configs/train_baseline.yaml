@@ -36,7 +36,7 @@ memory:
   decoder_ffn_ratio: 2
   decoder_heads: 8
   decoder_hidden_size: 256
-  distill_entropy_weight: false
+  distill_entropy_weight: true
   distill_positions: 128
   distill_temperature: 1.0
   distill_topk: 0

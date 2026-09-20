@@ -33,3 +33,19 @@ conda run --no-capture-output -n shine bash scripts/evaluation/test_icl_suite.sh
 ```
 
 模型和数据根目录由 machine 自动解析。任务串行运行，每项使用可见 GPU 做数据并行；通过 CUDA_VISIBLE_DEVICES 和 NUM_PROCESSES 控制。固定 zero-shot，终端直接显示进度，输出逐条预测、单数据集 metrics/run_config 和总 summary.json。`--dry-run` 仅打印计划。Python 编排和 worker 推理均在 test_icl_suite.py，launcher 的内部 --worker 分支用于多进程执行。
+
+## 4090 → 计算服务器同步
+
+代码和 YAML 均在 4090 修改并提交，H200/A800 只运行计算任务：
+
+```bash
+bash scripts/sync_remote.sh h200
+bash scripts/sync_remote.sh a800
+bash scripts/sync_remote.sh all
+```
+
+无需 GitHub 网络或先 push。脚本读取目标 HEAD，确认是本地 HEAD 的祖先，生成增量 Git bundle，经 SSH 传输后快进更新。包含所有已提交文件的新增、修改和删除（包括 YAML），不传输未跟踪数据、模型、输出或未提交修改。相同 commit 不传输 bundle。all 会尝试两台机器，任一失败最终返回非零。
+
+本地有未提交修改时先停止；远端有修改、历史分叉或目标提交不在本地历史时也停止，不自动 stash/reset。远端需要保留的代码/配置变更应先整理回 4090，再提交同步；机器路径通过 --machine 指定，不在计算服务器修改公共 YAML。同步前应确认没有正在运行的任务依赖待更新文件；脚本不调度或重启计算任务。
+
+默认地址为 h200:/home/lijie/proj2/xmu/lz/MemoryQwen 和 A800:/mnt/beegfs-storage-a8002/seanlz/MemoryQwen。可用 H200_SSH_HOST、H200_REPO、A800_SSH_HOST、A800_REPO 覆盖。需要 SSH 非交互认证及远端 Git/bash/flock。旧 sync_h200.sh/sync_a800.sh 使用 GitHub 拉取；日常统一使用 sync_remote.sh。

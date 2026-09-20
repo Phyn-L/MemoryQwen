@@ -11,6 +11,7 @@ MODEL="${MODEL:-Qwen3-8B}"
 DATASETS="${DATASETS:-squad ms_marco_v1 ms_marco_v2 hotpotqa race}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 MAX_INPUT_TOKENS="${MAX_INPUT_TOKENS:-1024}"
+MAX_CONTEXT_TOKENS="${MAX_CONTEXT_TOKENS:-1024}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-32}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
 # Leave unset to use all visible GPUs; e.g. export NUM_PROCESSES=4.
@@ -20,6 +21,6 @@ OUTPUT_DIR="${OUTPUT_DIR:-}"
 read -r -a dataset_args <<< "$DATASETS"
 args=(--machine "$MACHINE" --model "$MODEL" --datasets "${dataset_args[@]}"
       --bs "$BATCH_SIZE" --max-input-tokens "$MAX_INPUT_TOKENS"
-      --max-new-tokens "$MAX_NEW_TOKENS")
+      --max-new-tokens "$MAX_NEW_TOKENS" --max-context-tokens "$MAX_CONTEXT_TOKENS")
 if [[ -n "$OUTPUT_DIR" ]]; then args+=(--output-dir "$OUTPUT_DIR"); fi
 exec python -m scripts.evaluation.test_icl_suite "${args[@]}" "$@"
