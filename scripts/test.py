@@ -47,6 +47,7 @@ def main():
     parser.add_argument("--source-version", choices=("ms_marco_v1_1", "ms_marco_v2_1"))
     parser.add_argument("--no-filter-long-context", action="store_true")
     parser.add_argument("--max-samples", type=int)
+    parser.add_argument("--max-context-tokens", type=int)
     parser.add_argument("--max-context-rows", type=int)
     parser.add_argument("--qa-per-context", type=int)
     parser.add_argument("--context-shuffle-seed", type=int, default=42)
@@ -100,6 +101,8 @@ def main():
     cfg = evaluation_config(args.checkpoint, args.config, args.machine)
     if args.data_root:
         cfg.data.root = args.data_root
+    if args.max_context_tokens is not None:
+        cfg.data.max_context_tokens = args.max_context_tokens
     if args.datasets:
         setattr(cfg.data, f"{args.split}_datasets", tuple(args.datasets))
     for name, value in (

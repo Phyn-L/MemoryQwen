@@ -60,6 +60,7 @@ def main(argv=None):
     parser.add_argument("--checkpoint-dir", help="Recursively evaluate every .pt/.pth/.bin checkpoint")
     parser.add_argument("--datasets", nargs="+", choices=DATASETS, default=list(DATASETS))
     parser.add_argument("--memory-bs", type=int, default=1)
+    parser.add_argument("--max-context-tokens", type=int, default=1024)
     parser.add_argument("--max-context-rows", type=int)
     parser.add_argument("--qa-per-context", type=int)
     parser.add_argument("--context-shuffle-seed", type=int, default=42)
@@ -85,7 +86,7 @@ def main(argv=None):
         common = common_args(plan, args.machine)
         for checkpoint in checkpoints:
             label = f"memory:{checkpoint.stem}"
-            command = [sys.executable, "-m", "utils.launcher", "test", "--ckpt", str(checkpoint), "--data-root", str(root.resolve()), "--bs", str(args.memory_bs), *common]
+            command = [sys.executable, "-m", "utils.launcher", "test", "--ckpt", str(checkpoint), "--data-root", str(root.resolve()), "--bs", str(args.memory_bs), "--max-context-tokens", str(args.max_context_tokens), *common]
             if args.max_context_rows is not None:
                 command += ["--max-context-rows", str(args.max_context_rows)]
             if args.qa_per_context is not None:
