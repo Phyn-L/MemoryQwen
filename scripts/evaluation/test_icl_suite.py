@@ -29,6 +29,7 @@ from src.icl_baseline import (
     render_prompt,
     sample_jsonl,
     limit_examples,
+    sample_context_rows,
 )
 from utils.config import dtype_from_name, expand_env
 from utils.icl_config import load_icl_defaults
@@ -122,6 +123,9 @@ def parse_args(argv=None):
         help="Keep only the first N distinct contexts of the file, the unit the memory "
         "evaluator's data.validation_max_samples uses",
     )
+    parser.add_argument("--qa-per-context", type=int,
+                        help="Keep at most this many QA rows from each sampled context.")
+    parser.add_argument("--context-shuffle-seed", type=int, default=42)
     parser.add_argument(
         "--max-context-tokens",
         type=int,
@@ -413,6 +417,8 @@ def worker_main():
             max_context_tokens=args.max_context_tokens,
             tokenizer=tokenizer,
         )
+        records = sample_context_rows(records, args.max_contexts, args.qa_per_context,
+                                      args.context_shuffle_seed)
         if not records:
             raise SystemExit(f"{dataset}: no examples left after the subset filters")
         evaluate_dataset(

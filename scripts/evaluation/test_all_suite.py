@@ -60,6 +60,9 @@ def main(argv=None):
     parser.add_argument("--checkpoint-dir", help="Recursively evaluate every .pt/.pth/.bin checkpoint")
     parser.add_argument("--datasets", nargs="+", choices=DATASETS, default=list(DATASETS))
     parser.add_argument("--memory-bs", type=int, default=1)
+    parser.add_argument("--max-context-rows", type=int)
+    parser.add_argument("--qa-per-context", type=int)
+    parser.add_argument("--context-shuffle-seed", type=int, default=42)
     output = parser.add_mutually_exclusive_group()
     output.add_argument("--output-dir", help="Exact directory for this run's manifest, logs and evaluation reports")
     output.add_argument("--output-root", default="outputs/all_suite", help="Parent for an automatically timestamped run directory")
@@ -83,6 +86,11 @@ def main(argv=None):
         for checkpoint in checkpoints:
             label = f"memory:{checkpoint.stem}"
             command = [sys.executable, "-m", "utils.launcher", "test", "--ckpt", str(checkpoint), "--data-root", str(root.resolve()), "--bs", str(args.memory_bs), *common]
+            if args.max_context_rows is not None:
+                command += ["--max-context-rows", str(args.max_context_rows)]
+            if args.qa_per_context is not None:
+                command += ["--qa-per-context", str(args.qa_per_context)]
+            command += ["--context-shuffle-seed", str(args.context_shuffle_seed)]
             identity = hashlib.sha256(str(checkpoint).encode()).hexdigest()[:12]
             report_dir = out / plan['name'] / f"{checkpoint.stem}-{identity}"
             command += ["--output-dir", str(report_dir)]

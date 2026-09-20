@@ -46,7 +46,7 @@ def resolve_split_limit(cfg, split: str) -> int | None:
     return limit
 
 
-def make_context_dataset(cfg, split: str, tokenizer, limit=None, allow_empty: bool = False, source_version: str | None = None):
+def make_context_dataset(cfg, split: str, tokenizer, limit=None, allow_empty: bool = False, source_version: str | None = None, max_context_rows=None, qa_per_context=None, context_shuffle_seed=42):
     """Build one split. ``limit`` is the resolved sample cap (see :func:`resolve_split_limit`)."""
     names = getattr(cfg.data, f"{split}_datasets") or cfg.data.dataset
     # Keep HotpotQA held out of the implicit training mixture for now.
@@ -61,6 +61,8 @@ def make_context_dataset(cfg, split: str, tokenizer, limit=None, allow_empty: bo
         cfg.data.max_context_tokens, limit,
         cfg.data.filter_long_context, cfg.data.filter_no_qa,
         allow_empty=allow_empty, cache_dir=cache_dir, source_version=source_version,
+        max_context_rows=max_context_rows, qa_per_context=qa_per_context,
+        context_shuffle_seed=context_shuffle_seed,
     )
 
 

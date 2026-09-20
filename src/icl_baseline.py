@@ -110,6 +110,28 @@ def limit_examples(records, max_contexts=None, max_context_tokens=None, tokenize
     return limited
 
 
+def sample_context_rows(records, max_contexts=None, qa_per_context=None, seed=42):
+    """Shuffle context groups, keep N groups, and keep up to K QA rows per group."""
+    if max_contexts is None and qa_per_context is None:
+        return records
+    groups = {}
+    order = []
+    for record in records:
+        if record.context not in groups:
+            groups[record.context] = []
+            order.append(record.context)
+        groups[record.context].append(record)
+    rng = random.Random(seed)
+    rng.shuffle(order)
+    if max_contexts is not None:
+        order = order[:max_contexts]
+    sampled = []
+    for context in order:
+        rows = groups[context]
+        sampled.extend(rows if qa_per_context is None else rows[:qa_per_context])
+    return sampled
+
+
 def sample_jsonl(path: str | Path, dataset: str, count: int, seed: int) -> list[ICLExample]:
     """Reservoir-sample demonstrations without materializing the train split."""
     if count <= 0:

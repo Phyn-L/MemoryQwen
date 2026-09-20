@@ -47,6 +47,9 @@ def main():
     parser.add_argument("--source-version", choices=("ms_marco_v1_1", "ms_marco_v2_1"))
     parser.add_argument("--no-filter-long-context", action="store_true")
     parser.add_argument("--max-samples", type=int)
+    parser.add_argument("--max-context-rows", type=int)
+    parser.add_argument("--qa-per-context", type=int)
+    parser.add_argument("--context-shuffle-seed", type=int, default=42)
     parser.add_argument(
         "--batch-size", "--bs", type=int,
         help="Contexts per batch for the evaluation loader (default: the checkpoint config's "
@@ -91,6 +94,9 @@ def main():
         parser.error("datasets must be a list of dataset directory names")
     if args.max_samples is not None and args.max_samples <= 0:
         parser.error("max-samples must be positive")
+    for name in ("max_context_rows", "qa_per_context"):
+        if getattr(args, name) is not None and getattr(args, name) <= 0:
+            parser.error(f"{name.replace('_', '-')} must be positive")
     cfg = evaluation_config(args.checkpoint, args.config, args.machine)
     if args.data_root:
         cfg.data.root = args.data_root
@@ -143,6 +149,8 @@ def main():
         # --max-samples is the only cap here: the config's {split}_max_samples belongs to
         # the training loop, and silently applying it would change previous eval numbers.
         limit=args.max_samples,
+        max_context_rows=args.max_context_rows, qa_per_context=args.qa_per_context,
+        context_shuffle_seed=args.context_shuffle_seed,
         allow_empty=True, source_version=args.source_version,
     )
     loader = DataLoader(

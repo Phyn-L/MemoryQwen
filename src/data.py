@@ -75,7 +75,7 @@ def _answers(qa: dict[str, Any]) -> tuple[str, ...]:
 class AggregatedContextDataset(Dataset):
     """Context-level dataset: one source JSONL row becomes one item."""
 
-    def __init__(self, root, dataset="all", split="train", tokenizer=None, max_context_tokens=2048, max_samples=None, filter_long_context=True, filter_no_qa=True, allow_empty=False, cache_dir=None, source_version=None):
+    def __init__(self, root, dataset="all", split="train", tokenizer=None, max_context_tokens=2048, max_samples=None, filter_long_context=True, filter_no_qa=True, allow_empty=False, cache_dir=None, source_version=None, max_context_rows=None, qa_per_context=None, context_shuffle_seed=42):
         root = Path(root)
         names = [p.name for p in sorted(root.iterdir()) if p.is_dir()] if dataset in (None, "all") else ([dataset] if isinstance(dataset, str) else list(dataset))
         files = [(name, root / name / f"{split}.jsonl") for name in names]
@@ -94,6 +94,18 @@ class AggregatedContextDataset(Dataset):
             rows = self._build_records(files, tokenizer, max_context_tokens, filter_long_context, filter_no_qa)
         if max_samples is not None:
             rows = rows.select(range(min(max_samples, len(rows))))
+        if max_context_rows is not None or qa_per_context is not None:
+            order = list(range(len(rows)))
+            random.Random(context_shuffle_seed).shuffle(order)
+            if max_context_rows is not None:
+                order = order[:max_context_rows]
+            selected = []
+            for index in order:
+                row = rows[index]
+                pairs = row["qa_pairs"] if qa_per_context is None else row["qa_pairs"][:qa_per_context]
+                if pairs:
+                    selected.append({**row, "qa_pairs": pairs})
+            rows = dataset_cache.Dataset.from_list(selected)
         self.dataset = rows
         if not len(rows) and not allow_empty:
             raise RuntimeError(f"No usable contexts found under {root} split={split} datasets={names}")
