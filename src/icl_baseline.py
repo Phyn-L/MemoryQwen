@@ -146,11 +146,10 @@ def _from_row(row: dict, dataset: str, line_number: int, index: int = 0) -> ICLE
     letter = str(metadata.get("answer_letter", "")).strip().upper()
     # ``index`` disambiguates the several questions that share one aggregated context line.
     identifier = str(row.get("id") or f"{dataset}-{line_number}-{index}")
+    # The aggregated MS MARCO context is constructed upstream from passages with
+    # is_selected=1. Keep the ICL path on that canonical context so it matches the
+    # MemoryQwen evaluator and the selected-passage protocol used by this project.
     context = str(row["context"]).strip()
-    if dataset == "ms_marco":
-        passages = metadata.get("passages") or []
-        if passages:
-            context = "\n\n".join(str(value) for value in passages if str(value).strip()).strip()
     return ICLExample(
         id=identifier, dataset=dataset, context=context,
         question=str(row["question"]).strip(), references=references,
