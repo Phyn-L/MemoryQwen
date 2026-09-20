@@ -454,9 +454,12 @@ def suite_main(argv=None):
                         help='Drop examples whose full context exceeds this tokenizer length')
     parser.add_argument('--max-new-tokens', type=int, default=32)
     parser.add_argument('--max-samples', type=int)
+    parser.add_argument('--max-contexts', type=int)
+    parser.add_argument('--qa-per-context', type=int)
+    parser.add_argument('--context-shuffle-seed', type=int, default=42)
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
-    for key in ('bs', 'max_input_tokens', 'max_new_tokens', 'max_context_tokens', 'max_samples'):
+    for key in ('bs', 'max_input_tokens', 'max_new_tokens', 'max_context_tokens', 'max_samples', 'max_contexts', 'qa_per_context'):
         value = getattr(args, key)
         if value is not None and value < 1:
             parser.error(f'{key} must be positive')
@@ -477,6 +480,11 @@ def suite_main(argv=None):
                    '--bs', str(args.bs), '--max-input-tokens', str(args.max_input_tokens),
                    '--max-new-tokens', str(args.max_new_tokens),
                    '--max-context-tokens', str(args.max_context_tokens)]
+        if args.max_contexts is not None:
+            command += ['--max-contexts', str(args.max_contexts)]
+        if args.qa_per_context is not None:
+            command += ['--qa-per-context', str(args.qa_per_context)]
+        command += ['--context-shuffle-seed', str(args.context_shuffle_seed)]
         if machine:
             command += ['--machine', machine]
         if plan['version']:
