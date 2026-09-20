@@ -59,7 +59,7 @@ def main():
         "--max-new-tokens", type=int,
         help="Upper bound on the tokens the autoregressive pass decodes per answer (default: "
              "evaluation.max_new_tokens from the checkpoint config, 32 in the shipped configs). "
-             "Keep it at 32 to stay comparable with scripts/evaluation/test_icl_baseline.py, which uses "
+             "Keep it at 32 to stay comparable with scripts/evaluation/test_icl_suite.py, which uses "
              "--squad-max-new-tokens 32.",
     )
     parser.add_argument(

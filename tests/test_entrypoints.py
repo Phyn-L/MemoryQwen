@@ -61,7 +61,7 @@ def test_model_resolution_uses_ref_and_rejects_ambiguous_cache(tmp_path):
 
 def test_icl_yaml_cli_precedence_and_hotpot_paths(tmp_path):
     model = tmp_path / 'model'; model.mkdir(); (model / 'config.json').write_text('{}')
-    module = script('test_icl_baseline')
+    module = script('evaluation/test_icl_suite')
     args = module.parse_args(['--config', str(ROOT / 'configs/icl_zeroshot.yaml'),
                               '--machine', 'h200', '--model', str(model), '--bs', '7', '--datasets', 'hotpotqa'])
     assert args.batch_size == 7 and args.num_shots == 0
@@ -118,7 +118,7 @@ def test_unknown_icl_sections_fail(tmp_path):
 
 
 def test_icl_machine_defaults_preserve_explicit_model(monkeypatch):
-    module = script('test_icl_baseline')
+    module = script('evaluation/test_icl_suite')
     monkeypatch.setattr(module, 'resolve_model_path', lambda name, machine: name)
     args = module.parse_args(['--machine', 'h200'])
     assert args.model.startswith(MACHINES['h200']['MODEL_ROOT'] + '/')

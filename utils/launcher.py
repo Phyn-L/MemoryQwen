@@ -5,11 +5,13 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = {'train': 'train.py', 'test': 'test.py', 'icl': 'test_icl_baseline.py'}
+SCRIPTS = {'train': 'train.py', 'test': 'test.py', 'icl': 'evaluation/test_icl_suite.py'}
 
 
 def command(mode, args, device_count):
     script = str(ROOT / 'scripts' / SCRIPTS[mode])
+    if mode == 'icl':
+        args = ['--worker', *args]
     if any(arg in ('-h', '--help') for arg in args):
         return [sys.executable, script, *args]
     count = int(os.environ.get('NUM_PROCESSES', str(max(1, device_count))))

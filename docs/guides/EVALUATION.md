@@ -48,7 +48,7 @@ already runs it.
 Because the autoregressive number is the only one that is comparable with an ICL
 baseline, training must actually measure it: `evaluation.autoregressive_every` controls how
 often it runs, and `evaluation.max_new_tokens` is 32 to match
-`scripts/evaluation/test_icl_baseline.py --squad-max-new-tokens 32`. Setting `autoregressive_every` to
+`scripts/evaluation/test_icl_suite.py --squad-max-new-tokens 32`. Setting `autoregressive_every` to
 a huge number is how the `pgw1382s` run ended up with no trustworthy score at all.
 
 Both evaluation modes are logged into their own W&B section, with identical metric keys so
@@ -105,7 +105,7 @@ end-to-end path
 show up.
 
 Both harnesses read the same file, and it is the only supported one:
-`scripts/evaluation/test_icl_baseline.py` defaults to `<data.root>/squad/validation.jsonl` and reads it
+`scripts/evaluation/test_icl_suite.py` defaults to `<data.root>/squad/validation.jsonl` and reads it
 through `src.icl_baseline.iter_examples`, which understands the aggregated context schema and
 **raises** on the old one-question-per-line layout instead of yielding an empty evaluation
 set. `tests/test_icl_data.py` asserts the parity against the training split on the real files.

@@ -1,6 +1,6 @@
 """The ICL baseline and the training evaluator must read the same questions.
 
-`scripts/evaluation/test_icl_baseline.py` used to default to `contexts/standardized/` while the
+`scripts/evaluation/test_icl_suite.py` used to default to `contexts/standardized/` while the
 training pipeline read `contexts/aggregated/`, and the two files do not contain the same
 rows (10570 vs 16498 answered), so the two means were over differently weighted sets. The
 aggregated tree is now the only supported schema -- `iter_examples` raises on anything else

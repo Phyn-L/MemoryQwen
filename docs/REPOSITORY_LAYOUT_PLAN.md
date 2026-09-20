@@ -94,7 +94,7 @@ MemoryQwen/
 | `scripts/archive/run_queue.sh` | 原位 | 候选迁移至 `scripts/experiments/run_queue.sh`；旧 shell 入口保留转发兼容 |
 | `scripts/test.py` | 原位 | 保持内容与接口 |
 | `scripts/test.sh` | 原位 | 保持内容与接口 |
-| `scripts/evaluation/test_icl_baseline.py` | 原位 | 保持内容与接口 |
+| `scripts/evaluation/test_icl_suite.py` | 原位 | 保持内容与接口 |
 | `scripts/archive/test_icl_baseline.sh` | 原位 | 保持内容与接口 |
 | `scripts/train.py` | 原位 | 保持内容与接口 |
 | `scripts/train.sh` | 原位 | 保持内容与接口 |

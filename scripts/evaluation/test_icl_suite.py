@@ -5,6 +5,8 @@ import json
 import os
 import platform
 import random
+import shlex
+from datetime import datetime
 import subprocess
 import sys
 from dataclasses import asdict
@@ -15,6 +17,8 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from scripts.evaluation.test_all_suite import DATASETS, plans
 
 from src.icl_baseline import (
     ICLExample,
@@ -28,7 +32,7 @@ from src.icl_baseline import (
 )
 from utils.config import dtype_from_name, expand_env
 from utils.icl_config import load_icl_defaults
-from utils.model_paths import resolve_model_path
+from utils.model_paths import machine_paths, resolve_model_path
 from utils.ddp import barrier, init_distributed, is_main_process
 from utils.machines import fill_missing, machine_environ, machine_names, resolve_machine
 
@@ -372,7 +376,7 @@ def experiment_metadata(args, world_size, demonstrations):
     }
 
 
-def main():
+def worker_main():
     args = parse_args()
     rank, world_size, device = distributed_context()
     seed_everything(args.seed, rank)
@@ -427,5 +431,79 @@ def main():
         dist.destroy_process_group()
 
 
-if __name__ == "__main__":
-    main()
+
+
+
+
+def suite_main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--machine', choices=machine_names(), default=None)
+    parser.add_argument('--model', default='Qwen3-8B')
+    parser.add_argument('--datasets', nargs='+', choices=DATASETS, default=list(DATASETS))
+    parser.add_argument('--data-root')
+    parser.add_argument('--output-dir')
+    parser.add_argument('--bs', type=int, default=2)
+    parser.add_argument('--max-input-tokens', type=int, default=8192)
+    parser.add_argument('--max-new-tokens', type=int, default=32)
+    parser.add_argument('--max-samples', type=int)
+    parser.add_argument('--dry-run', action='store_true')
+    args = parser.parse_args(argv)
+    for key in ('bs', 'max_input_tokens', 'max_new_tokens', 'max_samples'):
+        value = getattr(args, key)
+        if value is not None and value < 1:
+            parser.error(f'{key} must be positive')
+    machine, paths = machine_paths(args.machine)
+    model = resolve_model_path(args.model, machine)
+    root = Path(args.data_root or paths['DATA_ROOT'])
+    dataset_plans = list(plans(root, args.datasets))
+    out = Path(args.output_dir or f'outputs/icl_suite/{datetime.now():%Y%m%d_%H%M%S_%f}').resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    results = []
+    print(f'Model: {args.model} -> {model}', flush=True)
+    for plan in dataset_plans:
+        destination = out / plan['name']
+        command = [sys.executable, '-m', 'utils.launcher', 'icl',
+                   '--config', 'configs/icl_zeroshot.yaml', '--model', model,
+                   '--num-shots', '0', '--datasets', plan['dataset'], '--split', plan['split'],
+                   '--data-root', str(root), '--output-dir', str(destination),
+                   '--bs', str(args.bs), '--max-input-tokens', str(args.max_input_tokens),
+                   '--max-new-tokens', str(args.max_new_tokens)]
+        if machine:
+            command += ['--machine', machine]
+        if plan['version']:
+            command += ['--source-version', plan['version']]
+        if args.max_samples:
+            command += ['--max-samples', str(args.max_samples)]
+        print(shlex.join(command), flush=True)
+        row = dict(dataset=plan['name'], split=plan['split'], model=model,
+                   num_shots=0, command=command, status='planned')
+        if not args.dry_run:
+            # Inherit stdout/stderr so tqdm progress is visible in the terminal.
+            result = subprocess.run(command)
+            row['status'] = 'ok' if result.returncode == 0 else f'failed:{result.returncode}'
+            metrics_file = destination / f"{plan['dataset']}.metrics.json"
+            if result.returncode == 0:
+                if metrics_file.is_file():
+                    row['metrics'] = json.loads(metrics_file.read_text())
+                    print(f"{plan['name']}: {row['metrics']}", flush=True)
+                else:
+                    row['status'] = 'failed:missing_metrics'
+        results.append(row)
+        (out / 'summary.json').write_text(json.dumps(results, ensure_ascii=False, indent=2) + '\n')
+    print('\nDataset | Split | Status | Count | EM | F1 | ROUGE-L | Accuracy')
+    for row in results:
+        metrics = row.get('metrics', {})
+        values = [f'{100 * metrics[k]:.2f}' if k in metrics else '-' for k in ('em', 'f1', 'rouge_l', 'accuracy')]
+        print(' | '.join([row['dataset'], row['split'], row['status'], str(metrics.get('count', '-')), *values]))
+    print(f'Results: {out}')
+    if any(row['status'].startswith('failed') for row in results):
+        raise SystemExit(1)
+
+
+
+if __name__ == '__main__':
+    if '--worker' in sys.argv:
+        sys.argv.remove('--worker')
+        worker_main()
+    else:
+        suite_main()

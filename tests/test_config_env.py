@@ -123,7 +123,7 @@ def test_the_same_config_files_resolve_to_another_machine():
 
 def test_the_icl_baseline_defaults_follow_the_same_variables():
     """The baseline script's own defaults must not be a second hardcoded copy."""
-    source = (REPO / "scripts" / "test_icl_baseline.py").read_text(encoding="utf-8")
+    source = (REPO / "scripts" / "evaluation" / "test_icl_suite.py").read_text(encoding="utf-8")
     assert "${MODEL_ROOT:-" in source and "${DATA_ROOT:-" in source
 
 
