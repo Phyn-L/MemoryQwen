@@ -1,135 +1,99 @@
-"""Sequential checkpoint + Qwen ICL evaluation; nonempty test takes precedence."""
-
-import argparse
-import json
-from pathlib import Path
-import subprocess
-import sys
+"""Run the repository's dataset evaluators serially and collect one manifest."""
+from __future__ import annotations
+import argparse, json, subprocess, sys
+import hashlib
 from datetime import datetime
-from utils.model_paths import machine_paths
+from pathlib import Path
 
+DATASETS = ("squad", "ms_marco_v1", "ms_marco_v2", "hotpotqa", "race")
+CHECKPOINT_SUFFIXES = {".pt", ".pth", ".bin"}
 
-def main():
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--machine", default="4090")
-    p.add_argument("--ckpt", default="outputs/Qwen1.7B_20260917_213648.pt")
-    p.add_argument("--memory-bs", type=int, default=1)
-    p.add_argument("--icl-bs", type=int, default=2)
-    p.add_argument("--output-root", default="outputs/all_suite")
-    p.add_argument("--dry-run", action="store_true")
-    args = p.parse_args()
-    root = Path(machine_paths(args.machine)[1]["DATA_ROOT"])
-    out = Path(args.output_root) / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    out.mkdir(parents=True)
+def _nonempty(path):
+    return path.is_file() and path.stat().st_size > 0
+
+def discover_checkpoints(directory):
+    directory = Path(directory)
+    if not directory.is_dir():
+        raise FileNotFoundError(f"checkpoint directory does not exist: {directory}")
+    checkpoints = sorted(
+        path.resolve() for path in directory.rglob("*")
+        if path.is_file() and path.suffix.lower() in CHECKPOINT_SUFFIXES
+    )
+    if not checkpoints:
+        raise FileNotFoundError(f"no checkpoint files ({', '.join(sorted(CHECKPOINT_SUFFIXES))}) under {directory}")
+    return checkpoints
+
+def plans(root, selected):
+    for name in selected:
+        if name == "ms_marco_v1":
+            dataset, version = "ms_marco", "ms_marco_v1_1"
+            split = "test" if _nonempty(root / dataset / "test.jsonl") else "validation"
+        elif name == "ms_marco_v2":
+            dataset, version, split = "ms_marco", "ms_marco_v2_1", "validation"
+        else:
+            dataset, version = name, None
+            split = "test" if _nonempty(root / dataset / "test.jsonl") else "validation"
+        path = root / dataset / f"{split}.jsonl"
+        if not _nonempty(path):
+            raise FileNotFoundError(f"no nonempty {split}.jsonl for {name}: {path}")
+        yield {"name": name, "dataset": dataset, "version": version, "split": split}
+
+def common_args(plan, machine):
+    result = ["--machine", machine, "--datasets", plan["dataset"], "--split", plan["split"]]
+    if plan["version"]:
+        result += ["--source-version", plan["version"]]
+    return result
+
+def run(label, command, log_path, dry_run):
+    print(f"[{label}] {' '.join(command)}", flush=True)
+    if dry_run:
+        return "planned"
+    with log_path.open("w", encoding="utf-8") as log:
+        result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+    return "ok" if result.returncode == 0 else f"failed:{result.returncode}"
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--machine", default="4090")
+    parser.add_argument("--data-root", default="/data/lz/contexts/aggregated")
+    parser.add_argument("--checkpoint", "--ckpt", dest="checkpoints", nargs="+")
+    parser.add_argument("--checkpoint-dir", help="Recursively evaluate every .pt/.pth/.bin checkpoint")
+    parser.add_argument("--datasets", nargs="+", choices=DATASETS, default=list(DATASETS))
+    parser.add_argument("--memory-bs", type=int, default=1)
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--output-dir", help="Exact directory for this run's manifest, logs and evaluation reports")
+    output.add_argument("--output-root", default="outputs/all_suite", help="Parent for an automatically timestamped run directory")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+    if bool(args.checkpoints) == bool(args.checkpoint_dir):
+        parser.error("provide exactly one of --checkpoint or --checkpoint-dir")
+    checkpoints = [Path(path).resolve() for path in args.checkpoints] if args.checkpoints else discover_checkpoints(args.checkpoint_dir)
+    checkpoints = list(dict.fromkeys(checkpoints))
+    for checkpoint in checkpoints:
+        if not checkpoint.is_file():
+            parser.error(f"checkpoint does not exist: {checkpoint}")
+    if args.memory_bs < 1:
+        parser.error("--memory-bs must be positive")
+    root = Path(args.data_root)
+    out = Path(args.output_dir) if args.output_dir else Path(args.output_root) / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    out.mkdir(parents=True, exist_ok=True)
     manifest = []
-    plans = [
-        ("squad", None, None),
-        ("ms_marco", "ms_marco_v1_1", "test"),
-        ("ms_marco", "ms_marco_v1_1", "validation"),
-        ("ms_marco", "ms_marco_v2_1", "validation"),
-        ("hotpotqa", None, None),
-        ("race", None, None),
-    ]
-    for dataset, version, requested_split in plans:
-        folder = root / dataset
-        test = folder / "test.jsonl"
-        split = requested_split or (
-            "test" if test.exists() and test.stat().st_size else "validation"
-        )
-        path = folder / f"{split}.jsonl"
-        if not path.exists() or not path.stat().st_size:
-            raise FileNotFoundError(f"No nonempty test/validation: {folder}")
-        name = version or dataset
-        total = answered = 0
-        for line in path.open():
-            for qa in json.loads(line).get("qa_pairs", []):
-                if version and qa.get("source_dataset") != version:
-                    continue
-                total += 1
-                answered += bool(
-                    qa.get("answers") and any(str(x).strip() for x in qa["answers"])
-                )
-        if not answered:
-            manifest.append(
-                dict(
-                    dataset=name,
-                    split=split,
-                    total=total,
-                    status="unscorable:no_reference_answers",
-                )
-            )
-            (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-            print(
-                f"{name}: {total} rows, no reference answers; scoring skipped",
-                flush=True,
-            )
-            continue
-        common = ["--machine", args.machine, "--datasets", dataset, "--split", split]
-        if version:
-            common += ["--source-version", version]
-        commands = [
-            (
-                "memory",
-                [
-                    sys.executable,
-                    "-m",
-                    "utils.launcher",
-                    "test",
-                    "--ckpt",
-                    args.ckpt,
-                    "--no-filter-long-context",
-                    "--bs",
-                    str(args.memory_bs),
-                    *common,
-                ],
-            )
-        ]
-        for model in ("Qwen3-1.7B", "Qwen3-8B"):
-            commands.append(
-                (
-                    model,
-                    [
-                        sys.executable,
-                        "-m",
-                        "utils.launcher",
-                        "icl",
-                        "--config",
-                        "configs/icl_zeroshot.yaml",
-                        "--model",
-                        model,
-                        "--bs",
-                        str(args.icl_bs),
-                        "--output-dir",
-                        str(out / name / split / model),
-                        *common,
-                    ],
-                )
-            )
-        for label, cmd in commands:
-            print(dataset, split, label, " ".join(cmd), flush=True)
-            status = "planned"
-            if not args.dry_run:
-                with (out / f"{name}-{split}-{label}.log").open("w") as log:
-                    result = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT)
-                status = (
-                    "ok" if result.returncode == 0 else f"failed:{result.returncode}"
-                )
-            manifest.append(
-                dict(
-                    dataset=name,
-                    total=total,
-                    answered=answered,
-                    split=split,
-                    model=label,
-                    status=status,
-                    command=cmd,
-                )
-            )
-            (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    print(f"Reports and logs: {out}")
+    for plan in plans(root, args.datasets):
+        common = common_args(plan, args.machine)
+        for checkpoint in checkpoints:
+            label = f"memory:{checkpoint.stem}"
+            command = [sys.executable, "-m", "utils.launcher", "test", "--ckpt", str(checkpoint), "--data-root", str(root.resolve()), "--bs", str(args.memory_bs), *common]
+            identity = hashlib.sha256(str(checkpoint).encode()).hexdigest()[:12]
+            report_dir = out / plan['name'] / f"{checkpoint.stem}-{identity}"
+            command += ["--output-dir", str(report_dir)]
+            log_name = f"{plan['name']}-{checkpoint.stem}-{identity}.log"
+            status = run(label, command, out / log_name, args.dry_run)
+            manifest.append({"dataset": plan["name"], "split": plan["split"], "model": label, "checkpoint": str(checkpoint), "output_dir": str(report_dir), "log": str(out / log_name), "status": status, "command": command})
+            (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    (out / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps({"output": str(out), "runs": len(manifest), "failed": sum(x["status"].startswith("failed") for x in manifest)}, ensure_ascii=False))
     if any(x["status"].startswith("failed") for x in manifest):
         raise SystemExit(1)
-
 
 if __name__ == "__main__":
     main()

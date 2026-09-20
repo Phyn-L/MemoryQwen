@@ -146,8 +146,13 @@ def _from_row(row: dict, dataset: str, line_number: int, index: int = 0) -> ICLE
     letter = str(metadata.get("answer_letter", "")).strip().upper()
     # ``index`` disambiguates the several questions that share one aggregated context line.
     identifier = str(row.get("id") or f"{dataset}-{line_number}-{index}")
+    context = str(row["context"]).strip()
+    if dataset == "ms_marco":
+        passages = metadata.get("passages") or []
+        if passages:
+            context = "\n\n".join(str(value) for value in passages if str(value).strip()).strip()
     return ICLExample(
-        id=identifier, dataset=dataset, context=str(row["context"]).strip(),
+        id=identifier, dataset=dataset, context=context,
         question=str(row["question"]).strip(), references=references,
         options=options, answer_letter=letter,
     )

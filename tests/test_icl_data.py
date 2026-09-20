@@ -106,6 +106,19 @@ def test_aggregated_race_rows_keep_their_options():
     assert all(example.answer_letter in {"A", "B", "C", "D"} for example in examples)
 
 
+def test_ms_marco_icl_uses_all_candidate_passages(tmp_path):
+    import json
+    from src.icl_baseline import load_jsonl
+    path = tmp_path / "validation.jsonl"
+    path.write_text(json.dumps({"context": "selected", "qa_pairs": [{
+        "id": "m1", "question": "q", "answers": ["a"],
+        "source_dataset": "ms_marco_v1_1",
+        "metadata": {"passages": ["first", "second"], "is_selected": [1, 0]},
+    }]}) + "\n")
+    examples = load_jsonl(path, "ms_marco", "ms_marco_v1_1")
+    assert examples[0].context == "first\n\nsecond"
+
+
 def test_icl_default_file_and_training_validation_split_are_the_same_questions():
     """The invariant that makes the two headline numbers comparable."""
     config = TrainConfig.from_file(CONFIG)

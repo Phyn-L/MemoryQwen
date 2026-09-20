@@ -36,6 +36,8 @@ def main():
     parser = argparse.ArgumentParser(description="Evaluate a trained Qwen memory checkpoint")
     parser.add_argument("--config", help="Test YAML (checkpoint architecture), or explicit full training YAML")
     parser.add_argument("--datasets", nargs="+", help="Dataset directory names under data.root")
+    parser.add_argument("--data-root", help="Aggregated dataset root")
+    parser.add_argument("--output-dir", help="Directory for evaluation JSON reports")
     parser.add_argument(
         "--machine", choices=machine_names(), default=None,
         help="Machine whose paths (utils/machines.py) this run uses.",
@@ -90,6 +92,8 @@ def main():
     if args.max_samples is not None and args.max_samples <= 0:
         parser.error("max-samples must be positive")
     cfg = evaluation_config(args.checkpoint, args.config, args.machine)
+    if args.data_root:
+        cfg.data.root = args.data_root
     if args.datasets:
         setattr(cfg.data, f"{args.split}_datasets", tuple(args.datasets))
     for name, value in (
@@ -189,7 +193,9 @@ def main():
                   "config": cfg.to_dict(), "autoregressive": autoregressive,
                   "teacher_forced": teacher_forced}
         from datetime import datetime
-        report_path = checkpoint_path.parent / f"eval_{args.split}_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
+        report_dir = Path(args.output_dir) if args.output_dir else checkpoint_path.parent
+        report_dir.mkdir(parents=True, exist_ok=True)
+        report_path = report_dir / f"eval_{args.split}_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
         print(f"results: {report_path}")
     if accelerator is not None:
