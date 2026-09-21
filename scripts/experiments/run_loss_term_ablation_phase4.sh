@@ -16,7 +16,7 @@ DRY_RUN=0
 RUNS=(
   20_distill05_entropy_true
   21_distill07_entropy_true
-  21_distill10_entropy_true
+  22_distill10_entropy_true
 )
 
 usage() {
