@@ -83,13 +83,13 @@ base.setdefault("memory", {}).update(
     distill_topk=0,
 )
 runs = {
-    "01token_recon128-distill03_false": {"distill_weight": 0.3, "distill_entropy_weight": false},
-    "02token_recon128-distill03_true": {"distill_weight": 0.3, "distill_entropy_weight": true},
-    "03token_recon128-distill01_false":{"distill_weight": 0.1, "distill_entropy_weight": false},
-    "04token_recon128-distill01_true":{"distill_weight": 0.1, "distill_entropy_weight": true},
+    "01token_recon128-distill03_false": {"distill_weight": 0.3, "distill_entropy_weight": False},
+    "02token_recon128-distill03_true": {"distill_weight": 0.3, "distill_entropy_weight": True},
+    "03token_recon128-distill01_false":{"distill_weight": 0.1, "distill_entropy_weight": False},
+    "04token_recon128-distill01_true":{"distill_weight": 0.1, "distill_entropy_weight": True},
     "05token_recon256-distill03_false":
-    {"token_recon_positions": 256, "distill_weight": 0.3, "distill_entropy_weight": false},
-    "06token_recon128-distill03_false_256": {"distill_weight": 0.3, "distill_entropy_weight": false, "distill_positions": 256},
+    {"token_recon_positions": 256, "distill_weight": 0.3, "distill_entropy_weight": False},
+    "06token_recon128-distill03_false_256": {"distill_weight": 0.3, "distill_entropy_weight": False, "distill_positions": 256},
 }
 
 for name, overrides in runs.items():
