@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-import random
 
 import torch
 from torch.utils.data import DataLoader
@@ -22,7 +21,7 @@ from src.pipeline import (
     new_run_name,
     resolve_split_limit,
 )
-from utils import CheckpointManager, build_optimizer, build_scheduler
+from utils import CheckpointManager, build_optimizer, build_scheduler, seed_everything
 
 # W&B groups panels by the FIRST path component of a logged key, so the two evaluation
 # modes must lead the key to become two sections. Logging `val/teacher_forced/...` and
@@ -116,18 +115,16 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
         cfg.logging.wandb_run_name = cfg.logging.wandb_run_name or run_dir.name
         return
     is_main = accelerator is None or accelerator.is_main_process
-    run_name = new_run_name(cfg.model.name_or_path) if is_main else None
+    run_name = (
+        cfg.logging.wandb_run_name or new_run_name(cfg.model.name_or_path)
+    ) if is_main else None
     num_processes = accelerator.num_processes if accelerator is not None else 1
     if num_processes > 1:
         names = [run_name]
         torch.distributed.broadcast_object_list(names, src=0)
         run_name = names[0]
     cfg.logging.wandb_run_name = run_name
-    # The run keeps its own directory (a re-run must not clobber the previous one), but it
-    # lives *under* the config's ``checkpoint.output_dir`` instead of replacing it. Before
-    # this, every run went to ``outputs/<auto name>`` and the configured path was silently
-    # ignored -- which is why a crashed A/B arm's checkpoints could not be found afterwards,
-    # let alone resumed. Now an arm's checkpoints are all under ``outputs/ab_h200_on/``.
+    # Both explicit and generated names live under the configured output root.
     cfg.checkpoint.output_dir = str(Path(cfg.checkpoint.output_dir) / run_name)
 
 
@@ -148,8 +145,7 @@ def main() -> None:
 
     cfg = TrainConfig.from_file(args.config, machine=args.machine)
     cfg.validate()
-    random.seed(cfg.training.seed)
-    torch.manual_seed(cfg.training.seed)
+    seed_everything(cfg.training.seed, deterministic=cfg.training.deterministic)
     tokenizer, model = load_model(cfg)
 
     accelerator = None

@@ -27,36 +27,52 @@ evaluation:
   qa_batch_size: 4
   teacher_forced_every: 200
 logging:
+  wandb_run_name: null # Optional; defaults to model name + timestamp.
   log_every: 25
   wandb_mode: offline
   wandb_project: MemoryQwen
 memory:
+  # Memory slots and initialization
+  memory_length: 64
   slot_attention: causal
-  token_recon_positions: 128
-  decoder_ffn_ratio: 2
-  decoder_heads: 8
-  decoder_hidden_size: 256
-  distill_entropy_weight: true
-  distill_positions: 128
-  distill_temperature: 1.0
-  distill_topk: 0
-  distill_weight: 0.3
-  head_init: auto
-  head_mode: tied
   init_mode: token_embed
   init_seed: 0
-  memory_length: 64
-  qa_weight: 1.0
-  readout_heads: 4
+
+  # Question-conditioned readout
+  readout_length: 8
   readout_hidden_size: 256
   readout_layers: 2
-  readout_length: 8
+  readout_heads: 4
+
+  # Reconstruction decoder and vocabulary head
+  decoder_hidden_size: 256
+  decoder_heads: 8
+  decoder_ffn_ratio: 2
+  head_mode: tied
+  head_init: auto
+
+  # QA objective
+  qa_weight: 1.0
+
+  # Embedding reconstruction
   embedding_recon_weight: 0.0
   embedding_recon_loss: mse_cosine
   embedding_recon_cosine_weight: 0.5
+
+  # Token reconstruction
   token_recon_weight: 1.0
-  causal_recon_weight: 1.0
+  token_recon_positions: 128
+
+  # Causal reconstruction
+  causal_recon_weight: 0.0
   causal_recon_positions: 128
+
+  # Distillation
+  distill_weight: 0.3
+  distill_positions: 128
+  distill_temperature: 1.0
+  distill_topk: 0
+  distill_entropy_weight: true
 model:
   lora_alpha: 16.0
   lora_dropout: 0.0
@@ -84,3 +100,4 @@ training:
   epochs: 1
   max_grad_norm: 1.0
   seed: 42
+  deterministic: true # Enable deterministic algorithms; may reduce performance.

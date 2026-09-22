@@ -4,7 +4,6 @@ import argparse
 import json
 import os
 import platform
-import random
 import shlex
 from datetime import datetime
 import subprocess
@@ -17,6 +16,7 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from utils import seed_everything
 
 from scripts.evaluation.test_all_suite import DATASETS, plans
 
@@ -191,12 +191,6 @@ def distributed_context():
         raise RuntimeError("This inference entrypoint requires CUDA")
     torch.cuda.set_device(local_rank)
     return rank, world_size, torch.device("cuda", local_rank)
-
-
-def seed_everything(seed: int, rank: int):
-    random.seed(seed + rank)
-    torch.manual_seed(seed + rank)
-    torch.cuda.manual_seed_all(seed + rank)
 
 
 def load_model(args, device):
@@ -383,7 +377,7 @@ def experiment_metadata(args, world_size, demonstrations):
 def worker_main():
     args = parse_args()
     rank, world_size, device = distributed_context()
-    seed_everything(args.seed, rank)
+    seed_everything(args.seed, rank=rank)
     if dist.is_initialized():
         shared_output = [args.output_dir if rank == 0 else None]
         dist.broadcast_object_list(shared_output, src=0)

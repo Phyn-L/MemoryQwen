@@ -228,6 +228,7 @@ class TrainingConfig:
     epochs: int = 1
     max_grad_norm: float = 1.0
     seed: int = 42
+    deterministic: bool = False
 
 
 @dataclass
@@ -238,6 +239,7 @@ class CheckpointConfig:
 @dataclass
 class LoggingConfig:
     wandb_project: str = "MemoryQwen"
+    # W&B name and checkpoint subdirectory; empty means model name + timestamp.
     wandb_run_name: str | None = None
     wandb_mode: str = "online"
     wandb_run_id: str | None = None
