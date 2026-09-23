@@ -21,14 +21,14 @@ data:
   - squad
   validation_max_samples: 2000
 evaluation:
-  autoregressive_every: 400
+  autoregressive_every: 1000
   autoregressive_max_qa: 1024
   max_new_tokens: 32
   qa_batch_size: 4
-  teacher_forced_every: 200
+  teacher_forced_every: 1000
 logging:
   wandb_run_name: null # Optional; defaults to model name + timestamp.
-  log_every: 25
+  log_every: 50
   wandb_mode: offline
   wandb_project: MemoryQwen
 memory:
@@ -94,7 +94,7 @@ optimizer:
   weight_decay: 0.01
 scheduler:
   name: cosine
-  warmup_steps: 200
+  warmup_steps: 1000
 training:
   batch_size: 10
   epochs: 1
