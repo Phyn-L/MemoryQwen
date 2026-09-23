@@ -6,7 +6,7 @@ from torch import nn
 from torch.nn import functional as F
 from .MemoryDecoder import MemoryDecoder
 from .dtypes import no_autocast
-from .resampler import QuestionResampler
+from .resampler import QuestionResampler, LearnedPrefix
 
 try:
     from transformers.cache_utils import DynamicCache
@@ -434,7 +434,7 @@ class MetaLoRA(nn.Module):
     ``StaticLoRALinear``/``MemoryDecoder`` cast on entry and exit, and the losses
     upcast before reducing.
     """
-    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, token_recon=False, embedding_recon=True, use_peft=False, head_mode="linear", head_init="auto", init_mode="randn", init_seed=0, slot_attention="isolated", ae_lm=False, readout_length=0, readout_layers=2, readout_heads=4, readout_hidden_size=256):
+    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, token_recon=False, embedding_recon=True, use_peft=False, head_mode="linear", head_init="auto", init_mode="randn", init_seed=0, slot_attention="isolated", ae_lm=False, readout_length=0, readout_layers=2, readout_heads=4, readout_hidden_size=256, readout_mode="memory_question"):
         super().__init__()
         self.rank, self.alpha = rank, alpha
         self.target_modules = tuple(("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj") if target_modules is None else target_modules)
@@ -502,14 +502,21 @@ class MetaLoRA(nn.Module):
         )
         # Per-question read-out over the (question-agnostic, cacheable) memory. Zero means
         # the historical behaviour: the answer attends only to the memory and the question.
-        self.readout_length = int(readout_length)
-        self.resampler = (
-            QuestionResampler(
-                self.qwen_hidden_size, self.readout_length, readout_layers, readout_heads,
-                width=readout_hidden_size, dtype=trainable_dtype,
-            )
-            if self.readout_length > 0 else None
-        )
+        if readout_mode not in {"memory_question", "memory_only", "learned_prefix", "off"}:
+            raise ValueError(f"invalid readout_mode: {readout_mode}")
+        if readout_length < 0:
+            raise ValueError("readout_length must be non-negative")
+        self.readout_mode = readout_mode
+        self.readout_length = 0 if readout_mode == "off" else int(readout_length)
+        self.resampler = None
+        if self.readout_length > 0:
+            if readout_mode == "learned_prefix":
+                self.resampler = LearnedPrefix(self.qwen_hidden_size, self.readout_length, dtype=trainable_dtype)
+            else:
+                self.resampler = QuestionResampler(
+                    self.qwen_hidden_size, self.readout_length, readout_layers, readout_heads,
+                    width=readout_hidden_size, dtype=trainable_dtype, mode=readout_mode,
+                )
         self.to(dtype=qwen_dtype)
         self.set_trainable_dtype(trainable_dtype)
         # Which memory-writer options are active, recorded for reproducibility. The
@@ -778,6 +785,8 @@ class MetaLoRA(nn.Module):
         """
         if self.resampler is None:
             return None
+        if self.readout_mode == "learned_prefix":
+            return self.resampler(question_embeds, question_mask, None).to(dtype=self.dtype)
         if prefix.memory is None:
             raise RuntimeError("the question read-out needs the memory representation")
         memory = prefix.memory if indices is None else prefix.memory.index_select(0, indices)
@@ -1094,6 +1103,7 @@ def load_model(cfg):
         slot_attention=cfg.memory.slot_attention,
         ae_lm=cfg.memory.causal_recon_weight > 0 or cfg.memory.distill_weight > 0,
         readout_length=cfg.memory.readout_length,
+        readout_mode=cfg.memory.readout_mode,
         readout_layers=cfg.memory.readout_layers,
         readout_heads=cfg.memory.readout_heads,
         readout_hidden_size=cfg.memory.readout_hidden_size,

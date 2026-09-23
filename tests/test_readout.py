@@ -148,14 +148,14 @@ def _tiny_qwen3(vocab=64, hidden=32, layers=2, heads=4, kv_heads=2, intermediate
     return Qwen3ForCausalLM(config)
 
 
-def _model(readout_length=0):
+def _model(readout_length=0, readout_mode="memory_question"):
     torch.manual_seed(0)
     model = MetaLoRA(
         _tiny_qwen3(), rank=2, alpha=4.0, memory_length=4, decoder_hidden_size=16,
         decoder_heads=4, decoder_ffn_ratio=2,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], dropout=0.0,
         max_context_tokens=16, trainable_dtype=torch.float32, token_recon=True,
-        readout_length=readout_length, readout_layers=2, readout_heads=4,
+        readout_length=readout_length, readout_layers=2, readout_heads=4, readout_mode=readout_mode,
     )
     for name, parameter in model.named_parameters():
         parameter.requires_grad = is_trainable_parameter_name(name)
@@ -273,6 +273,65 @@ def test_generation_without_readout_still_works():
         batch["question_ids"], batch["question_mask"], _Tokenizer(), max_new_tokens=4,
     )
     assert generated.shape == (2, 4)
+
+
+
+
+def test_memory_only_input_dependency():
+    module, question, mask, memory = _resampler(mode="memory_only")
+    memory.requires_grad_()
+    out = module(question, mask, memory)
+    assert torch.equal(out, module(torch.randn_like(question), ~mask, memory))
+    assert not torch.allclose(out, module(question, mask, torch.randn_like(memory)))
+    out.square().sum().backward()
+    assert memory.grad is not None and memory.grad.abs().sum() > 0
+    assert module.query_projection is None
+
+
+def test_new_modes_forward_gradient_and_generation():
+    from src.losses import qa_loss
+    for mode in ("memory_only", "learned_prefix", "off"):
+        model = _model(3, mode)
+        batch = _batch()
+        output = _forward(model, batch)
+        extra = 0 if mode == "off" else 3
+        assert output.logits.shape[1] == 9 + extra
+        assert torch.equal(output.labels[:, 4 + extra:], batch["answer_ids"])
+        if extra:
+            assert (output.labels[:, 4:7] == -100).all()
+        qa_loss(output.logits, output.labels).backward()
+        if mode == "off":
+            assert model.resampler is None and model.readout_length == 0
+        else:
+            assert all(p.grad is not None for p in model.resampler.parameters())
+            assert any(p.grad.abs().sum() > 0 for p in model.resampler.parameters())
+            assert all(is_trainable_parameter_name(n) for n, p in model.named_parameters() if n.startswith("resampler."))
+        model.eval()
+        embed = model.qwen.get_input_embeddings()
+        with torch.no_grad():
+            prefix = model.encode_context_prefix(embed(batch["context_ids"]), batch["context_mask"])
+            if mode == "learned_prefix":
+                a = model.resampler(embed(batch["question_ids"]), batch["question_mask"], prefix.memory)
+                b = model.resampler(torch.randn_like(embed(batch["question_ids"])), ~batch["question_mask"], torch.randn_like(prefix.memory))
+                assert torch.equal(a, b)
+            class Tokenizer:
+                pad_token_id = 0
+                eos_token_id = None
+            tokens = model.generate_answers_with_prefix(prefix, torch.arange(2), batch["question_ids"], batch["question_mask"], Tokenizer(), max_new_tokens=3)
+            assert tokens.shape == (2, 3)
+
+
+def test_readout_mode_config_validation():
+    from utils.config import TrainConfig
+    for mode in ("memory_question", "memory_only", "learned_prefix", "off"):
+        cfg = TrainConfig()
+        cfg.memory.readout_mode = mode
+        cfg.memory.readout_length = 3
+        cfg.validate()
+    cfg.memory.readout_mode = "typo"
+    import pytest
+    with pytest.raises(ValueError, match="readout_mode"):
+        cfg.validate()
 
 
 if __name__ == "__main__":

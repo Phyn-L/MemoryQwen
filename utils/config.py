@@ -147,6 +147,7 @@ class MemoryConfig:
     # Per-question read-out over the cached (question-agnostic) memory: R learnable latents
     # cross-attend over the question and the memory and are inserted as R extra input
     # positions between the question and the answer. 0 = off (the historical behaviour).
+    readout_mode: str = "memory_question"
     readout_length: int = 0
     readout_layers: int = 2
     readout_heads: int = 4
@@ -371,9 +372,11 @@ class TrainConfig:
             raise ValueError("memory.distill_positions must be >= 0 (0 scores every position)")
         if m.distill_topk < 0:
             raise ValueError("memory.distill_topk must be >= 0")
+        if m.readout_mode not in {"memory_question", "memory_only", "learned_prefix", "off"}:
+            raise ValueError("invalid memory.readout_mode")
         if m.readout_length < 0:
             raise ValueError("memory.readout_length must be >= 0 (0 disables the read-out)")
-        if m.readout_length > 0:
+        if m.readout_length > 0 and m.readout_mode in {"memory_question", "memory_only"}:
             if m.readout_layers <= 0:
                 raise ValueError("memory.readout_layers must be positive when the read-out is on")
             if m.readout_heads <= 0:

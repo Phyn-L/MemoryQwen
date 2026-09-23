@@ -33,3 +33,24 @@ baseline 保留原三次训练的目标：memory-token CE=1、prefix-KV CE=1、d
 训练与 teacher-forced 验证分别记录 `embedding_recon_loss`、`token_recon_loss`、`causal_recon_loss`、`distill_loss`，指标均为未加权值。`loss` 使用配置权重求和；QA 按问答行平均，辅助目标按 context 平均，再跨进程汇总。
 
 旧 checkpoint 内嵌的旧字段不会自动转换，不能直接用于此版本恢复训练。请保留原代码版本评测历史 checkpoint。
+
+## Readout 模式
+
+`memory.readout_mode` 支持以下模式；默认 `memory_question`，兼容未包含此字段的旧配置。
+
+| 模式 | 输入 readout embeddings 的来源 |
+|---|---|
+| `memory_question` | Resampler 同时读取 question 和 memory（原行为） |
+| `memory_only` | Resampler 只读取 memory，不创建 question projection |
+| `learned_prefix` | 全局共享的 `[R, H]` 可学习 embeddings，不读取 question 或 memory 内容 |
+| `off` | 不创建 readout 模块、不插入 readout 位置，忽略正数 readout_length |
+
+```yaml
+memory:
+  readout_mode: memory_only
+  readout_length: 8
+```
+
+`readout_length: 0` 仍会关闭所有模式的 readout。`readout_layers/heads/hidden_size` 仅对两个 resampler 模式生效。
+四种模式保留相同的 memory KV 路径；memory_only/learned_prefix 限制的是插入 Qwen 前的 embeddings 来源，进入 Qwen 后这些位置仍可 attention 到 question 和 memory。
+Learned prefix 是等长度控制而非等参数量控制。切换模式用于独立训练的结构消融；不同模式的 checkpoint 参数结构可能不兼容，不应直接作为原 checkpoint 的续训配置。

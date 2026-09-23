@@ -64,8 +64,11 @@ class QuestionResampler(nn.Module):
 
     def __init__(self, hidden_size: int, num_readout: int = 8, num_layers: int = 2,
                  num_heads: int = 4, width: int = 256, ffn_ratio: int = 2,
-                 dtype: torch.dtype | None = None):
+                 dtype: torch.dtype | None = None, mode: str = "memory_question"):
         super().__init__()
+        if mode not in {"memory_question", "memory_only"}:
+            raise ValueError(f"invalid resampler mode: {mode}")
+        self.mode = mode
         if num_readout <= 0:
             raise ValueError("num_readout must be positive")
         if width <= 0:
@@ -75,7 +78,7 @@ class QuestionResampler(nn.Module):
         self.hidden_size = int(hidden_size)
         self.num_readout = int(num_readout)
         self.width = int(width)
-        self.query_projection = nn.Linear(hidden_size, width)
+        self.query_projection = nn.Linear(hidden_size, width) if mode == "memory_question" else None
         self.memory_projection = nn.Linear(hidden_size, width)
         self.latents = nn.Parameter(torch.randn(num_readout, width) * 0.02)
         self.input_norm = nn.LayerNorm(width)
@@ -100,6 +103,9 @@ class QuestionResampler(nn.Module):
             raise ValueError("memory must have shape [B, M, H]")
         if question_embeds.size(0) != memory.size(0):
             raise ValueError("question and memory must share the batch dimension")
+        if self.mode == "memory_only":
+            question_embeds = question_embeds[:, :0]
+            question_mask = question_mask[:, :0]
         dtype = self.latents.dtype
         padding = torch.cat(
             [
@@ -116,7 +122,8 @@ class QuestionResampler(nn.Module):
         with no_autocast(memory.device):
             context = torch.cat(
                 [
-                    self.query_projection(question_embeds.to(dtype)),
+                    self.query_projection(question_embeds.to(dtype)) if self.query_projection is not None
+                    else memory.new_empty((memory.size(0), 0, self.width), dtype=dtype),
                     self.memory_projection(memory.to(dtype)),
                 ],
                 dim=1,
@@ -127,4 +134,15 @@ class QuestionResampler(nn.Module):
             return self.output_projection(self.output_norm(latents))
 
 
-__all__ = ["QuestionResampler"]
+class LearnedPrefix(nn.Module):
+    """Shared input embeddings; no question or memory content is read here."""
+
+    def __init__(self, hidden_size, num_readout, dtype=None):
+        super().__init__()
+        self.latents = nn.Parameter(torch.randn(num_readout, hidden_size, dtype=dtype) * 0.02)
+
+    def forward(self, question_embeds, question_mask, memory):
+        return self.latents.unsqueeze(0).expand(question_embeds.size(0), -1, -1)
+
+
+__all__ = ["QuestionResampler", "LearnedPrefix"]

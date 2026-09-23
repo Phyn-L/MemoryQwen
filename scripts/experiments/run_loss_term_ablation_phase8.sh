@@ -14,10 +14,13 @@ NUM_PROCESSES=${NUM_PROCESSES:-}
 DRY_RUN=0
 
 RUNS=(
-    03token_recon128-distill03_false_256
-    04token_recon128-distill03_true_256
-    05token_recon128-distill03_false_512
-    06token_recon128-distill10_false_512
+    # 03token_recon128-distill03_false_256
+    # 04token_recon128-distill03_true_256
+    # 05token_recon128-distill03_false_512
+    06token_recon128-distill10_false_256
+    07token_recon128-distill01_true_512
+    08token_recon128-distill03_false_128
+    09token_recon512-distill03_false_256
 )
 
 usage() {
@@ -80,10 +83,13 @@ base.setdefault("memory", {}).update(
     distill_topk=0,
 )
 runs = {
-    "03token_recon128-distill03_false_256": {"distill_weight": 0.3, "distill_entropy_weight": False, "distill_positions": 256},
-    "04token_recon128-distill03_true_256": {"distill_weight": 0.3, "distill_entropy_weight": True, "distill_positions": 256},
-    "05token_recon128-distill03_false_512": {"distill_weight": 0.3, "distill_entropy_weight": False, "distill_positions": 512},
-    "06token_recon128-distill10_false_512": {"distill_weight": 1.0, "distill_entropy_weight": False, "distill_positions": 256},
+    # "03token_recon128-distill03_false_256": {"distill_weight": 0.3, "distill_entropy_weight": False, "distill_positions": 256},
+    # "04token_recon128-distill03_true_256": {"distill_weight": 0.3, "distill_entropy_weight": True, "distill_positions": 256},
+    # "05token_recon128-distill03_false_512": {"distill_weight": 0.3, "distill_entropy_weight": False, "distill_positions": 512},
+    "06token_recon128-distill10_false_256": {"distill_weight": 1.0, "distill_entropy_weight": False, "distill_positions": 256},
+    "07token_recon128-distill01_true_512": {"distill_weight": 0.1, "distill_entropy_weight": True, "distill_positions": 512},
+    "08token_recon128-distill03_false_128": {"distill_weight": 0.3, "distill_entropy_weight": False, "distill_positions": 128},
+    "09token_recon512-distill03_false_256": {"distill_weight": 0.3, "distill_entropy_weight": False, "distill_positions": 128, "token_recon_positions": 512},
 }
 
 for name, overrides in runs.items():
@@ -121,3 +127,5 @@ for name in "${RUNS[@]}"; do
 done
 
 echo "[ablation] all runs finished; outputs: $OUTPUT_ROOT"
+
+python /home/sean/burn.py
