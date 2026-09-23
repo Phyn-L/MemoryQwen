@@ -33,7 +33,15 @@ AUTOREGRESSIVE_SECTION = "val_autoregressive"
 ANSWER_METRIC_KEYS = (*METRIC_KEYS, "first_token_em")
 # Loss-like scalars only exist on the teacher-forced pass (the autoregressive pass can run
 # one internally to obtain them, but they are still that pass's numbers).
-LOSS_KEYS = ("loss", "qa_loss", "ppl", "embedding_recon_loss", "token_recon_loss", "causal_recon_loss", "distill_loss")
+LOSS_KEYS = (
+    "loss",
+    "qa_loss",
+    "ppl",
+    "embedding_recon_loss",
+    "token_recon_loss",
+    "causal_recon_loss",
+    "distill_loss",
+)
 
 
 def resume_plan(step: int, steps_per_epoch: int, epochs: int) -> tuple[int, int]:
@@ -116,8 +124,10 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
         return
     is_main = accelerator is None or accelerator.is_main_process
     run_name = (
-        cfg.logging.wandb_run_name or new_run_name(cfg.model.name_or_path)
-    ) if is_main else None
+        (cfg.logging.wandb_run_name or new_run_name(cfg.model.name_or_path))
+        if is_main
+        else None
+    )
     num_processes = accelerator.num_processes if accelerator is not None else 1
     if num_processes > 1:
         names = [run_name]
@@ -136,8 +146,8 @@ def main() -> None:
         choices=machine_names(),
         default=None,
         help="Take MODEL_ROOT / DATA_ROOT (and the machine's wandb mode) from "
-             "utils/machines.py::MACHINES. Overrides the config's `machine:` field; can also "
-             "come from the MACHINE environment variable or, failing that, the hostname.",
+        "utils/machines.py::MACHINES. Overrides the config's `machine:` field; can also "
+        "come from the MACHINE environment variable or, failing that, the hostname.",
     )
     parser.add_argument("--resume")
     parser.add_argument("--wandb-run-id")
@@ -264,7 +274,9 @@ def main() -> None:
                 f"ones this run saw.",
                 flush=True,
             )
-    start_epoch, skip_batches = resume_plan(step, effective_loader_len, cfg.training.epochs)
+    start_epoch, skip_batches = resume_plan(
+        step, effective_loader_len, cfg.training.epochs
+    )
     if step:
         print(
             f"resume: step {step}/{total_steps} -> epoch {start_epoch + 1}/{cfg.training.epochs}, "
@@ -285,13 +297,11 @@ def main() -> None:
         # between zero and the peak instead of annealing. Every rank steps its own
         # unwrapped scheduler once per optimizer step, which is the intended schedule and
         # keeps the ranks identical.
-        model, optimizer, train_loader, validation_loader = (
-            accelerator.prepare(
-                model,
-                optimizer,
-                train_loader,
-                validation_loader,
-            )
+        model, optimizer, train_loader, validation_loader = accelerator.prepare(
+            model,
+            optimizer,
+            train_loader,
+            validation_loader,
         )
 
     run = None
@@ -332,10 +342,15 @@ def main() -> None:
             )
             embedding = base_model.qwen.get_input_embeddings()
             output = model(
-                embedding(ids["context_ids"]), ids["context_mask"],
-                embedding(ids["question_ids"]), ids["question_mask"],
-                embedding(ids["answer_ids"]), ids["answer_mask"], ids["labels"],
-                ids["qa_context_indices"], context_ids=ids["context_ids"],
+                embedding(ids["context_ids"]),
+                ids["context_mask"],
+                embedding(ids["question_ids"]),
+                ids["question_mask"],
+                embedding(ids["answer_ids"]),
+                ids["answer_mask"],
+                ids["labels"],
+                ids["qa_context_indices"],
+                context_ids=ids["context_ids"],
                 objective_config=cfg.memory,
             )
             qa = qa_loss(output.logits, output.labels)
@@ -358,7 +373,8 @@ def main() -> None:
             progress.set_postfix(
                 loss=f"{float(total.detach()):.4f}",
                 qa=f"{float(qa.detach()):.4f}",
-                embedding_recon=f"{float(terms['embedding_recon_loss'].detach()):.4f}",
+                token_recon=f"{float(terms['token_recon_loss'].detach()):.4f}",
+                distill=f"{float(terms['distill_loss'].detach()):.4f}",
             )
 
             if run and step % cfg.logging.log_every == 0:
@@ -411,7 +427,9 @@ def main() -> None:
                 # Resynchronise explicitly so a rank whose shard finished early cannot
                 # race ahead into the next training step.
                 accelerator.wait_for_everyone()
-            if (teacher_metrics is not None or metrics is not None) and torch.cuda.is_available():
+            if (
+                teacher_metrics is not None or metrics is not None
+            ) and torch.cuda.is_available():
                 # An evaluation allocates a very different tensor mix from a training step
                 # (whole contexts through every decoder, a full validation loader), and the
                 # allocator keeps those blocks cached afterwards. On the H200 that residue

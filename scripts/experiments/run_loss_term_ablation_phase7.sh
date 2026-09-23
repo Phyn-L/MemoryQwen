@@ -61,9 +61,6 @@ base_path = Path(os.environ["BASE_CONFIG"])
 out_root = Path(os.environ["OUTPUT_ROOT"])
 base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
 
-# Phase 7: compare 128 vs 256 token reconstruction positions.
-# QA and token reconstruction use weight 1; distillation uses weight 0.3
-# with 256 positions and entropy weighting disabled. Other objectives are off.
 base.setdefault("memory", {}).update(
     qa_weight=1.0,
     embedding_recon_weight=0.0,

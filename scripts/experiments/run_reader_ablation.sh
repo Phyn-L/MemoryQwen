@@ -87,9 +87,9 @@ for name, overrides in runs.items():
     config = copy.deepcopy(base)
     memory = config.setdefault("memory", {})
     memory.update(overrides)
-    config.setdefault("checkpoint", {})["output_dir"] = str(out_root / name)
+    config.setdefault("checkpoint", {})["output_dir"] = str(out_root)
     logging = config.setdefault("logging", {})
-    logging["wandb_run_name"] = f"{out_root.name}_{name}"
+    logging["wandb_run_name"] = name
     logging["wandb_run_id"] = None
     config["machine"] = os.environ["MACHINE"]
 

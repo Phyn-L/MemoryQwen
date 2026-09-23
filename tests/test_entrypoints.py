@@ -36,6 +36,31 @@ def test_checkpoint_preserves_architecture_and_rebases_machine(tmp_path):
     assert script('test').evaluation_config(checkpoint, preset, '4090').memory.memory_length == 32
 
 
+@pytest.mark.parametrize('mode', ['memory_question', 'memory_only', 'learned_prefix', 'off'])
+@pytest.mark.parametrize('preset', [None, ROOT / 'configs/test.yaml'])
+def test_checkpoint_preserves_readout_mode(tmp_path, mode, preset):
+    cfg = TrainConfig.from_file(ROOT / 'configs/train_baseline.yaml')
+    cfg.memory.readout_mode = mode
+    cfg.memory.readout_length = 8
+    checkpoint = tmp_path / 'reader.pt'
+    torch.save({'config': cfg.to_dict()}, checkpoint)
+    actual = script('test').evaluation_config(checkpoint, config=preset)
+    actual.validate()
+    assert actual.memory == cfg.memory
+
+
+def test_legacy_checkpoint_defaults_to_question_readout(tmp_path):
+    cfg = TrainConfig.from_file(ROOT / 'configs/train_baseline.yaml').to_dict()
+    cfg['memory'].pop('readout_mode')
+    cfg['memory']['readout_length'] = 8
+    checkpoint = tmp_path / 'legacy.pt'
+    torch.save({'config': cfg}, checkpoint)
+    actual = script('test').evaluation_config(checkpoint)
+    actual.validate()
+    assert actual.memory.readout_mode == 'memory_question'
+    assert actual.memory.readout_length == 8
+
+
 def test_checkpoint_without_config_fails(tmp_path):
     p = tmp_path / 'empty.pt'
     torch.save({'model': {}}, p)
