@@ -7,18 +7,28 @@ if [ -f scripts/env.local.sh ]; then source scripts/env.local.sh; fi
 
 # Edit these variables for a run. Command-line arguments appended below override them.
 MACHINE="${MACHINE:-4090}"
-NUM_PROCESSES="${NUM_PROCESSES:-3}"
-CHECKPOINT_DIR="${CHECKPOINT_DIR:-outputs/checkpoints}"
+NUM_PROCESSES="${NUM_PROCESSES:-4}"
+CKPT_DIR="${CKPT_DIR:-outputs/checkpoints}"
 DATA_ROOT="${DATA_ROOT:-/data/lz/contexts/aggregated}"
-DATASETS="${DATASETS:-squad ms_marco_v1 ms_marco_v2 hotpotqa}"
-MEMORY_BS="${MEMORY_BS:-16}"
+DATASETS="${DATASETS:-squad ms_marco_v1 ms_marco_v2}"
+MEMORY_BS="${MEMORY_BS:-32}"
 MAX_CONTEXT_TOKENS="${MAX_CONTEXT_TOKENS:-1024}"
 MAX_CONTEXT_ROWS="${MAX_CONTEXT_ROWS:-2000}"
 QA_PER_CONTEXT="${QA_PER_CONTEXT:-8}"
 CONTEXT_SHUFFLE_SEED="${CONTEXT_SHUFFLE_SEED:-42}"
-OUTPUT_DIR="${OUTPUT_DIR:-}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-outputs/all_suite}"
+OUTPUT_DIR="${OUTPUT_DIR:-outputs/eval_ab_reader}"
 DRY_RUN="${DRY_RUN:-0}"
+
+has_option() {
+  local option="$1" arg
+  shift
+  for arg in "$@"; do
+    if [[ "$arg" == "$option" || "$arg" == "$option="* ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
 
 export NUM_PROCESSES
 args=(
@@ -31,17 +41,15 @@ args=(
 if [[ -n "$MAX_CONTEXT_ROWS" ]]; then args+=(--max-context-rows "$MAX_CONTEXT_ROWS"); fi
 if [[ -n "$QA_PER_CONTEXT" ]]; then args+=(--qa-per-context "$QA_PER_CONTEXT"); fi
 args+=(--context-shuffle-seed "$CONTEXT_SHUFFLE_SEED")
-if [[ "$*" == *"--checkpoint "* || "$*" == *"--ckpt "* || "$*" == *"--checkpoint="* || "$*" == *"--ckpt="* ]]; then
-  : # explicit checkpoint arguments below take precedence over CHECKPOINT_DIR
+if has_option --checkpoint "$@" || has_option --ckpt "$@" || has_option --ckpt-dir "$@"; then
+  : # Explicit checkpoint arguments below take precedence over CKPT_DIR.
 else
-  args+=(--checkpoint-dir "$CHECKPOINT_DIR")
+  args+=(--ckpt-dir "$CKPT_DIR")
 fi
-if [[ -n "$OUTPUT_DIR" && "$*" != *"--output-dir"* && "$*" != *"--output-root"* ]]; then
+if ! has_option --output-dir "$@"; then
   args+=(--output-dir "$OUTPUT_DIR")
-elif [[ "$*" != *"--output-dir"* && "$*" != *"--output-root"* ]]; then
-  args+=(--output-root "$OUTPUT_ROOT")
 fi
-if [[ "$DRY_RUN" == "1" && "$*" != *"--dry-run"* ]]; then
+if [[ "$DRY_RUN" == "1" ]] && ! has_option --dry-run "$@"; then
   args+=(--dry-run)
 fi
 exec python scripts/evaluation/test_all_suite.py "${args[@]}" "$@"

@@ -30,6 +30,7 @@ from src.icl_baseline import (
     sample_jsonl,
     limit_examples,
     sample_context_rows,
+    system_prompt_for,
 )
 from utils.config import dtype_from_name, expand_env
 from utils.icl_config import load_icl_defaults
@@ -268,7 +269,13 @@ def evaluate_dataset(
         )
         for indices, examples in progress:
             prompts = [
-                render_prompt(tokenizer, example, demos, not args.no_chat_template)
+                render_prompt(
+                    tokenizer,
+                    example,
+                    demos,
+                    not args.no_chat_template,
+                    args.source_version,
+                )
                 for example in examples
             ]
             encoded = tokenizer(
@@ -359,6 +366,10 @@ def experiment_metadata(args, world_size, demonstrations):
             "multi_reference_reduction": "maximum per example",
             "bleu_4": "corpus BLEU-4, closest reference length, add-one smoothing",
             "rouge_l": "sentence-level LCS F1, macro average",
+            "system_prompts": {
+                dataset: system_prompt_for(dataset, args.source_version)
+                for dataset in args.datasets
+            },
         },
         "distributed": {"world_size": world_size},
         "demonstrations": {

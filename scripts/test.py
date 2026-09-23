@@ -39,6 +39,10 @@ def main():
     parser.add_argument("--data-root", help="Aggregated dataset root")
     parser.add_argument("--output-dir", help="Directory for evaluation JSON reports")
     parser.add_argument(
+        "--report-file",
+        help="Exact JSON report path (used by evaluation orchestration)",
+    )
+    parser.add_argument(
         "--machine", choices=machine_names(), default=None,
         help="Machine whose paths (utils/machines.py) this run uses.",
     )
@@ -75,6 +79,11 @@ def main():
         help="Load a checkpoint that does not cover every trainable tensor (for example an "
              "older run without the token_recon head) instead of failing.",
     )
+    parser.add_argument(
+        "--teacher-forced",
+        action="store_true",
+        help="Also run the slower teacher-forced diagnostic pass (disabled by default).",
+    )
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config")
     preliminary, _ = bootstrap.parse_known_args()
@@ -83,7 +92,8 @@ def main():
         if 'test' in raw:
             if set(raw) - {'test', 'machine'}:
                 parser.error("Test YAML supports only test and machine sections")
-            allowed = {'datasets', 'split', 'batch_size', 'qa_batch_size', 'max_new_tokens', 'max_samples'}
+            allowed = {'datasets', 'split', 'batch_size', 'qa_batch_size', 'max_new_tokens',
+                       'max_samples', 'teacher_forced'}
             if not isinstance(raw['test'], dict) or set(raw['test']) - allowed:
                 parser.error("Unknown test YAML fields")
             parser.set_defaults(**raw['test'], machine=raw.get('machine'))
@@ -177,10 +187,10 @@ def main():
               f"max_new_tokens={cfg.evaluation.max_new_tokens} "
               f"batches/rank={len(loader)} ranks={ranks}")
     evaluator = Evaluator(tokenizer, cfg)
-    # Autoregressive first: it is the headline result. Teacher forcing feeds the answer
-    # prefix back in, so its em/f1 mostly rewards lexical continuation; only
-    # first_token_em there is a retrieval signal. Both collectives are called by every rank;
-    # the numbers that come back are already the global ones.
+    # Autoregressive is the default and headline result. Teacher forcing feeds the answer
+    # prefix back in, so its em/f1 mostly rewards lexical continuation; it is an optional
+    # diagnostic enabled explicitly with --teacher-forced. Every rank follows the same branch
+    # because both evaluator methods contain distributed collectives.
     import time
 
     started = time.time()
@@ -189,24 +199,31 @@ def main():
     autoregressive = evaluator.autoregressive(model, loader, device, include_teacher_metrics=False)
     if is_main:
         print(f"[eval] autoregressive done in {time.time() - started:.1f}s", flush=True)
-    started = time.time()
-    if is_main:
-        print("[eval] teacher-forced pass (diagnostic) ...", flush=True)
-    teacher_forced = evaluator.teacher_forced(model, loader, device)
-    if is_main:
-        print(f"[eval] teacher-forced done in {time.time() - started:.1f}s", flush=True)
+    teacher_forced = None
+    if args.teacher_forced:
+        started = time.time()
+        if is_main:
+            print("[eval] teacher-forced pass (diagnostic) ...", flush=True)
+        teacher_forced = evaluator.teacher_forced(model, loader, device)
+        if is_main:
+            print(f"[eval] teacher-forced done in {time.time() - started:.1f}s", flush=True)
     if is_main:
         print("autoregressive (headline):", autoregressive)
-        print("teacher-forced (diagnostic only):", teacher_forced)
+        if teacher_forced is not None:
+            print("teacher-forced (diagnostic only):", teacher_forced)
     if is_main:
         report = {"checkpoint": str(checkpoint_path), "split": args.split,
                   "datasets": getattr(cfg.data, f"{args.split}_datasets") or cfg.data.dataset,
                   "config": cfg.to_dict(), "autoregressive": autoregressive,
                   "teacher_forced": teacher_forced}
-        from datetime import datetime
-        report_dir = Path(args.output_dir) if args.output_dir else checkpoint_path.parent
-        report_dir.mkdir(parents=True, exist_ok=True)
-        report_path = report_dir / f"eval_{args.split}_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
+        if args.report_file:
+            report_path = Path(args.report_file)
+            report_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            from datetime import datetime
+            report_dir = Path(args.output_dir) if args.output_dir else checkpoint_path.parent
+            report_dir.mkdir(parents=True, exist_ok=True)
+            report_path = report_dir / f"eval_{args.split}_{datetime.now():%Y%m%d_%H%M%S_%f}.json"
         report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
         print(f"results: {report_path}")
     if accelerator is not None:

@@ -17,7 +17,14 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from src.data import AggregatedContextDataset  # noqa: E402
-from src.icl_baseline import iter_examples, load_jsonl  # noqa: E402
+from src.icl_baseline import (  # noqa: E402
+    ICLExample,
+    SYSTEM_PROMPTS,
+    iter_examples,
+    load_jsonl,
+    render_prompt,
+    system_prompt_for,
+)
 from utils.config import TrainConfig  # noqa: E402
 
 CONFIG = REPO / "configs/train_baseline.yaml"
@@ -166,6 +173,69 @@ def test_iter_examples_reports_line_and_index():
         # The flattened row keeps the context from the enclosing line.
         flat_row = next(iter(iter_examples(path, "squad")))[0]
         assert flat_row["context"] == "c"
+
+
+def test_dataset_specific_system_prompt_selection():
+    assert system_prompt_for("squad") == SYSTEM_PROMPTS["squad"]
+    assert system_prompt_for("race") == SYSTEM_PROMPTS["race"]
+    assert system_prompt_for("hotpotqa") == SYSTEM_PROMPTS["hotpotqa"]
+    assert system_prompt_for("ms_marco", "ms_marco_v1_1") == SYSTEM_PROMPTS["ms_marco_v1"]
+    assert system_prompt_for("ms_marco", "ms_marco_v2_1") == SYSTEM_PROMPTS["ms_marco_v2"]
+    assert system_prompt_for("squad", "ms_marco_v2_1") == SYSTEM_PROMPTS["squad"]
+    assert SYSTEM_PROMPTS["ms_marco_v1"] != SYSTEM_PROMPTS["ms_marco_v2"]
+
+
+def test_system_prompts_do_not_reveal_dataset_identity():
+    forbidden = (
+        "squad", "ms marco", "race", "hotpot", "v1", "v2",
+        "web-search", "passage-ranking", "school-level",
+    )
+    for prompt in SYSTEM_PROMPTS.values():
+        lowered = prompt.lower()
+        assert not any(term in lowered for term in forbidden), prompt
+
+
+def test_render_prompt_passes_the_selected_system_message_to_chat_template():
+    class RecordingTokenizer:
+        def __init__(self):
+            self.messages = None
+
+        def apply_chat_template(self, messages, **kwargs):
+            self.messages = messages
+            return "rendered"
+
+    tokenizer = RecordingTokenizer()
+    example = ICLExample(
+        id="m1",
+        dataset="ms_marco",
+        context="The selected passage.",
+        question="What is selected?",
+        references=("The passage",),
+    )
+    rendered = render_prompt(
+        tokenizer,
+        example,
+        [],
+        use_chat_template=True,
+        source_version="ms_marco_v2_1",
+    )
+    assert rendered == "rendered"
+    assert tokenizer.messages[0] == {
+        "role": "system",
+        "content": SYSTEM_PROMPTS["ms_marco_v2"],
+    }
+    assert tokenizer.messages[1]["role"] == "user"
+    assert "What is selected?" in tokenizer.messages[1]["content"]
+
+
+def test_no_chat_template_keeps_the_existing_plain_prompt_contract():
+    example = ICLExample(
+        id="s1", dataset="squad", context="Paris is in France.",
+        question="Where is Paris?", references=("France",),
+    )
+    prompt = render_prompt(None, example, [], use_chat_template=False)
+    assert prompt.startswith("Answer each question using only the given passage.")
+    assert "You answer SQuAD" not in prompt
 
 
 if __name__ == "__main__":

@@ -1,9 +1,7 @@
-"""Run the repository's dataset evaluators serially and collect one manifest."""
+"""Run dataset evaluators serially and write compact reports plus one summary."""
 
 from __future__ import annotations
-import argparse, json, subprocess, sys
-import hashlib
-from datetime import datetime
+import argparse, csv, json, subprocess, sys
 from pathlib import Path
 
 DATASETS = ("squad", "ms_marco_v1", "ms_marco_v2", "hotpotqa", "race")
@@ -60,13 +58,45 @@ def common_args(plan, machine):
     return result
 
 
-def run(label, command, log_path, dry_run):
+def run(label, command, dry_run):
     print(f"[{label}] {' '.join(command)}", flush=True)
     if dry_run:
         return "planned"
-    with log_path.open("w", encoding="utf-8") as log:
-        result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT)
+    # Inherit the terminal directly so tqdm remains interactive without retaining log files.
+    result = subprocess.run(command)
     return "ok" if result.returncode == 0 else f"failed:{result.returncode}"
+
+
+def write_summary(path, checkpoints, datasets, reports):
+    metrics = ("em", "f1", "rouge_l")
+    header = ["ckpt"]
+    for dataset in datasets:
+        header.extend(
+            (f"{dataset}_AR_EM", f"{dataset}_AR_F1", f"{dataset}_AR_ROUGE-L")
+        )
+    rows = []
+    for checkpoint in checkpoints:
+        row = [checkpoint.stem]
+        for dataset in datasets:
+            report_path = reports.get((checkpoint, dataset))
+            values = None
+            if report_path is not None and report_path.is_file():
+                report = json.loads(report_path.read_text())
+                values = report.get("autoregressive")
+            for metric in metrics:
+                value = None if values is None else values.get(metric)
+                row.append("" if value is None else f"{100 * float(value):.2f}")
+        rows.append(row)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(header)
+        writer.writerows(rows)
+    return rows
+
+
+def report_filename(dataset):
+    """Return the compact report filename used inside a checkpoint directory."""
+    return f"{dataset.replace('_', '')}.json"
 
 
 def main(argv=None):
@@ -75,7 +105,7 @@ def main(argv=None):
     parser.add_argument("--data-root", default="/data/lz/contexts/aggregated")
     parser.add_argument("--checkpoint", "--ckpt", dest="checkpoints", nargs="+")
     parser.add_argument(
-        "--checkpoint-dir", help="Recursively evaluate every .pt/.pth/.bin checkpoint"
+        "--ckpt-dir", help="Recursively evaluate every .pt/.pth/.bin checkpoint"
     )
     parser.add_argument(
         "--datasets", nargs="+", choices=DATASETS, default=list(DATASETS)
@@ -85,24 +115,24 @@ def main(argv=None):
     parser.add_argument("--max-context-rows", type=int, default=5000)
     parser.add_argument("--qa-per-context", type=int, default=8)
     parser.add_argument("--context-shuffle-seed", type=int, default=42)
-    output = parser.add_mutually_exclusive_group()
-    output.add_argument(
+    parser.add_argument(
         "--output-dir",
-        help="Exact directory for this run's manifest, logs and evaluation reports",
+        default="outputs/eval_ab_reader",
+        help="Root directory; each checkpoint is written under <output-dir>/<checkpoint-stem>",
     )
-    output.add_argument(
-        "--output-root",
-        default="outputs/all_suite",
-        help="Parent for an automatically timestamped run directory",
+    parser.add_argument(
+        "--teacher-forced",
+        action="store_true",
+        help="Also run teacher-forced diagnostics for every checkpoint (disabled by default)",
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
-    if bool(args.checkpoints) == bool(args.checkpoint_dir):
-        parser.error("provide exactly one of --checkpoint or --checkpoint-dir")
+    if bool(args.checkpoints) == bool(args.ckpt_dir):
+        parser.error("provide exactly one of --checkpoint/--ckpt or --ckpt-dir")
     checkpoints = (
         [Path(path).resolve() for path in args.checkpoints]
         if args.checkpoints
-        else discover_checkpoints(args.checkpoint_dir)
+        else discover_checkpoints(args.ckpt_dir)
     )
     checkpoints = list(dict.fromkeys(checkpoints))
     for checkpoint in checkpoints:
@@ -111,16 +141,25 @@ def main(argv=None):
     if args.memory_bs < 1:
         parser.error("--memory-bs must be positive")
     root = Path(args.data_root)
-    out = (
-        Path(args.output_dir)
-        if args.output_dir
-        else Path(args.output_root) / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-    )
-    out.mkdir(parents=True, exist_ok=True)
-    manifest = []
-    for plan in plans(root, args.datasets):
-        common = common_args(plan, args.machine)
-        for checkpoint in checkpoints:
+    output_root = Path(args.output_dir)
+    output_dirs = {}
+    for checkpoint in checkpoints:
+        if checkpoint.stem in output_dirs:
+            parser.error(
+                "checkpoint names must be unique because output directories use their stems: "
+                f"{output_dirs[checkpoint.stem]} and {checkpoint}"
+            )
+        output_dirs[checkpoint.stem] = checkpoint
+    output_root.mkdir(parents=True, exist_ok=True)
+    total_runs = failed_runs = 0
+    reports = {}
+    for checkpoint in checkpoints:
+        checkpoint_out = output_root / checkpoint.stem
+        checkpoint_out.mkdir(parents=True, exist_ok=True)
+        if not args.dry_run:
+            (checkpoint_out / "manifest.json").unlink(missing_ok=True)
+        for plan in plans(root, args.datasets):
+            common = common_args(plan, args.machine)
             label = f"memory:{checkpoint.stem}"
             command = [
                 sys.executable,
@@ -142,40 +181,40 @@ def main(argv=None):
             if args.qa_per_context is not None:
                 command += ["--qa-per-context", str(args.qa_per_context)]
             command += ["--context-shuffle-seed", str(args.context_shuffle_seed)]
-            identity = hashlib.sha256(str(checkpoint).encode()).hexdigest()[:12]
-            report_dir = out / plan["name"] / f"{checkpoint.stem}-{identity}"
-            command += ["--output-dir", str(report_dir)]
-            log_name = f"{plan['name']}-{checkpoint.stem}-{identity}.log"
-            status = run(label, command, out / log_name, args.dry_run)
-            manifest.append(
-                {
-                    "dataset": plan["name"],
-                    "split": plan["split"],
-                    "model": label,
-                    "checkpoint": str(checkpoint),
-                    "output_dir": str(report_dir),
-                    "log": str(out / log_name),
-                    "status": status,
-                    "command": command,
-                }
-            )
-            (out / "manifest.json").write_text(
-                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
-            )
-    (out / "manifest.json").write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
-    )
+            report_path = checkpoint_out / report_filename(plan["name"])
+            command += [
+                "--output-dir",
+                str(checkpoint_out),
+                "--report-file",
+                str(report_path),
+            ]
+            if args.teacher_forced:
+                command += ["--teacher-forced"]
+            if not args.dry_run:
+                report_path.unlink(missing_ok=True)
+            status = run(label, command, args.dry_run)
+            if status == "ok":
+                reports[(checkpoint, plan["name"])] = report_path
+            total_runs += 1
+            failed_runs += status.startswith("failed")
+    summary_path = output_root / "summary.csv"
+    if not args.dry_run:
+        write_summary(summary_path, checkpoints, args.datasets, reports)
     print(
         json.dumps(
             {
-                "output": str(out),
-                "runs": len(manifest),
-                "failed": sum(x["status"].startswith("failed") for x in manifest),
+                "output_root": str(output_root),
+                "checkpoint_outputs": [
+                    str(output_root / checkpoint.stem) for checkpoint in checkpoints
+                ],
+                "runs": total_runs,
+                "failed": failed_runs,
+                "summary": None if args.dry_run else str(summary_path),
             },
             ensure_ascii=False,
         )
     )
-    if any(x["status"].startswith("failed") for x in manifest):
+    if failed_runs:
         raise SystemExit(1)
 
 

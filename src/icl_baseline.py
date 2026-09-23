@@ -11,6 +11,37 @@ from typing import Iterable, Sequence
 
 from .metrics import METRIC_KEYS, answer_line, best_reference_metrics, normalize_answer
 
+DEFAULT_SYSTEM_PROMPT = "You are a precise question-answering system. Use only the provided passage and follow the requested output format exactly."
+
+SYSTEM_PROMPTS = {
+    "squad": (
+        "Use only the provided passage to answer the question. Return the shortest supported "
+        "answer span, with no explanation or extra formatting."
+    ),
+    "ms_marco_v1": (
+        "Use only the provided passage to answer the question. Give a concise, direct answer "
+        "that is supported by the passage, with no explanation or extra formatting."
+    ),
+    "ms_marco_v2": (
+        "Use only the provided passage to answer the question. Synthesize the most direct "
+        "answer supported by the passage, with no explanation or extra formatting."
+    ),
+    "hotpotqa": (
+        "Use all relevant parts of the provided passage to reason about the question. "
+        "Combine evidence when needed and return only a concise answer, with no explanation "
+        "or extra formatting."
+    ),
+    "race": (
+        "Use only the provided passage to solve the multiple-choice question. Choose the "
+        "single best option and return only its uppercase letter: A, B, C, or D."
+    ),
+}
+
+_MS_MARCO_PROMPT_KEYS = {
+    "ms_marco_v1_1": "ms_marco_v1",
+    "ms_marco_v2_1": "ms_marco_v2",
+}
+
 
 @dataclass(frozen=True)
 class ICLExample:
@@ -197,12 +228,36 @@ def format_prompt(example: ICLExample, demonstrations: Sequence[ICLExample]) -> 
     return "\n\n".join(blocks)
 
 
-def render_prompt(tokenizer, example: ICLExample, demonstrations: Sequence[ICLExample], use_chat_template: bool = True) -> str:
+def system_prompt_for(dataset: str, source_version: str | None = None) -> str:
+    """Resolve the dataset-specific chat system prompt.
+
+    MS MARCO v1.1 and v2.1 share the on-disk ``ms_marco`` directory, so their source
+    version is part of prompt selection. Other datasets use their directory name directly.
+    Unknown datasets retain a strict generic QA prompt instead of failing evaluation.
+    """
+    prompt_key = (
+        _MS_MARCO_PROMPT_KEYS.get(str(source_version), dataset)
+        if dataset == "ms_marco"
+        else dataset
+    )
+    return SYSTEM_PROMPTS.get(prompt_key, DEFAULT_SYSTEM_PROMPT)
+
+
+def render_prompt(
+    tokenizer,
+    example: ICLExample,
+    demonstrations: Sequence[ICLExample],
+    use_chat_template: bool = True,
+    source_version: str | None = None,
+) -> str:
     prompt = format_prompt(example, demonstrations)
     if not use_chat_template or not getattr(tokenizer, "apply_chat_template", None):
         return prompt
     messages = [
-        {"role": "system", "content": "You are a precise question-answering system."},
+        {
+            "role": "system",
+            "content": system_prompt_for(example.dataset, source_version),
+        },
         {"role": "user", "content": prompt},
     ]
     try:
