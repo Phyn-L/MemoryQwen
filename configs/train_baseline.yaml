@@ -1,5 +1,5 @@
 checkpoint:
-  output_dir: outputs/
+  output_dir: outputs
 data:
   cache_dataset: true
   cache_sortish_lengths: true
@@ -96,7 +96,7 @@ scheduler:
   name: cosine
   warmup_steps: 200
 training:
-  batch_size: 4
+  batch_size: 10
   epochs: 1
   max_grad_norm: 1.0
   seed: 42

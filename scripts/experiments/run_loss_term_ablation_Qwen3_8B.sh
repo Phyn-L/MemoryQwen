@@ -7,7 +7,7 @@ export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 # Phase-7 token reconstruction position comparison; independent training runs.
 # Non-loss settings (including seed) are inherited from --base-config.
-BASE_CONFIG=${BASE_CONFIG:-configs/train_baseline.yaml}
+BASE_CONFIG=${BASE_CONFIG:-configs/train_baseline_qwen3_8b.yaml}
 OUTPUT_ROOT=${OUTPUT_ROOT:-outputs/ab_loss_terms/Qwen3_8B}
 MACHINE=${MACHINE:-h200}
 NUM_PROCESSES=${NUM_PROCESSES:-6}
