@@ -26,6 +26,21 @@ bash scripts/evaluation/test_all_suite.sh --ckpt-dir outputs/checkpoints --datas
 
 ## Zero-shot ICL
 
+MemoryQwen suite 支持 `--system-prompt-mode separate|context|none`（shell 环境变量 `SYSTEM_PROMPT_MODE`，suite 默认 `separate`，独立 `scripts/test.py` 默认 `none`）。复用 ICL 的无数据集名称 system prompt，并根据 MS-MARCO source version 选择版本。
+
+- `context`：编码 `system prompt + 原文` 为 memory slots；问题保持 checkpoint 的原有格式，仅支持 AR 评测。
+- `separate`：原文单独编码为 memory slots；问题强制使用 chat template，输入 system + user question，关闭 thinking，与 ICL 的 system 文案一致。
+- `none`：旧评测行为。
+
+原文过滤和截断仍按 `max_context_tokens`；`context` 模式在此之外增加 prompt token。`separate` 在原有问题预算外增加 system/chat 开销，超长问题会报错以避免截掉 chat 边界。结果 JSON 的 `prompt_protocol` 记录模式、source version 和完整 prompt。不同模式请使用不同输出目录：
+
+```bash
+bash scripts/evaluation/test_all_suite.sh --system-prompt-mode context --output-dir outputs/eval_prompt_context
+bash scripts/evaluation/test_all_suite.sh --system-prompt-mode separate --output-dir outputs/eval_prompt_separate
+```
+
+这里的“一致”指 system message 文案与 chat 渲染策略；MemoryQwen 仍通过 memory prefix 接收原文，不复用 ICL 的全文 user prompt。RACE 的原有 MemoryQwen 数据路径未提供选项和字母评分，不能仅靠此开关得到与 ICL 一致的选择题评测。
+
 编辑 `evaluation/test_icl_suite.sh` 顶部的 MODEL、MACHINE、DATASETS、BATCH_SIZE、OUTPUT_DIR，或通过 CLI 覆盖：
 
 ```bash

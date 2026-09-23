@@ -66,7 +66,7 @@ def make_context_dataset(cfg, split: str, tokenizer, limit=None, allow_empty: bo
     )
 
 
-def make_collate(cfg, tokenizer, sample_qa: bool):
+def make_collate(cfg, tokenizer, sample_qa: bool, system_prompt_mode="none", source_version=None):
     """Keyword-only collate: positional drift would change the target format silently."""
     def collate(rows):
         return collate_fn(
@@ -81,5 +81,7 @@ def make_collate(cfg, tokenizer, sample_qa: bool):
             sample_qa=sample_qa,
             question_padding_side=cfg.data.question_padding_side,
             eos_mode=cfg.data.eos_mode,
+            system_prompt_mode=system_prompt_mode,
+            source_version=source_version,
         )
     return collate

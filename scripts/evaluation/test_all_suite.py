@@ -111,6 +111,7 @@ def main(argv=None):
         "--datasets", nargs="+", choices=DATASETS, default=list(DATASETS)
     )
     parser.add_argument("--memory-bs", type=int, default=16)
+    parser.add_argument("--system-prompt-mode", choices=("none", "context", "separate"), default="separate")
     parser.add_argument("--max-context-tokens", type=int, default=1024)
     parser.add_argument("--max-context-rows", type=int, default=5000)
     parser.add_argument("--qa-per-context", type=int, default=8)
@@ -127,6 +128,8 @@ def main(argv=None):
     )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if args.system_prompt_mode == "context" and args.teacher_forced:
+        parser.error("context prompt mode supports autoregressive evaluation only")
     if bool(args.checkpoints) == bool(args.ckpt_dir):
         parser.error("provide exactly one of --checkpoint/--ckpt or --ckpt-dir")
     checkpoints = (
@@ -174,6 +177,8 @@ def main(argv=None):
                 str(args.memory_bs),
                 "--max-context-tokens",
                 str(args.max_context_tokens),
+                "--system-prompt-mode",
+                args.system_prompt_mode,
                 *common,
             ]
             if args.max_context_rows is not None:

@@ -10,8 +10,9 @@ MACHINE="${MACHINE:-4090}"
 NUM_PROCESSES="${NUM_PROCESSES:-4}"
 CKPT_DIR="${CKPT_DIR:-outputs/checkpoints}"
 DATA_ROOT="${DATA_ROOT:-/data/lz/contexts/aggregated}"
-DATASETS="${DATASETS:-squad ms_marco_v1 ms_marco_v2}"
+DATASETS="${DATASETS:-squad ms_marco_v1 ms_marco_v2 race hotpotqa}"
 MEMORY_BS="${MEMORY_BS:-32}"
+SYSTEM_PROMPT_MODE="${SYSTEM_PROMPT_MODE:-separate}"
 MAX_CONTEXT_TOKENS="${MAX_CONTEXT_TOKENS:-1024}"
 MAX_CONTEXT_ROWS="${MAX_CONTEXT_ROWS:-2000}"
 QA_PER_CONTEXT="${QA_PER_CONTEXT:-8}"
@@ -36,6 +37,7 @@ args=(
   --data-root "$DATA_ROOT"
   --datasets $DATASETS
   --memory-bs "$MEMORY_BS"
+  --system-prompt-mode "$SYSTEM_PROMPT_MODE"
   --max-context-tokens "$MAX_CONTEXT_TOKENS"
 )
 if [[ -n "$MAX_CONTEXT_ROWS" ]]; then args+=(--max-context-rows "$MAX_CONTEXT_ROWS"); fi

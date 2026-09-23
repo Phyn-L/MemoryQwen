@@ -85,7 +85,9 @@ def iter_examples(path: str | Path, dataset: str):
                 yield flat, line_number, index
 
 
-def load_jsonl(path: str | Path, dataset: str, source_version: str | None = None) -> list[ICLExample]:
+def load_jsonl(
+    path: str | Path, dataset: str, source_version: str | None = None
+) -> list[ICLExample]:
     """Load an evaluation file, skipping questions that have no gold answer.
 
     The aggregated files are SQuAD v2.0-shaped, i.e. they also carry the unanswerable
@@ -163,7 +165,9 @@ def sample_context_rows(records, max_contexts=None, qa_per_context=None, seed=42
     return sampled
 
 
-def sample_jsonl(path: str | Path, dataset: str, count: int, seed: int) -> list[ICLExample]:
+def sample_jsonl(
+    path: str | Path, dataset: str, count: int, seed: int
+) -> list[ICLExample]:
     """Reservoir-sample demonstrations without materializing the train split."""
     if count <= 0:
         return []
@@ -182,7 +186,9 @@ def sample_jsonl(path: str | Path, dataset: str, count: int, seed: int) -> list[
             if position < count:
                 reservoir[position] = example
     if len(reservoir) < count:
-        raise ValueError(f"Requested {count} demonstrations from {path}, found {len(reservoir)}")
+        raise ValueError(
+            f"Requested {count} demonstrations from {path}, found {len(reservoir)}"
+        )
     return reservoir
 
 
@@ -191,7 +197,8 @@ def _from_row(row: dict, dataset: str, line_number: int, index: int = 0) -> ICLE
     if isinstance(references, str):
         references = [references]
     references = tuple(
-        str(value).strip() for value in references
+        str(value).strip()
+        for value in references
         if value is not None and str(value).strip()
     )
     metadata = row.get("metadata") or {}
@@ -204,9 +211,13 @@ def _from_row(row: dict, dataset: str, line_number: int, index: int = 0) -> ICLE
     # MemoryQwen evaluator and the selected-passage protocol used by this project.
     context = str(row["context"]).strip()
     return ICLExample(
-        id=identifier, dataset=dataset, context=context,
-        question=str(row["question"]).strip(), references=references,
-        options=options, answer_letter=letter,
+        id=identifier,
+        dataset=dataset,
+        context=context,
+        question=str(row["question"]).strip(),
+        references=references,
+        options=options,
+        answer_letter=letter,
     )
 
 
@@ -223,7 +234,9 @@ def format_prompt(example: ICLExample, demonstrations: Sequence[ICLExample]) -> 
         )
     blocks = [instruction]
     for index, demo in enumerate(demonstrations, 1):
-        blocks.append(f"Example {index}:\n{_question_block(demo)}\nAnswer: {_demo_answer(demo)}")
+        blocks.append(
+            f"Example {index}:\n{_question_block(demo)}\nAnswer: {_demo_answer(demo)}"
+        )
     blocks.append(f"Now answer this question:\n{_question_block(example)}\nAnswer:")
     return "\n\n".join(blocks)
 
@@ -262,18 +275,27 @@ def render_prompt(
     ]
     try:
         return tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True, enable_thinking=False,
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
         )
     except (TypeError, ValueError):
-        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        return tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
 
 
 def _question_block(example: ICLExample) -> str:
     block = f"Passage:\n{example.context}\n\nQuestion: {example.question}"
     if example.dataset == "race":
         if len(example.options) != 4:
-            raise ValueError(f"RACE example {example.id} has {len(example.options)} options, expected 4")
-        choices = "\n".join(f"{letter}. {option}" for letter, option in zip("ABCD", example.options))
+            raise ValueError(
+                f"RACE example {example.id} has {len(example.options)} options, expected 4"
+            )
+        choices = "\n".join(
+            f"{letter}. {option}" for letter, option in zip("ABCD", example.options)
+        )
         block += f"\nOptions:\n{choices}"
     return block
 
@@ -311,14 +333,18 @@ def example_metrics(prediction: str, references: Sequence[str]) -> dict[str, flo
     return best_reference_metrics(prediction, references)
 
 
-def corpus_bleu(predictions: Sequence[str], references: Sequence[Sequence[str]], max_order: int = 4) -> float:
+def corpus_bleu(
+    predictions: Sequence[str], references: Sequence[Sequence[str]], max_order: int = 4
+) -> float:
     """Corpus BLEU with closest-reference length and add-one smoothing."""
     clipped = [0] * max_order
     totals = [0] * max_order
     predicted_length = reference_length = 0
     for prediction, sample_references in zip(predictions, references):
         prediction_tokens = normalize_answer(prediction).split()
-        reference_tokens = [normalize_answer(value).split() for value in (sample_references or [""])]
+        reference_tokens = [
+            normalize_answer(value).split() for value in (sample_references or [""])
+        ]
         predicted_length += len(prediction_tokens)
         reference_length += min(
             (len(value) for value in reference_tokens),
@@ -330,20 +356,31 @@ def corpus_bleu(predictions: Sequence[str], references: Sequence[Sequence[str]],
             for value in reference_tokens:
                 counts = _ngrams(value, order)
                 for ngram, count in counts.items():
-                    maximum_reference_counts[ngram] = max(maximum_reference_counts[ngram], count)
+                    maximum_reference_counts[ngram] = max(
+                        maximum_reference_counts[ngram], count
+                    )
             clipped[order - 1] += sum(
-                min(count, maximum_reference_counts[ngram]) for ngram, count in prediction_counts.items()
+                min(count, maximum_reference_counts[ngram])
+                for ngram, count in prediction_counts.items()
             )
             totals[order - 1] += sum(prediction_counts.values())
     if predicted_length == 0:
         return 0.0
     precisions = [(match + 1) / (total + 1) for match, total in zip(clipped, totals)]
-    brevity_penalty = 1.0 if predicted_length > reference_length else math.exp(1 - reference_length / predicted_length)
-    return brevity_penalty * math.exp(sum(math.log(value) for value in precisions) / max_order)
+    brevity_penalty = (
+        1.0
+        if predicted_length > reference_length
+        else math.exp(1 - reference_length / predicted_length)
+    )
+    return brevity_penalty * math.exp(
+        sum(math.log(value) for value in precisions) / max_order
+    )
 
 
 def _ngrams(tokens: Sequence[str], order: int) -> Counter:
-    return Counter(tuple(tokens[index:index + order]) for index in range(len(tokens) - order + 1))
+    return Counter(
+        tuple(tokens[index : index + order]) for index in range(len(tokens) - order + 1)
+    )
 
 
 def aggregate_metrics(rows: Iterable[dict]) -> dict[str, float | int]:
@@ -358,5 +395,7 @@ def aggregate_metrics(rows: Iterable[dict]) -> dict[str, float | int]:
         [list(row["references"]) for row in rows],
     )
     if rows[0].get("dataset") == "race":
-        result["accuracy"] = sum(row.get("predicted_letter") == row.get("answer_letter") for row in rows) / len(rows)
+        result["accuracy"] = sum(
+            row.get("predicted_letter") == row.get("answer_letter") for row in rows
+        ) / len(rows)
     return result

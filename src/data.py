@@ -50,10 +50,14 @@ class ContextRecord:
     context_token_length: int | None = None
 
 
-def render_question(tokenizer, question: str, use_chat_template: bool = False, enable_thinking: bool = False) -> str:
+def render_question(tokenizer, question: str, use_chat_template: bool = False, enable_thinking: bool = False, system_prompt: str | None = None) -> str:
+    if system_prompt and not getattr(tokenizer, "apply_chat_template", None):
+        raise ValueError("Separate system prompts require a tokenizer with a chat template")
     if not use_chat_template or not getattr(tokenizer, "apply_chat_template", None):
         return question
     messages = [{"role": "user", "content": question}]
+    if system_prompt:
+        messages.insert(0, {"role": "system", "content": system_prompt})
     try:
         return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=enable_thinking)
     except (TypeError, ValueError):
@@ -234,16 +238,41 @@ def _encode(tokenizer, texts, max_length, padding_side=None):
         tokenizer.padding_side = previous
 
 
-def collate_context_records(rows, tokenizer, max_context_tokens=2048, max_question_tokens=128, max_answer_tokens=128, append_eos=True, use_chat_template=False, chat_template_enable_thinking=False, qa_per_context=4, sample_qa=True, question_padding_side="right", eos_mode="overwrite"):
-    contexts = [r.context for r in rows]; c = _encode(tokenizer, contexts, max_context_tokens)
+def collate_context_records(rows, tokenizer, max_context_tokens=2048, max_question_tokens=128, max_answer_tokens=128, append_eos=True, use_chat_template=False, chat_template_enable_thinking=False, qa_per_context=4, sample_qa=True, question_padding_side="right", eos_mode="overwrite", system_prompt_mode="none", source_version=None):
+    from .icl_baseline import system_prompt_for
+    if system_prompt_mode not in ("none", "context", "separate"):
+        raise ValueError("system_prompt_mode must be none, context, or separate")
+    prompts = [system_prompt_for(r.dataset, source_version) for r in rows]
+    contexts = [r.context for r in rows]
+    if system_prompt_mode == "context":
+        # Truncate source text first, then prepend the instruction: its tokens must not
+        # displace evidence or be silently dropped by a tokenizer's truncation side.
+        encoded = tokenizer(contexts, truncation=True, max_length=max_context_tokens, add_special_tokens=False)
+        prefixes = tokenizer([p + "\n\n" for p in prompts], add_special_tokens=False).input_ids
+        c = tokenizer.pad({"input_ids": [p + ids for p, ids in zip(prefixes, encoded.input_ids)]}, padding=True, return_tensors="pt")
+    else:
+        c = _encode(tokenizer, contexts, max_context_tokens)
     sampled, mapping = [], []
     for i, record in enumerate(rows):
         chosen = random.sample(record.qa_pairs, min(qa_per_context, len(record.qa_pairs))) if sample_qa else list(record.qa_pairs)
         sampled.extend(chosen); mapping.extend([i] * len(chosen))
     if not sampled:
         raise ValueError("context batch contains no QA pairs")
-    questions = [render_question(tokenizer, q.question, use_chat_template, chat_template_enable_thinking) for q in sampled]
-    q = _encode(tokenizer, questions, max_question_tokens, padding_side=question_padding_side); a = _encode(tokenizer, [x.answer for x in sampled], max_answer_tokens)
+    if system_prompt_mode == "separate":
+        questions = [render_question(tokenizer, q.question, True, False, prompts[index]) for q, index in zip(sampled, mapping)]
+        # Account for the complete system message and chat delimiters separately.
+        overhead = max(
+            len(tokenizer(text, add_special_tokens=False).input_ids)
+            - len(tokenizer(record.question, add_special_tokens=False).input_ids)
+            for text, record in zip(questions, sampled)
+        )
+        question_limit = max_question_tokens + max(0, overhead)
+        if any(len(tokenizer(text, add_special_tokens=False).input_ids) > question_limit for text in questions):
+            raise ValueError("Question exceeds max_question_tokens; increase the limit to preserve the system message and chat delimiters")
+    else:
+        questions = [render_question(tokenizer, q.question, use_chat_template, chat_template_enable_thinking) for q in sampled]
+        question_limit = max_question_tokens
+    q = _encode(tokenizer, questions, question_limit, padding_side=question_padding_side); a = _encode(tokenizer, [x.answer for x in sampled], max_answer_tokens)
     if append_eos and getattr(tokenizer, "eos_token_id", None) is not None:
         eos = int(tokenizer.eos_token_id)
         if eos_mode == "append":

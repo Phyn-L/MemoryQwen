@@ -49,6 +49,8 @@ def main():
     parser.add_argument("--checkpoint", "--ckpt", required=True)
     parser.add_argument("--split", choices=("validation", "test"), default="validation")
     parser.add_argument("--source-version", choices=("ms_marco_v1_1", "ms_marco_v2_1"))
+    parser.add_argument("--system-prompt-mode", choices=("none", "context", "separate"), default="none",
+                        help="Dataset-specific ICL prompt: disabled, compressed with context, or separate chat system message")
     parser.add_argument("--no-filter-long-context", action="store_true")
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--max-context-tokens", type=int)
@@ -93,11 +95,15 @@ def main():
             if set(raw) - {'test', 'machine'}:
                 parser.error("Test YAML supports only test and machine sections")
             allowed = {'datasets', 'split', 'batch_size', 'qa_batch_size', 'max_new_tokens',
-                       'max_samples', 'teacher_forced'}
+                       'max_samples', 'teacher_forced', 'system_prompt_mode'}
             if not isinstance(raw['test'], dict) or set(raw['test']) - allowed:
                 parser.error("Unknown test YAML fields")
             parser.set_defaults(**raw['test'], machine=raw.get('machine'))
     args = parser.parse_args()
+    if args.system_prompt_mode not in ("none", "context", "separate"):
+        parser.error("system-prompt-mode must be none, context, or separate")
+    if args.system_prompt_mode == "context" and args.teacher_forced:
+        parser.error("context prompt mode supports autoregressive evaluation only; auxiliary reconstruction positions have checkpoint-fixed capacity")
     if args.split not in ('validation', 'test'):
         parser.error("split must be validation or test")
     if args.datasets is not None and (not isinstance(args.datasets, (list, tuple)) or not args.datasets or
@@ -168,7 +174,8 @@ def main():
     )
     loader = DataLoader(
         ds, batch_size=cfg.training.batch_size, shuffle=False,
-        collate_fn=make_collate(cfg, tokenizer, sample_qa=False),
+        collate_fn=make_collate(cfg, tokenizer, sample_qa=False,
+                                system_prompt_mode=args.system_prompt_mode, source_version=args.source_version),
     )
     if accelerator is not None:
         loader = accelerator.prepare(loader)
@@ -212,10 +219,19 @@ def main():
         if teacher_forced is not None:
             print("teacher-forced (diagnostic only):", teacher_forced)
     if is_main:
+        from src.icl_baseline import system_prompt_for
+        prompt_datasets = sorted({record.dataset for record in ds})
         report = {"checkpoint": str(checkpoint_path), "split": args.split,
                   "datasets": getattr(cfg.data, f"{args.split}_datasets") or cfg.data.dataset,
                   "config": cfg.to_dict(), "autoregressive": autoregressive,
-                  "teacher_forced": teacher_forced}
+                  "teacher_forced": teacher_forced,
+                  "prompt_protocol": {
+                      "mode": args.system_prompt_mode,
+                      "source_version": args.source_version,
+                      "system_prompts": {name: system_prompt_for(name, args.source_version) for name in prompt_datasets}
+                          if args.system_prompt_mode != "none" else {},
+                      "length_budget": "Prompt overhead is additional to source context/question limits",
+                  }}
         if args.report_file:
             report_path = Path(args.report_file)
             report_path.parent.mkdir(parents=True, exist_ok=True)

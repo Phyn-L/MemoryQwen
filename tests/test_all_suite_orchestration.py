@@ -23,7 +23,8 @@ def _dataset(root: Path, name: str = "squad") -> None:
     (directory / "validation.jsonl").write_text("{}\n")
 
 
-def test_checkpoint_stem_names_output_directory_without_manifest(tmp_path, monkeypatch):
+@pytest.mark.parametrize("prompt_mode", ["none", "context", "separate"])
+def test_checkpoint_stem_names_output_directory_without_manifest(tmp_path, monkeypatch, prompt_mode):
     checkpoint = tmp_path / "checkpoints" / "base.pt"
     checkpoint.parent.mkdir()
     checkpoint.touch()
@@ -49,6 +50,7 @@ def test_checkpoint_stem_names_output_directory_without_manifest(tmp_path, monke
             "--output-dir",
             str(output_root),
             "--dry-run",
+            "--system-prompt-mode", prompt_mode,
         ]
     )
 
@@ -60,6 +62,7 @@ def test_checkpoint_stem_names_output_directory_without_manifest(tmp_path, monke
     assert command[command.index("--output-dir") + 1] == str(checkpoint_output)
     assert command[command.index("--report-file") + 1] == str(checkpoint_output / "squad.json")
     assert "--teacher-forced" not in command
+    assert command[command.index("--system-prompt-mode") + 1] == prompt_mode
 
 
 def test_report_filename_removes_dataset_separators():
