@@ -84,6 +84,21 @@ def test_model_resolution_uses_ref_and_rejects_ambiguous_cache(tmp_path):
         resolve_model_path('Qwen3-8B', model_root=tmp_path)
 
 
+def test_stale_checkpoint_model_path_resolves_by_name(tmp_path, monkeypatch):
+    model = tmp_path / 'models--Qwen--Qwen3-1.7B'
+    snapshot = model / 'snapshots' / 'revision-new'
+    snapshot.mkdir(parents=True)
+    (snapshot / 'config.json').write_text('{}')
+    monkeypatch.setitem(MACHINES['h200'], 'MODEL_ROOT', str(tmp_path))
+    raw = {
+        'model': {'name_or_path': '/old/machine/models--Qwen--Qwen3-1.7B/snapshots/revision-old'},
+        'data': {'root': MACHINES['h200']['DATA_ROOT']},
+    }
+    actual = relocate_saved_paths(raw, 'h200')
+    assert actual['model']['name_or_path'] == str(snapshot)
+    assert raw['model']['name_or_path'].endswith('revision-old')
+
+
 def test_icl_yaml_cli_precedence_and_hotpot_paths(tmp_path):
     model = tmp_path / 'model'; model.mkdir(); (model / 'config.json').write_text('{}')
     module = script('evaluation/test_icl_suite')

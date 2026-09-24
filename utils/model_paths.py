@@ -52,7 +52,7 @@ def resolve_model_path(name, machine=None, model_root=None):
 
 
 def relocate_saved_paths(raw, machine):
-    """Rebase known machine roots, preserving the saved model revision and data suffix."""
+    """Rebase known machine roots, resolving stale Qwen paths by model name."""
     from copy import deepcopy
     from .machines import MACHINES
     values = deepcopy(raw)
@@ -69,7 +69,17 @@ def relocate_saved_paths(raw, machine):
             values[section][field] = str(Path(paths[root_key]) / suffix)
             break
         else:
-            # An unknown absolute path must not accidentally select another backbone/data tree.
+            if section == 'model' and Path(old).is_absolute() and not Path(old).exists():
+                # Old checkpoints can refer to a model cache that has moved. Recover the
+                # family name from the Hugging Face cache layout, then resolve it under
+                # the current machine's MODEL_ROOT. The resolver still rejects ambiguous
+                # snapshots and never downloads or picks an arbitrary revision.
+                match = re.search(r'models--Qwen--(Qwen[\w.\-]+)(?:/snapshots/[^/]+)?/?$', old, re.IGNORECASE)
+                if match:
+                    values[section][field] = resolve_model_path(match.group(1), resolved)
+                    continue
+                raise ValueError(f'Cannot relocate {section}.{field}={old!r}; use --config with explicit paths')
+            # An unknown absolute data path must not accidentally select another data tree.
             if Path(old).is_absolute() and not Path(old).exists():
                 raise ValueError(f'Cannot relocate {section}.{field}={old!r}; use --config with explicit paths')
     values['machine'] = resolved
