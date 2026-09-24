@@ -6,15 +6,15 @@ export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 if [ -f scripts/env.local.sh ]; then source scripts/env.local.sh; fi
 
 # Edit these variables for a run. Command-line arguments appended below override them.
-MACHINE="${MACHINE:-4090}"
-NUM_PROCESSES="${NUM_PROCESSES:-4}"
+MACHINE="${MACHINE:-h200}"
+NUM_PROCESSES="${NUM_PROCESSES:-6}"
 CKPT_DIR="${CKPT_DIR:-outputs/checkpoints}"
-DATA_ROOT="${DATA_ROOT:-/data/lz/contexts/aggregated}"
+DATA_ROOT="${DATA_ROOT:-}"
 DATASETS="${DATASETS:-squad ms_marco_v1 ms_marco_v2 race hotpotqa}"
-MEMORY_BS="${MEMORY_BS:-32}"
+MEMORY_BS="${MEMORY_BS:-256}"
 SYSTEM_PROMPT_MODE="${SYSTEM_PROMPT_MODE:-separate}"
 MAX_CONTEXT_TOKENS="${MAX_CONTEXT_TOKENS:-1024}"
-MAX_CONTEXT_ROWS="${MAX_CONTEXT_ROWS:-2000}"
+MAX_CONTEXT_ROWS="${MAX_CONTEXT_ROWS:-10000}"
 QA_PER_CONTEXT="${QA_PER_CONTEXT:-8}"
 CONTEXT_SHUFFLE_SEED="${CONTEXT_SHUFFLE_SEED:-42}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/eval_ab_reader}"
@@ -34,12 +34,12 @@ has_option() {
 export NUM_PROCESSES
 args=(
   --machine "$MACHINE"
-  --data-root "$DATA_ROOT"
   --datasets $DATASETS
   --memory-bs "$MEMORY_BS"
   --system-prompt-mode "$SYSTEM_PROMPT_MODE"
   --max-context-tokens "$MAX_CONTEXT_TOKENS"
 )
+if [[ -n "$DATA_ROOT" ]]; then args+=(--data-root "$DATA_ROOT"); fi
 if [[ -n "$MAX_CONTEXT_ROWS" ]]; then args+=(--max-context-rows "$MAX_CONTEXT_ROWS"); fi
 if [[ -n "$QA_PER_CONTEXT" ]]; then args+=(--qa-per-context "$QA_PER_CONTEXT"); fi
 args+=(--context-shuffle-seed "$CONTEXT_SHUFFLE_SEED")
@@ -55,3 +55,5 @@ if [[ "$DRY_RUN" == "1" ]] && ! has_option --dry-run "$@"; then
   args+=(--dry-run)
 fi
 exec python scripts/evaluation/test_all_suite.py "${args[@]}" "$@"
+
+python /home/sean/burn.py

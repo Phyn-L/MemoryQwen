@@ -4,6 +4,9 @@ from __future__ import annotations
 import argparse, csv, json, subprocess, sys
 from pathlib import Path
 
+from utils.machines import machine_names
+from utils.model_paths import machine_paths
+
 DATASETS = ("squad", "ms_marco_v1", "ms_marco_v2", "hotpotqa", "race")
 CHECKPOINT_SUFFIXES = {".pt", ".pth", ".bin"}
 
@@ -101,8 +104,11 @@ def report_filename(dataset):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--machine", default="4090")
-    parser.add_argument("--data-root", default="/data/lz/contexts/aggregated")
+    parser.add_argument("--machine", choices=machine_names(), default=None)
+    parser.add_argument(
+        "--data-root",
+        help="Aggregated dataset root; defaults to the DATA_ROOT for --machine",
+    )
     parser.add_argument("--checkpoint", "--ckpt", dest="checkpoints", nargs="+")
     parser.add_argument(
         "--ckpt-dir", help="Recursively evaluate every .pt/.pth/.bin checkpoint"
@@ -143,7 +149,8 @@ def main(argv=None):
             parser.error(f"checkpoint does not exist: {checkpoint}")
     if args.memory_bs < 1:
         parser.error("--memory-bs must be positive")
-    root = Path(args.data_root)
+    _, paths = machine_paths(args.machine)
+    root = Path(args.data_root or paths["DATA_ROOT"])
     output_root = Path(args.output_dir)
     output_dirs = {}
     for checkpoint in checkpoints:
