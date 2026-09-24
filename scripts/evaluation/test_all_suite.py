@@ -77,6 +77,8 @@ def write_summary(path, checkpoints, datasets, reports):
         header.extend(
             (f"{dataset}_AR_EM", f"{dataset}_AR_F1", f"{dataset}_AR_ROUGE-L")
         )
+        if dataset == "race":
+            header.append("race_AR_Acc")
     rows = []
     for checkpoint in checkpoints:
         row = [checkpoint.stem]
@@ -88,6 +90,9 @@ def write_summary(path, checkpoints, datasets, reports):
                 values = report.get("autoregressive")
             for metric in metrics:
                 value = None if values is None else values.get(metric)
+                row.append("" if value is None else f"{100 * float(value):.2f}")
+            if dataset == "race":
+                value = None if values is None else values.get("accuracy")
                 row.append("" if value is None else f"{100 * float(value):.2f}")
         rows.append(row)
     with path.open("w", encoding="utf-8", newline="") as handle:

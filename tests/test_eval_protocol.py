@@ -212,6 +212,30 @@ def test_the_evaluator_scores_the_first_answer_line_like_the_baseline():
     assert result["rouge_l"] == 1.0, result
 
 
+def test_race_autoregressive_reports_option_accuracy():
+    from src.data import QARecord
+
+    if not _available():
+        return
+    model = _model()
+    batch = [{
+        "context_ids": torch.randint(0, VOCAB, (2, CONTEXT_LENGTH)),
+        "context_mask": torch.ones(2, CONTEXT_LENGTH, dtype=torch.bool),
+        "question_ids": torch.randint(0, VOCAB, (2, QUESTION_LENGTH)),
+        "question_mask": torch.ones(2, QUESTION_LENGTH, dtype=torch.bool),
+        "qa_context_indices": torch.zeros(2, dtype=torch.long),
+        "records": [
+            QARecord("q1", "A", dataset="race", answer_letter="A"),
+            QARecord("q2", "B", dataset="race", answer_letter="C"),
+        ],
+    }]
+    cfg = TrainConfig.from_file(Path(__file__).resolve().parents[1] / "configs/train_baseline.yaml")
+    evaluator = Evaluator(_Tokenizer(), cfg)
+    evaluator.tokenizer.decode = lambda ids, skip_special_tokens=True: "A"
+    result = evaluator.autoregressive(model, batch, torch.device("cpu"), include_teacher_metrics=False)
+    assert result["accuracy"] == 0.5
+
+
 def test_the_two_harnesses_postprocess_identically_on_tricky_generations():
     from src.icl_baseline import ICLExample, example_metrics, parse_prediction
     from src.metrics import answer_line, best_reference_metrics

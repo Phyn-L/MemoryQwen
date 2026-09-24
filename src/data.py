@@ -32,6 +32,7 @@ class QARecord:
     # training target (one answer must be supervised); evaluation must consider all of
     # them, which is what ``references`` is for.
     answers: tuple[str, ...] = ()
+    answer_letter: str = ""
 
     @property
     def references(self) -> tuple[str, ...]:
@@ -150,6 +151,7 @@ class AggregatedContextDataset(Dataset):
                         if question and answers:
                             pairs.append(QARecord(
                                 question, answers[0], name, str(row.get("context_id", "")), answers,
+                                str((qa.get("metadata") or {}).get("answer_letter", "")).strip().upper(),
                             ))
                     if pairs:
                         records.append(ContextRecord(context, tuple(pairs), name, str(row.get("context_id", ""))))
@@ -181,6 +183,7 @@ class AggregatedContextDataset(Dataset):
                 str(q.get("dataset", row.get("dataset", ""))),
                 str(q.get("context_id", row.get("context_id", ""))),
                 tuple(str(value) for value in q.get("answers", ()) or ()),
+                str(q.get("answer_letter", "")).strip().upper(),
             )
             for q in row["qa_pairs"]
         )

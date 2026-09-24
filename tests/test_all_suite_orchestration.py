@@ -98,10 +98,11 @@ def test_duplicate_checkpoint_stems_cannot_overwrite_each_other(tmp_path):
 
 def test_summary_uses_dataset_order_and_percentage_with_two_decimals(tmp_path):
     checkpoints = [tmp_path / "base.pt", tmp_path / "off.pt"]
-    datasets = ["squad", "hotpotqa"]
+    datasets = ["squad", "race", "hotpotqa"]
     reports = {}
     values = {
         ("base", "squad"): (0.4973501, 0.6382467, 0.6362951),
+        ("base", "race"): (0.1, 0.2, 0.3, 0.75),
         ("base", "hotpotqa"): (0.1, 0.2, 0.3),
         ("off", "squad"): (0.01234, 0.0, 1.0),
     }
@@ -115,7 +116,7 @@ def test_summary_uses_dataset_order_and_percentage_with_two_decimals(tmp_path):
             report.write_text(
                 json.dumps(
                     {
-                        "autoregressive": dict(zip(("em", "f1", "rouge_l"), metrics)),
+                        "autoregressive": dict(zip(("em", "f1", "rouge_l", "accuracy"), metrics)),
                         "teacher_forced": None,
                     }
                 )
@@ -132,9 +133,13 @@ def test_summary_uses_dataset_order_and_percentage_with_two_decimals(tmp_path):
         "squad_AR_EM",
         "squad_AR_F1",
         "squad_AR_ROUGE-L",
+        "race_AR_EM",
+        "race_AR_F1",
+        "race_AR_ROUGE-L",
+        "race_AR_Acc",
         "hotpotqa_AR_EM",
         "hotpotqa_AR_F1",
         "hotpotqa_AR_ROUGE-L",
     ]
-    assert rows[1] == ["base", "49.74", "63.82", "63.63", "10.00", "20.00", "30.00"]
-    assert rows[2] == ["off", "1.23", "0.00", "100.00", "", "", ""]
+    assert rows[1] == ["base", "49.74", "63.82", "63.63", "10.00", "20.00", "30.00", "75.00", "10.00", "20.00", "30.00"]
+    assert rows[2] == ["off", "1.23", "0.00", "100.00", "", "", "", "", "", "", ""]

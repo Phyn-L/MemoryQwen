@@ -312,16 +312,22 @@ def parse_prediction(example: ICLExample, raw_prediction: str) -> tuple[str, str
         # The very same helper the memory evaluator uses, so the two harnesses cannot drift
         # apart on what "the prediction" is.
         return answer_line(raw), ""
-    match = re.search(r"(?:^|[\s(\[])s*([A-D])(?:[\s).:\]]|$)", raw.upper())
+    return parse_race_prediction(raw, example.options)
+
+
+def parse_race_prediction(raw_prediction: str, options: Sequence[str] = ()) -> tuple[str, str]:
+    """Return the answer text and option letter from a RACE generation."""
+    raw = raw_prediction.strip()
+    match = re.search(r"(?:^|[\s(\[])\s*([A-D])(?:[\s).:\]]|$)", raw.upper())
     if not match:
         normalized = normalize_answer(raw)
-        for index, option in enumerate(example.options):
+        for index, option in enumerate(options):
             if normalized == normalize_answer(option):
-                letter = "ABCD"[index]
-                return option, letter
+                return option, "ABCD"[index]
         return raw, ""
     letter = match.group(1)
-    return example.options["ABCD".index(letter)], letter
+    option = options["ABCD".index(letter)] if len(options) == 4 else ""
+    return option or letter, letter
 
 
 def example_metrics(prediction: str, references: Sequence[str]) -> dict[str, float]:

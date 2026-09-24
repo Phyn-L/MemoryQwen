@@ -10,6 +10,7 @@ from utils.ddp import is_main_process
 
 from .losses import memory_objectives, objective_total, qa_loss
 from .metrics import METRIC_KEYS, answer_line, best_reference_metrics, normalize_answer
+from .icl_baseline import parse_race_prediction
 
 
 def _distributed_sum(values, device):
@@ -272,6 +273,8 @@ class Evaluator:
         was_training = model.training
         model.eval()
         sums = {key: 0.0 for key in METRIC_KEYS}
+        race_correct = 0
+        race_count = 0
         samples = 0
         first_token_hit = 0
         enabled = is_main_process()
@@ -346,23 +349,27 @@ class Evaluator:
                 first_token_hit += int(
                     bool(row) and self._first_token_hit(row[0], record)
                 )
-                metrics = best_reference_metrics(
-                    answer_line(self.tokenizer.decode(row, skip_special_tokens=True)),
-                    record.references,
-                )
+                prediction = answer_line(self.tokenizer.decode(row, skip_special_tokens=True))
+                metrics = best_reference_metrics(prediction, record.references)
                 for key, value in metrics.items():
                     sums[key] += value
+                if record.dataset == "race":
+                    _, predicted_letter = parse_race_prediction(prediction)
+                    race_correct += int(predicted_letter == record.answer_letter)
+                    race_count += 1
                 samples += 1
             progress.set_postfix({"qa_rows": samples}, refresh=False)
             if window[1] is not None and cursor >= window[1]:
                 break
         progress.close()
         model.train(was_training)
-        first_token_hit, samples = _distributed_sum([first_token_hit, samples], device)
+        first_token_hit, race_correct, race_count, samples = _distributed_sum([first_token_hit, race_correct, race_count, samples], device)
         sums = dict(
             zip(METRIC_KEYS, _distributed_sum([sums[key] for key in METRIC_KEYS], device))
         )
         result = {key: value / max(1, samples) for key, value in sums.items()}
+        if race_count:
+            result["accuracy"] = race_correct / race_count
         # Same retrieval diagnostic as in teacher_forced, but measured on tokens the
         # model actually produced.  This is the number to compare against
         # teacher-forced first_token_em; a large gap between them means the model
