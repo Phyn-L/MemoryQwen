@@ -50,7 +50,7 @@ else
   unset NUM_PROCESSES
 fi
 
-mkdir -p "$OUTPUT_ROOT/configs"
+mkdir -p "$OUTPUT_ROOT/configs" "$OUTPUT_ROOT/logs"
 
 BASE_CONFIG="$BASE_CONFIG" OUTPUT_ROOT="$OUTPUT_ROOT" MACHINE="$MACHINE" \
   python - <<'PY'
