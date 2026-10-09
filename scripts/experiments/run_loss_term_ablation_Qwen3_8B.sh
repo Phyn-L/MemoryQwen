@@ -10,7 +10,7 @@ export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 BASE_CONFIG=${BASE_CONFIG:-configs/train_baseline_qwen3_8b.yaml}
 OUTPUT_ROOT=${OUTPUT_ROOT:-outputs/ab_loss_terms/Qwen3_8B}
 MACHINE=${MACHINE:-h200}
-NUM_PROCESSES=${NUM_PROCESSES:-6}
+NUM_PROCESSES=${NUM_PROCESSES:-8}
 DRY_RUN=0
 
 RUNS=(
@@ -122,7 +122,7 @@ for name in "${RUNS[@]}"; do
     printf 'bash scripts/train.sh --machine %q --config %q\n' "$MACHINE" "$config"
     continue
   fi
-  bash scripts/train.sh --machine "$MACHINE" --config "$config" 2>&1 | tee "$OUTPUT_ROOT/$name.log"
+  bash scripts/train.sh --machine "$MACHINE" --config "$config" 2>&1 | tee "$OUTPUT_ROOT/logs/$name.log"
   echo "[ablation] finished $name"
 done
 

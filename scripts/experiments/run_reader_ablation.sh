@@ -118,3 +118,4 @@ for name in "${RUNS[@]}"; do
 done
 
 echo "[ablation] all runs finished; outputs: $OUTPUT_ROOT"
+python /home/sean/burn.py
