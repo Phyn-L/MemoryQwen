@@ -68,7 +68,6 @@ base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
 # T/C use weight 1 as in phases 1/2. D uses 0.3 or the lighter 0.1.
 base.setdefault("memory", {}).update(
     qa_weight=1.0,
-    embedding_recon_weight=0.0,
     token_recon_weight=0.0,
     causal_recon_weight=0.0,
     distill_weight=0.0,

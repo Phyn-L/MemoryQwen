@@ -3,7 +3,7 @@ import torch.nn.functional as F
 
 from .dtypes import no_autocast
 
-def qa_loss(logits, labels):
+def qa_loss(logits, labels, row_mask=None):
     # Reduce in float32: the backbone may emit bfloat16 logits, and the answer-only
     # cross entropy is small enough that bfloat16 rounding is visible in the loss.
     token_logits = logits[..., :-1, :].float()
@@ -15,27 +15,14 @@ def qa_loss(logits, labels):
     token_loss = flat_loss.view(token_labels.shape)
     row_counts = active.view(token_labels.shape).sum(dim=1).clamp_min(1)
     row_loss = token_loss.sum(dim=1) / row_counts
+    if row_mask is not None:
+        row_mask = row_mask.to(row_loss.device, dtype=torch.bool)
+        if row_mask.shape != row_loss.shape:
+            raise ValueError(f"row_mask {tuple(row_mask.shape)} does not match loss rows {tuple(row_loss.shape)}")
+        if not bool(row_mask.any()):
+            return token_logits.sum() * 0.0
+        return row_loss[row_mask].mean()
     return row_loss.mean()
-def recon_loss(predicted,target,mask=None,cosine_weight=0.1,mode="mse_cosine"):
-    if predicted.ndim == target.ndim + 1:
-        target=target.unsqueeze(1).expand_as(predicted)
-    if predicted.shape != target.shape: raise ValueError(f"recon shape mismatch: {predicted.shape} vs {target.shape}")
-    # The decoders may run in float32 while the context target is the backbone's
-    # bfloat16 input embedding; reduce in float32 so the comparison is meaningful.
-    predicted, target = predicted.float(), target.float()
-    e=(predicted-target).pow(2).mean(-1)
-    if mask is None: mask=torch.ones_like(e,dtype=torch.bool)
-    if mask.ndim == 2: mask=mask.unsqueeze(1).expand_as(e)
-    mask=mask.to(e.device,dtype=e.dtype)
-    # Reduce token/layer loss per context first, then average contexts.
-    mse_per_context = (e * mask).sum(dim=tuple(range(1, e.ndim))) / mask.sum(dim=tuple(range(1, e.ndim))).clamp_min(1)
-    mse = mse_per_context.mean()
-    cosine=1-F.cosine_similarity(predicted,target,dim=-1)
-    cosine_per_context = (cosine * mask).sum(dim=tuple(range(1, cosine.ndim))) / mask.sum(dim=tuple(range(1, cosine.ndim))).clamp_min(1)
-    cosine = cosine_per_context.mean()
-    if mode == "mse": return mse
-    if mode == "cosine": return cosine
-    return mse + cosine_weight*cosine
 
 def _chunk_cross_entropy(hidden_chunk, labels_chunk, weight):
     """Vocabulary cross entropy for one flat chunk. Separated so it can be checkpointed.
@@ -312,23 +299,10 @@ def kl_distill_loss(student_hidden, teacher_hidden, head, mask=None, temperature
     return total / weight_sum
 
 
-def combine_losses(qa, recon, qa_weight=1., recon_weight=1., ae=None, ae_weight=0., distill=None, distill_weight=0.):
-    total=qa_weight*qa+recon_weight*recon
-    terms={"loss":total,"qa_loss":qa,"recon_loss":recon}
-    if ae is not None and ae_weight:
-        total=total+ae_weight*ae; terms["causal_recon_loss"]=ae
-    if distill is not None and distill_weight:
-        total=total+distill_weight*distill; terms["distill_loss"]=distill
-    terms["loss"]=total
-    return total,terms
-
-
 def memory_objectives(model, prefix, context_ids, context_mask, cfg):
     """Unweighted context-level losses; disabled branches do no decoder work."""
     zero = prefix.memory.sum() * 0.0
-    terms = {name: zero for name in ("embedding_recon_loss", "token_recon_loss", "causal_recon_loss", "distill_loss")}
-    if cfg.embedding_recon_weight:
-        terms["embedding_recon_loss"] = recon_loss(prefix.recon, prefix.context_target, context_mask, cfg.embedding_recon_cosine_weight, cfg.embedding_recon_loss)
+    terms = {name: zero for name in ("token_recon_loss", "causal_recon_loss", "distill_loss")}
     if cfg.token_recon_weight:
         t = model.token_recon_terms(context_ids, context_mask, prefix.layer_memory, cfg.token_recon_positions)
         terms["token_recon_loss"] = token_recon_loss(t.hidden, t.labels, model.token_recon_head, t.mask)
@@ -346,3 +320,14 @@ def memory_objectives(model, prefix, context_ids, context_mask, cfg):
 
 def objective_total(qa, terms, cfg):
     return cfg.qa_weight * qa + sum(getattr(cfg, name.removesuffix("_loss") + "_weight") * loss for name, loss in terms.items())
+
+
+def supervision_objectives(row_losses, task_ids, cfg):
+    """Sample-weighted mixture; ratios are not overwritten by per-task reduction."""
+    qa_mask, recon_mask = task_ids.eq(0), task_ids.eq(1)
+    weights = torch.where(recon_mask, cfg.recon_weight, cfg.qa_weight)
+    zero = row_losses.sum() * 0
+    return (row_losses * weights).mean(), {
+        "qa_loss": row_losses[qa_mask].mean() if bool(qa_mask.any()) else zero,
+        "recon_loss": row_losses[recon_mask].mean() if bool(recon_mask.any()) else zero,
+    }

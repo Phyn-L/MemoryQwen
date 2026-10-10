@@ -13,7 +13,7 @@ What is asserted
 3. Gradient reaches the tied unembedding's adapter (or a plain linear head) and the hidden
    states, through the checkpointed chunk path.
 4. On a real (tiny) Qwen3: ``ae_lm=True`` populates aligned autoencoding terms, the loss is
-   finite, ``memory_tokens`` receive gradient while the frozen backbone does not, and the
+   finite, ``context_resampler.latents`` receive gradient while the frozen backbone does not, and the
    predictions actually depend on the memory prefix (changing the slots changes the loss).
 5. ``ae_lm=False`` (the default) computes none of it.
 """
@@ -277,7 +277,7 @@ def test_autoencoding_terms_are_aligned_and_depend_on_the_memory():
     # The predictions must be conditioned on the memory prefix: change the slots and the
     # loss must move.
     with torch.no_grad():
-        model.memory_tokens.add_(0.1)
+        model.context_resampler.latents.add_(torch.randn_like(model.context_resampler.latents) * 0.1)
     other = _forward(model, batch)
     loss_after = sequence_lm_loss(
         other.ae_hidden, other.ae_labels, model.ae_head, other.ae_mask, max_logits_rows=8
@@ -296,7 +296,7 @@ def test_autoencoding_gradient_reaches_the_memory_only():
         output.ae_hidden, output.ae_labels, model.ae_head, output.ae_mask, max_logits_rows=8
     )
     loss.backward()
-    assert model.memory_tokens.grad is not None and model.memory_tokens.grad.abs().sum() > 0
+    assert model.context_resampler.latents.grad is not None and model.context_resampler.latents.grad.abs().sum() > 0
     assert model.ae_head is not None and list(model.ae_head.parameters()) == []
     assert all(p.grad is None for p in model.qwen.parameters() if not p.requires_grad)
 

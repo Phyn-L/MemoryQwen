@@ -64,7 +64,7 @@ class CheckpointManager:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def load(self, path, model, optimizer=None, scheduler=None, allow_missing_trainable=False):
+    def load(self, path, model, optimizer=None, scheduler=None, allow_missing_trainable=False, restore_rng=True):
         """Restore the trainable subset of ``model`` from ``path``.
 
         ``strict=False`` is required because the frozen backbone is deliberately absent
@@ -90,7 +90,7 @@ class CheckpointManager:
             raise RuntimeError(
                 f"checkpoint {path} holds {len(unexpected)} tensors this model has no place for, "
                 f"e.g. {sorted(unexpected)[:8]}. The architecture or the objective changed "
-                "(for example embedding_recon_weight or token_recon_weight changed)."
+                "(for example token_recon_weight changed)."
             )
 
         trainable = {name for name, p in model.named_parameters() if p.requires_grad}
@@ -109,7 +109,7 @@ class CheckpointManager:
 
         if optimizer is not None and state.get("optimizer") is not None: optimizer.load_state_dict(state["optimizer"])
         if scheduler is not None and state.get("scheduler") is not None: scheduler.load_state_dict(state["scheduler"])
-        if state.get("rng"):
+        if restore_rng and state.get("rng"):
             random.setstate(state["rng"]["python"]); torch.set_rng_state(state["rng"]["torch"])
         self.best_f1 = state.get("best_f1")
         self.best_step = state.get("best_step")

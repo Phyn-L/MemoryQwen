@@ -12,5 +12,5 @@ def test_empty_targets_disable_lora_but_preserve_memory_gradient():
     assert not any(p.requires_grad for p in model.qwen.parameters())
     _, qa, rec = _forward_losses(model, _batch())
     (qa + rec).backward()
-    assert torch.isfinite(model.memory_tokens.grad).all()
-    assert model.memory_tokens.grad.abs().sum() > 0
+    assert torch.isfinite(model.context_resampler.latents.grad).all()
+    assert model.context_resampler.latents.grad.abs().sum() > 0

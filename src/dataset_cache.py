@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from datasets import Dataset
 
-CACHE_VERSION = 4  # 4: QARecord carries every gold answer (answers), not just the first
+CACHE_VERSION = 5  # Independent source-context limit and tokenizer-aware filtering.
 CACHE_DIR_NAME = "dataset_cache"
 DATASET_DIR_NAME = "hf_dataset"
 
@@ -15,8 +15,17 @@ def compute_fingerprint(payload: dict[str, Any]) -> str:
 def source_files_metadata(files):
     return [{"dataset": n, "path": str(p.resolve()), "size": p.stat().st_size, "mtime_ns": p.stat().st_mtime_ns} for n, p in files]
 
-def build_metadata(files, *, split, max_context_tokens, filter_long_context, filter_no_qa):
+def build_metadata(files, *, split, max_context_tokens, filter_long_context, filter_no_qa, tokenizer=None):
     payload = {"version": CACHE_VERSION, "split": split, "files": source_files_metadata(files), "max_context_tokens": max_context_tokens, "filter_long_context": filter_long_context, "filter_no_qa": filter_no_qa}
+    if tokenizer is not None:
+        payload["tokenizer"] = {
+            "name": str(getattr(tokenizer, "name_or_path", tokenizer.__class__.__name__)),
+            "class": tokenizer.__class__.__name__,
+            "vocab_size": getattr(tokenizer, "vocab_size", None),
+        }
+        backend = getattr(tokenizer, "backend_tokenizer", None)
+        if backend is not None:
+            payload["tokenizer"]["backend"] = hashlib.sha256(backend.to_str().encode()).hexdigest()
     payload["fingerprint"] = compute_fingerprint(payload)
     return payload
 

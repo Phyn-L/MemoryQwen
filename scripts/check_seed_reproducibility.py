@@ -26,14 +26,13 @@ def worker(args):
     backbone = Qwen3ForCausalLM(config).to(dtype=getattr(torch, args.dtype))
     model = MetaLoRA(backbone, rank=4, alpha=8, memory_length=8,
                      decoder_hidden_size=32, decoder_heads=4, max_context_tokens=64,
-                     token_recon=True, embedding_recon=False, ae_lm=True,
-                     slot_attention='causal', init_mode='token_embed', init_seed=0,
+                     token_recon=True, ae_lm=True,
                      dropout=0.1).to(args.device).train()
     for name, p in model.named_parameters():
         p.requires_grad_(is_trainable_parameter_name(name))
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=1e-3)
-    objective = MemoryConfig(embedding_recon_weight=0, token_recon_weight=1,
+    objective = MemoryConfig(token_recon_weight=1,
                              causal_recon_weight=1, distill_weight=0.3,
                              token_recon_positions=8, causal_recon_positions=8,
                              distill_positions=8, distill_entropy_weight=True)

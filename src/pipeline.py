@@ -56,17 +56,25 @@ def make_context_dataset(cfg, split: str, tokenizer, limit=None, allow_empty: bo
                  if p.is_dir() and p.name.lower() != "hotpotqa"]
     split_name = getattr(cfg.data, f"{split}_split")
     cache_dir = model_cache_dir(cfg.model.name_or_path) if cfg.data.cache_dataset else None
+    filter_no_qa = cfg.data.filter_no_qa
+    train_tasks = getattr(cfg.data, "train_tasks", "mix")
+    recon_ratio = getattr(cfg.data, "recon_ratio", 0.5)
+    if split == "train" and (
+        train_tasks == "recon" or (train_tasks == "mix" and recon_ratio >= 1)
+    ):
+        filter_no_qa = False
     return AggregatedContextDataset(
         cfg.data.root, names, split_name, tokenizer,
         cfg.data.max_context_tokens, limit,
-        cfg.data.filter_long_context, cfg.data.filter_no_qa,
+        cfg.data.filter_long_context, filter_no_qa,
         allow_empty=allow_empty, cache_dir=cache_dir, source_version=source_version,
         max_context_rows=max_context_rows, qa_per_context=qa_per_context,
         context_shuffle_seed=context_shuffle_seed,
+        max_input_context_length=cfg.data.max_input_context_length,
     )
 
 
-def make_collate(cfg, tokenizer, sample_qa: bool, system_prompt_mode="none", source_version=None):
+def make_collate(cfg, tokenizer, sample_qa: bool, system_prompt_mode="none", source_version=None, training=False):
     """Keyword-only collate: positional drift would change the target format silently."""
     def collate(rows):
         return collate_fn(
@@ -83,5 +91,8 @@ def make_collate(cfg, tokenizer, sample_qa: bool, system_prompt_mode="none", sou
             eos_mode=cfg.data.eos_mode,
             system_prompt_mode=system_prompt_mode,
             source_version=source_version,
+            training=training,
+            qa_prompt=cfg.data.qa_prompt,
+            recon_prompt=cfg.data.recon_prompt,
         )
     return collate

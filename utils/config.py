@@ -69,7 +69,9 @@ class ModelConfig:
         "snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
     )
     torch_dtype: str = "bfloat16"
-    # Dtype of the trainable pieces (memory tokens, LoRA, recon decoders).
+    attn_implementation: str = "sdpa"
+    context_gradient_checkpointing: bool = True
+    # Dtype of the trainable pieces (memory writer, LoRA, recon decoders).
     # Kept separate from torch_dtype so that AdamW keeps float32 parameters and
     # moments while the frozen backbone stays at its checkpoint dtype.
     trainable_dtype: str = "float32"
@@ -96,11 +98,9 @@ class MemoryConfig:
     decoder_hidden_size: int = 256
     decoder_ffn_ratio: int = 2
     decoder_heads: int = 8
-    embedding_recon_weight: float = 1.0
     token_recon_weight: float = 0.0
     qa_weight: float = 1.0
-    embedding_recon_loss: str = "mse_cosine"
-    embedding_recon_cosine_weight: float = 0.1
+    recon_weight: float = 1.0
     # How the shared token_recon unembedding is parameterised.
     #   "linear" (default): a from-scratch [vocab, D] weight matrix -- the original
     #                       behaviour, kept as the default so nothing changes silently.
@@ -114,16 +114,6 @@ class MemoryConfig:
     #   "memory_projection" -> up-projection through the decoders' memory projection, so
     #                          step-0 logits already score the tokens the memory points at
     head_init: str = "auto"
-    # How the M global memory slot embeddings are initialised.
-    #   "randn" (default): randn * 0.02 -- the historical behaviour.
-    #   "token_embed":     M distinct real vocabulary embeddings, i.e. the same manifold
-    #                      the frozen backbone was trained on.
-    #   "vocab_mean":      the embedding mean plus the same randn * 0.02 noise.
-    init_mode: str = "randn"
-    init_seed: int = 0
-    # All slots read context. Among slots: isolated blocks all edges; causal allows
-    # j <= i; bidirectional allows all edges (both latter modes include self).
-    slot_attention: str = "isolated"
     # Memory-prefixed autoencoding objective (0 = off). The context is reconstructed
     # through the *frozen* backbone with the memory's per-layer KV as a prefix, i.e.
     # P(t_i | memory, t_<i), scored by the backbone's own (tied) unembedding. This is the
@@ -158,6 +148,14 @@ class MemoryConfig:
     # vocabulary head is applied to num_layers * token_recon_positions rows, so this is
     # the knob that bounds the auxiliary objective's cost. <= 0 means "all positions".
     token_recon_positions: int = 256
+    # Context encoder -> fixed memory writer.
+    context_layer_indices: tuple[int, ...] = (-1,)
+    memory_resampler_layers: int = 2
+    memory_resampler_heads: int = 4
+    memory_resampler_hidden_size: int = 256
+    memory_resampler_ffn_ratio: int = 2
+    # Source exposed to the optional question-conditioned reader.
+    reader_memory_source: str = "memory"
 
 
 @dataclass
@@ -171,6 +169,13 @@ class DataConfig:
     validation_split: str = "validation"
     test_split: str = "test"
     max_context_tokens: int = 2048
+    # Reject source contexts before truncation, independently of the encoder limit.
+    max_input_context_length: int = 8192
+    train_tasks: str = "mix"
+    # Fraction of Recon supervision rows in the mixed training stream.
+    recon_ratio: float = 0.5
+    qa_prompt: str = "Answer the question using the information in memory.\nQuestion: "
+    recon_prompt: str = "Reconstruct the original context from memory."
     max_question_tokens: int = 128
     max_answer_tokens: int = 128
     max_samples: int | None = None
@@ -235,6 +240,7 @@ class TrainingConfig:
 @dataclass
 class CheckpointConfig:
     output_dir: str = "outputs/qwen-metalora"
+    init_from: str | None = None
 
 
 @dataclass
@@ -305,12 +311,15 @@ class TrainConfig:
         model_values = dict(values.get("model", {}))
         if isinstance(model_values.get("target_modules"), list):
             model_values["target_modules"] = tuple(model_values["target_modules"])
+        memory_values = dict(values.get("memory", {}))
+        if isinstance(memory_values.get("context_layer_indices"), list):
+            memory_values["context_layer_indices"] = tuple(memory_values["context_layer_indices"])
         checkpoint_values = dict(values.get("checkpoint", {}))
         # Legacy checkpoints embed this removed scheduling field.
         checkpoint_values.pop("save_every_steps", None)
         return cls(
             model=ModelConfig(**model_values),
-            memory=MemoryConfig(**values.get("memory", {})),
+            memory=MemoryConfig(**memory_values),
             data=DataConfig(**data_values),
             optimizer=OptimizerConfig(**optimizer_values),
             scheduler=SchedulerConfig(**values.get("scheduler", {})),
@@ -326,10 +335,18 @@ class TrainConfig:
 
     def validate(self) -> None:
         d, m = self.data, self.memory
-        if m.slot_attention not in ("isolated", "causal", "bidirectional"):
-            raise ValueError("memory.slot_attention must be isolated, causal, or bidirectional")
-        if not 0 < d.max_context_tokens <= 2048:
-            raise ValueError("data.max_context_tokens must be in (0, 2048]")
+        if self.model.attn_implementation not in {"sdpa", "eager"}:
+            raise ValueError("model.attn_implementation must be sdpa or eager")
+        if d.max_context_tokens <= 0:
+            raise ValueError("data.max_context_tokens must be positive")
+        if d.max_input_context_length <= 0:
+            raise ValueError("data.max_input_context_length must be positive")
+        if d.train_tasks not in {"mix", "qa", "recon"}:
+            raise ValueError("data.train_tasks must be mix, qa or recon")
+        if not 0 <= d.recon_ratio <= 1:
+            raise ValueError("data.recon_ratio must be within [0, 1]")
+        if not d.qa_prompt.strip() or not d.recon_prompt.strip():
+            raise ValueError("QA and Recon prompts must be non-empty")
         if d.max_question_tokens <= 0 or d.max_answer_tokens <= 0:
             raise ValueError("question/answer token limits must be positive")
         if d.sortish_bucket_multiplier <= 0:
@@ -348,18 +365,26 @@ class TrainConfig:
             raise ValueError("decoder_hidden_size, decoder_ffn_ratio and decoder_heads must be positive")
         if m.decoder_hidden_size % m.decoder_heads:
             raise ValueError("memory.decoder_hidden_size must be divisible by memory.decoder_heads")
-        if m.embedding_recon_loss not in {"mse", "cosine", "mse_cosine"}:
-            raise ValueError("embedding_recon_loss must be mse, cosine, or mse_cosine")
+        if not m.context_layer_indices:
+            raise ValueError("memory.context_layer_indices must not be empty")
+        if any(type(i) is not int for i in m.context_layer_indices):
+            raise ValueError("memory.context_layer_indices must contain integers")
+        if len(set(m.context_layer_indices)) != len(m.context_layer_indices):
+            raise ValueError("memory.context_layer_indices must select distinct layers")
+        if m.memory_resampler_layers <= 0 or m.memory_resampler_heads <= 0:
+            raise ValueError("memory resampler depth and heads must be positive")
+        if m.memory_resampler_hidden_size <= 0 or m.memory_resampler_ffn_ratio <= 0:
+            raise ValueError("memory resampler width and FFN ratio must be positive")
+        if m.memory_resampler_hidden_size % m.memory_resampler_heads:
+            raise ValueError("memory_resampler_hidden_size must be divisible by memory_resampler_heads")
+        if m.reader_memory_source not in {"memory", "memory_embedding", "layer_mean"}:
+            raise ValueError("memory.reader_memory_source must be memory, memory_embedding or layer_mean")
         if m.token_recon_weight < 0:
             raise ValueError("token_recon_weight must be non-negative")
-        if m.embedding_recon_cosine_weight < 0:
-            raise ValueError("embedding_recon_cosine_weight must be non-negative")
         if m.head_mode not in {"linear", "tied"}:
             raise ValueError("memory.head_mode must be linear or tied")
         if m.head_init not in {"auto", "random", "memory_projection"}:
             raise ValueError("memory.head_init must be auto, random or memory_projection")
-        if m.init_mode not in {"randn", "token_embed", "vocab_mean"}:
-            raise ValueError("memory.init_mode must be randn, token_embed or vocab_mean")
         if m.causal_recon_weight < 0:
             raise ValueError("memory.causal_recon_weight must be non-negative")
         if m.causal_recon_positions < 0:
@@ -387,10 +412,14 @@ class TrainConfig:
                 raise ValueError("memory.readout_hidden_size must be divisible by readout_heads")
         if m.token_recon_positions < 0:
             raise ValueError("memory.token_recon_positions must be >= 0 (0 scores every position)")
-        if m.qa_weight < 0 or m.embedding_recon_weight < 0:
+        if m.qa_weight < 0 or m.recon_weight < 0:
             raise ValueError("loss weights must be non-negative")
-        if m.qa_weight == 0 and m.embedding_recon_weight == 0 and m.token_recon_weight == 0 and m.causal_recon_weight == 0 and m.distill_weight == 0:
-            raise ValueError("at least one main loss weight must be positive")
+        qa_active = d.train_tasks == "qa" or (d.train_tasks == "mix" and d.recon_ratio < 1)
+        recon_active = d.train_tasks == "recon" or (d.train_tasks == "mix" and d.recon_ratio > 0)
+        if qa_active and m.qa_weight <= 0:
+            raise ValueError("QA training requires memory.qa_weight > 0")
+        if recon_active and m.recon_weight <= 0:
+            raise ValueError("Recon training requires memory.recon_weight > 0")
         t = self.training
         if t.batch_size <= 0 or t.epochs <= 0:
             raise ValueError("batch_size and epochs must be positive")

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 import torch
 from torch import nn
 from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 from .MemoryDecoder import MemoryDecoder
 from .dtypes import no_autocast
-from .resampler import QuestionResampler, LearnedPrefix
+from .resampler import ContextMemoryResampler, QuestionResampler, LearnedPrefix
 
 try:
     from transformers.cache_utils import DynamicCache
@@ -16,15 +18,12 @@ except ImportError:  # pragma: no cover - transformers is required at runtime
 
 @dataclass
 class MetaLoRAOutput:
-    logits: torch.Tensor
+    logits: torch.Tensor | None
     labels: torch.LongTensor
     memory: torch.Tensor
     layer_memory: torch.Tensor
-    recon: torch.Tensor
-    context_target: torch.Tensor
-    context_mask: torch.Tensor
-    # Context next-token prediction terms. Populated only when the auxiliary
-    # objective is "token_recon"; ``recon``/``context_target`` are None then.
+    supervision_losses: torch.Tensor | None = None
+    # Context next-token prediction terms for the memory-only diagnostic.
     token_recon_hidden: torch.Tensor | None = None
     token_recon_labels: torch.LongTensor | None = None
     token_recon_mask: torch.Tensor | None = None
@@ -52,15 +51,13 @@ class ContextPrefix:
     layer_memory: torch.Tensor
     memory: torch.Tensor
     memory_cache: object
-    recon: torch.Tensor
-    context_target: torch.Tensor
-    context_mask: torch.Tensor
     context_length: int
     memory_length: int
     # Last-layer states of the *context* rows of the encoder pass. Those rows attend only
     # to earlier context tokens, so they are the plain causal-LM distribution for the
     # context -- i.e. the teacher a distillation objective needs, for free.
     context_hidden: torch.Tensor | None = None
+    memory_embedding: torch.Tensor | None = None
 
 
 def is_trainable_parameter_name(name: str) -> bool:
@@ -72,8 +69,8 @@ def is_trainable_parameter_name(name: str) -> bool:
     return (
         "lora_A" in name
         or "lora_B" in name
-        or name == "memory_tokens"
         or name.startswith(("decoders.", "token_recon_head.", "resampler."))
+        or name.startswith(("context_resampler.", "context_layer_logits"))
     )
 
 
@@ -118,7 +115,7 @@ class VocabularyHead(nn.Module):
     This is the read-out the compression papers rely on ("score with the model's own
     embedding"): a random 38.9M-parameter head is a cold start that has to learn the
     whole vocabulary geometry from 256-dim bottleneck states, and its gradient noise
-    is what the memory tokens receive first.
+    is what the context writer receives first.
 
     ``W`` is materialised once per parameter version and cached: the naive two-step
     form ``(h @ A.T) @ E.T`` costs ``H * vocab`` per row against ``D * vocab`` for the
@@ -265,110 +262,6 @@ def disable_autocast_for_peft_lora(model: nn.Module) -> int:
     return wrapped
 
 
-def build_block_causal_mask(
-    context_mask: torch.Tensor,
-    memory_length: int,
-    question_mask: torch.Tensor,
-    answer_mask: torch.Tensor,
-    dtype: torch.dtype,
-    slot_attention: str = "isolated",
-    readout_length: int = 0,
-) -> torch.Tensor:
-    """Build an additive mask for ``[context, memory, question, readout, answer]``.
-
-    Context positions attend only to valid, earlier context positions. Memory
-    positions attend to valid context positions; slot-to-slot visibility is isolated,
-    causal (including self), or bidirectional (including self). Question positions attend to memory and
-    earlier question positions, read-out positions (``readout_length`` > 0) attend to
-    memory and the question, and answer positions attend to memory, question, read-out and
-    earlier answer positions. Padding keys are blocked. Padded query rows keep a self
-    edge to avoid all-``-inf`` rows; their outputs are ignored by the loss.
-
-    The memory rows are the one kind of row that can end up fully blocked: they see
-    nothing but the context, so a row whose context is entirely padding leaves them with
-    no key. This does **not** produce NaN, because blocked entries are written as
-    ``torch.finfo(dtype).min`` -- a finite number -- so such a row's softmax is uniform
-    (all-equal logits) rather than ``0/0``. Measured on the real Qwen3 attention with a
-    fully blocked row: finite for both ``eager`` and ``sdpa``; substituting ``-inf`` for
-    ``finfo.min`` does produce NaN under ``eager``, which is why the finite value matters.
-    The uniformity is still meaningless, so ``src/data.py`` drops contexts that tokenize
-    to nothing, making an all-padding context row unreachable in practice; the padding
-    self-edge below is what keeps *context and QA* rows well defined regardless.
-
-    This is the vectorised form of the original row-by-row builder. The loop version
-    read one GPU scalar per row (``if c_valid[i]:``), which forces a device
-    synchronisation and a separate kernel launch per row; at context length 2048
-    that cost ~490 ms per call, more than a whole training step. Both forms produce
-    identical masks.
-
-    With an empty context this builder's question/answer rows are exactly
-    :func:`build_continuation_mask`. The two are kept separate (deriving one from the
-    other measured ~30% slower on the per-step hot path) and pinned together by
-    ``tests/test_masks.py``.
-    """
-    if slot_attention not in ("isolated", "causal", "bidirectional"):
-        raise ValueError("slot_attention must be isolated, causal, or bidirectional")
-    context_mask = context_mask.bool(); question_mask = question_mask.bool(); answer_mask = answer_mask.bool()
-    bsz, context_len = context_mask.shape
-    question_len, answer_len = question_mask.shape[1], answer_mask.shape[1]
-    readout_length = int(readout_length)
-    if readout_length < 0:
-        raise ValueError("readout_length must be >= 0")
-    total = context_len + memory_length + question_len + readout_length + answer_len
-    device = context_mask.device
-    m0 = context_len
-    q0 = context_len + memory_length
-    r0 = q0 + question_len
-    a0 = r0 + readout_length
-    allowed = torch.zeros((bsz, total, total), dtype=torch.bool, device=device)
-    # context rows: causal over valid context keys only
-    causal_context = torch.tril(torch.ones(context_len, context_len, dtype=torch.bool, device=device))
-    allowed[:, :context_len, :context_len] = context_mask[:, None, :] & causal_context
-    # memory rows: every valid context key, nothing else (no memory <-> memory)
-    allowed[:, m0:q0, :context_len] = context_mask[:, None, :]
-    if slot_attention == "causal":
-        # Let each memory token read the earlier memory tokens too, so the M slots can
-        # coordinate instead of being independent bottleneck channels. ICAE's memory
-        # tokens are ordinary causal positions and do see each other. Costs no memory
-        # and no parameters; it only changes what the memory rows attend to.
-        causal_memory = torch.tril(
-            torch.ones(memory_length, memory_length, dtype=torch.bool, device=device)
-        )
-        allowed[:, m0:q0, m0:q0] = causal_memory
-    elif slot_attention == "bidirectional":
-        allowed[:, m0:q0, m0:q0] = True
-    causal_qa = torch.tril(torch.ones(question_len + readout_length + answer_len, question_len + readout_length + answer_len, dtype=torch.bool, device=device))
-    # question rows: all memory + causal over valid question keys
-    allowed[:, q0:r0, m0:q0] = True
-    allowed[:, q0:r0, q0:r0] = question_mask[:, None, :] & causal_qa[:question_len, :question_len]
-    if readout_length:
-        # read-out rows: all memory + every valid question key. They are derived from the
-        # question and the memory, so they must not see the answer.
-        allowed[:, r0:a0, m0:q0] = True
-        allowed[:, r0:a0, q0:r0] = question_mask[:, None, :]
-    # answer rows: all memory + all valid question keys (+ read-out) + causal over answers
-    allowed[:, a0:, m0:q0] = True
-    allowed[:, a0:, q0:r0] = question_mask[:, None, :]
-    if readout_length:
-        allowed[:, a0:, r0:a0] = True
-    allowed[:, a0:, a0:] = answer_mask[:, None, :] & causal_qa[question_len + readout_length:, question_len + readout_length:]
-    # padding query rows keep a single self edge
-    context_rows = torch.arange(context_len, device=device)
-    context_eye = torch.zeros((bsz, context_len, total), dtype=torch.bool, device=device)
-    context_eye[:, context_rows, context_rows] = True
-    allowed[:, :context_len] = torch.where(context_mask[:, :, None], allowed[:, :context_len], context_eye)
-    qa_len = question_len + readout_length + answer_len
-    qa_rows = torch.arange(qa_len, device=device)
-    qa_eye = torch.zeros((bsz, qa_len, total), dtype=torch.bool, device=device)
-    qa_eye[:, qa_rows, q0 + qa_rows] = True
-    qa_valid = torch.cat(
-        [question_mask, question_mask.new_ones(bsz, readout_length), answer_mask], dim=1
-    )
-    allowed[:, q0:] = torch.where(qa_valid[:, :, None], allowed[:, q0:], qa_eye)
-    mask = torch.zeros((bsz, 1, total, total), dtype=dtype, device=device)
-    return mask.masked_fill(~allowed[:, None], torch.finfo(dtype).min)
-
-
 def build_continuation_mask(
     question_mask: torch.Tensor,
     answer_mask: torch.Tensor,
@@ -377,11 +270,6 @@ def build_continuation_mask(
     readout_length: int = 0,
 ) -> torch.Tensor:
     """Mask for question/read-out/answer tokens attending to a memory-only cache.
-
-    Vectorised form of the original row-by-row builder; both produce identical masks.
-    With ``readout_length=0`` this is exactly :func:`build_block_causal_mask` with an empty
-    context, sliced to drop the memory query rows -- ``tests/test_masks.py`` asserts that
-    equivalence for both values so the two cannot drift apart.
 
     The optional read-out rows sit between the question and the answer. They are built from
     the question and the memory, so they may read every valid question key but never the
@@ -426,44 +314,63 @@ class MetaLoRA(nn.Module):
 
     Two dtypes coexist. The frozen Qwen backbone stays in its checkpoint dtype
     (``qwen_dtype``, bfloat16 for Qwen3) and every tensor that enters it is cast to
-    that dtype. The trainable pieces -- ``memory_tokens``, ``lora_A``/``lora_B`` and
+    that dtype. The trainable pieces -- learned memory queries, ``lora_A``/``lora_B`` and
     the recon decoders -- can be kept in ``trainable_dtype`` (float32 by
     default) so that AdamW's moments and its ``param.add_(update, alpha=-lr)`` step
     are not quantised to bfloat16 resolution. The casts that reconcile the two dtypes
-    live in three places: ``memory_tokens`` is cast down when it is used as an input,
+    live in the context resampler and short memory pass,
     ``StaticLoRALinear``/``MemoryDecoder`` cast on entry and exit, and the losses
     upcast before reducing.
     """
-    def __init__(self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8, decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2, target_modules=None, dropout=0.0, max_context_tokens=2048, trainable_dtype=torch.float32, token_recon=False, embedding_recon=True, use_peft=False, head_mode="linear", head_init="auto", init_mode="randn", init_seed=0, slot_attention="isolated", ae_lm=False, readout_length=0, readout_layers=2, readout_heads=4, readout_hidden_size=256, readout_mode="memory_question"):
+    def __init__(
+        self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8,
+        decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2,
+        target_modules=None, dropout=0.0, max_context_tokens=None,
+        trainable_dtype=torch.float32, token_recon=False,
+        use_peft=False, head_mode="linear", head_init="auto", ae_lm=False,
+        readout_length=0, readout_layers=2, readout_heads=4, readout_hidden_size=256,
+        readout_mode="memory_question", context_layer_indices=(-1,),
+        memory_resampler_layers=2, memory_resampler_heads=4,
+        memory_resampler_hidden_size=256, memory_resampler_ffn_ratio=2,
+        reader_memory_source="memory", context_gradient_checkpointing=False,
+    ):
         super().__init__()
         self.rank, self.alpha = rank, alpha
         self.target_modules = tuple(("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj") if target_modules is None else target_modules)
         self.trainable_dtype = trainable_dtype
         # Which LoRA implementation is active, recorded so a run is reproducible.
         self.lora_backend = ("peft" if use_peft else "static") if self.target_modules else "none"
-        # Only one of the two auxiliary objectives is active at a time.
-        #   token_recon=True  -> decoder hidden states are classified into context tokens
-        #   token_recon=False -> decoder outputs are regressed onto context input embeddings
         self.token_recon = bool(token_recon)
-        self.embedding_recon = bool(embedding_recon)
         self.qwen = self._add_peft_lora(qwen, rank, alpha, dropout, bool(use_peft))
         self.qwen_hidden_size = self.qwen.config.hidden_size
-        qwen_dtype = self.qwen.get_input_embeddings().weight.dtype
-        # Global learnable memory tokens are added to the pooled Qwen context
-        # representation. They are trained together with LoRA and the decoders.
-        # Created in the trainable dtype; they are cast to the backbone dtype only
-        # where they are used as an input, so gradients come back in float32.
-        self.memory_tokens = nn.Parameter(
-            torch.randn(memory_length, self.qwen_hidden_size, dtype=trainable_dtype) * 0.02
+        self.max_context_tokens = int(self.qwen.config.max_position_embeddings)
+        if max_context_tokens is not None and not 0 < max_context_tokens <= self.max_context_tokens:
+            raise ValueError(f"max_context_tokens must be within backbone window {self.max_context_tokens}")
+        if not 0 < memory_length <= self.max_context_tokens:
+            raise ValueError("memory_length must be within the backbone window")
+        self.context_gradient_checkpointing = bool(context_gradient_checkpointing)
+        self.context_layer_indices = tuple(context_layer_indices)
+        depth = int(self.qwen.config.num_hidden_layers)
+        if not self.context_layer_indices or any(
+            type(i) is not int or not -depth <= i < depth for i in self.context_layer_indices
+        ):
+            raise ValueError(f"context_layer_indices must contain integers in [-{depth}, {depth - 1}]")
+        if len({i % depth for i in self.context_layer_indices}) != len(self.context_layer_indices):
+            raise ValueError("context_layer_indices must select distinct layers")
+        self.context_layer_logits = nn.Parameter(torch.zeros(len(self.context_layer_indices), dtype=trainable_dtype))
+        self.context_resampler = ContextMemoryResampler(
+            self.qwen_hidden_size, memory_length, memory_resampler_layers,
+            memory_resampler_heads, memory_resampler_hidden_size,
+            memory_resampler_ffn_ratio, dtype=trainable_dtype,
         )
+        qwen_dtype = self.qwen.get_input_embeddings().weight.dtype
         layers = int(self.qwen.config.num_hidden_layers)
         self.decoders = nn.ModuleList([
             MemoryDecoder(
                 self.qwen_hidden_size, decoder_hidden_size, decoder_heads,
-                decoder_ffn_ratio, max_context_tokens,
-                reconstruct_embeddings=self.embedding_recon,
+                decoder_ffn_ratio,
             )
-            for _ in range(layers if self.embedding_recon or self.token_recon else 0)
+            for _ in range(layers if self.token_recon else 0)
         ])
         # Shared unembedding for the context next-token objective. One head is shared
         # by every layer decoder: a per-layer head would add
@@ -507,6 +414,9 @@ class MetaLoRA(nn.Module):
         if readout_length < 0:
             raise ValueError("readout_length must be non-negative")
         self.readout_mode = readout_mode
+        if reader_memory_source not in {"memory", "memory_embedding", "layer_mean"}:
+            raise ValueError("reader_memory_source must be memory, memory_embedding or layer_mean")
+        self.reader_memory_source = reader_memory_source
         self.readout_length = 0 if readout_mode == "off" else int(readout_length)
         self.resampler = None
         if self.readout_length > 0:
@@ -519,53 +429,6 @@ class MetaLoRA(nn.Module):
                 )
         self.to(dtype=qwen_dtype)
         self.set_trainable_dtype(trainable_dtype)
-        # Which memory-writer options are active, recorded for reproducibility. The
-        # slot embeddings are (re)initialised last so the copy lands in the trainable
-        # dtype and cannot be overwritten by the dtype casts above.
-        self.init_mode = init_mode
-        self.init_seed = int(init_seed)
-        if slot_attention not in ("isolated", "causal", "bidirectional"):
-            raise ValueError("slot_attention must be isolated, causal, or bidirectional")
-        self.slot_attention = slot_attention
-        self._init_memory_tokens(init_mode, init_seed)
-
-    def _init_memory_tokens(self, init_mode, init_seed):
-        """(Re)initialise the M slot embeddings. ``randn`` keeps the historical default.
-
-        The scale of ``randn * 0.02`` already matches a token embedding, but the
-        *directions* are a random subspace: the frozen backbone then sees memory
-        positions that are off the manifold of real tokens. ``token_embed`` draws M
-        distinct vocabulary entries instead, ``vocab_mean`` starts from the embedding
-        mean with the same 0.02 noise. Both are writer-side engineering hygiene, not a
-        mechanism from the compression papers.
-        """
-        if init_mode == "randn":
-            return
-        if init_mode not in {"token_embed", "vocab_mean"}:
-            raise ValueError(
-                f"memory.init_mode must be randn, token_embed or vocab_mean, got {init_mode!r}"
-            )
-        embedding = self.qwen.get_input_embeddings().weight
-        with torch.no_grad():
-            if init_mode == "token_embed":
-                vocab = embedding.size(0)
-                slots = self.memory_tokens.size(0)
-                if slots > vocab:
-                    raise ValueError(
-                        f"memory_length {slots} exceeds the vocabulary size {vocab}"
-                    )
-                generator = torch.Generator().manual_seed(int(init_seed))
-                ids = torch.randperm(vocab, generator=generator)[:slots]
-                self.memory_tokens.data.copy_(embedding[ids].to(self.memory_tokens.dtype))
-            else:
-                mean = embedding.mean(dim=0).to(self.memory_tokens.dtype)
-                noise = torch.randn(
-                    self.memory_tokens.shape,
-                    generator=torch.Generator().manual_seed(int(init_seed)),
-                )
-                self.memory_tokens.data.copy_(
-                    mean + noise.to(self.memory_tokens.dtype) * 0.02
-                )
 
     def set_trainable_dtype(self, dtype: torch.dtype):
         """Cast every trainable parameter to ``dtype`` (float32 by default).
@@ -663,9 +526,6 @@ class MetaLoRA(nn.Module):
     def _memory_prefix(self, layer_memory):
         return layer_memory[:, -1]  # final Qwen layer memory is the input prefix
 
-    def _recon(self, layer_memory, context_embeds, context_mask):
-        return torch.stack([decoder(layer_memory[:, i], context_embeds.size(1)) for i, decoder in enumerate(self.decoders)], dim=1)
-
     def sample_context_targets(self, context_ids, context_mask, positions_per_context=None):
         """Draw the context positions that the next-token objective will score.
 
@@ -737,37 +597,107 @@ class MetaLoRA(nn.Module):
             module = inner
         return self.qwen
 
+    def _encode_context_hidden(self, context_embeds, context_mask, positions):
+        """Run the long context once while retaining only configured layer states."""
+        body = self._transformer_body
+        layers = getattr(body, "layers", None)
+        if layers is None:
+            raise RuntimeError("Qwen transformer body does not expose decoder layers")
+        depth = len(layers)
+        resolved = [index if index >= 0 else depth + index for index in self.context_layer_indices]
+        if any(index < 0 or index >= depth for index in resolved):
+            raise ValueError(
+                f"context layer indices {self.context_layer_indices} are outside "
+                f"[-{depth}, {depth - 1}]"
+            )
+        captured: dict[int, torch.Tensor] = {}
+        hooks = []
+        checkpoint_flags = []
+        if self.context_gradient_checkpointing and self.training and torch.is_grad_enabled():
+            for layer in layers:
+                checkpoint_flags.append((
+                    layer, layer.gradient_checkpointing,
+                    getattr(layer, "_gradient_checkpointing_func", None),
+                ))
+                layer.gradient_checkpointing = True
+                layer._gradient_checkpointing_func = partial(checkpoint, use_reentrant=False)
+        for index in sorted(set(resolved)):
+            if index == depth - 1:
+                continue
+            def capture(_module, _inputs, output, layer_index=index):
+                value = output[0] if isinstance(output, (tuple, list)) else output
+                captured[layer_index] = value
+            hooks.append(layers[index].register_forward_hook(capture))
+        try:
+            out = body(
+                inputs_embeds=context_embeds,
+                attention_mask=None if bool(context_mask.all()) else context_mask,
+                position_ids=positions,
+                output_hidden_states=False,
+                use_cache=False,
+                return_dict=True,
+            )
+        finally:
+            for hook in hooks:
+                hook.remove()
+            for layer, enabled, function in checkpoint_flags:
+                layer.gradient_checkpointing = enabled
+                if function is None:
+                    del layer._gradient_checkpointing_func
+                else:
+                    layer._gradient_checkpointing_func = function
+        captured[depth - 1] = out.last_hidden_state
+        selected = []
+        for index in resolved:
+            if index not in captured:
+                raise RuntimeError(f"Qwen did not produce requested context layer {index}")
+            selected.append(captured[index])
+        weights = self.context_layer_logits.softmax(dim=0)
+        mixed = sum(weight.to(hidden.dtype) * hidden for weight, hidden in zip(weights, selected))
+        return mixed, out.last_hidden_state
+
     def encode_context_prefix(self, context_embeds, context_mask) -> ContextPrefix:
-        """Encode each context and memory once, retaining a differentiable KV cache."""
+        """Encode context once, resample it, then run one short memory-only pass."""
+        if context_embeds.ndim != 3 or context_embeds.size(-1) != self.qwen_hidden_size:
+            raise ValueError("context_embeds must have shape [B, L, backbone_hidden_size]")
+        if context_mask.shape != context_embeds.shape[:2]:
+            raise ValueError("context_mask must have shape [B, L]")
+        if not 0 < context_embeds.size(1) <= self.max_context_tokens:
+            raise ValueError(f"context length must be within backbone window {self.max_context_tokens}")
+        if not bool(context_mask.bool().any(dim=1).all()):
+            raise ValueError("every context must contain at least one valid token")
         context_embeds = context_embeds.to(dtype=self.dtype)
         context_mask = context_mask.bool()
-        # Cast down to the backbone dtype only here, where the tokens become an
-        # input to Qwen; the parameter itself stays in the trainable dtype.
-        memory_inputs = self.memory_tokens.to(dtype=self.dtype).unsqueeze(0).expand(context_embeds.size(0), -1, -1)
-        sequence = torch.cat([context_embeds, memory_inputs], dim=1)
-        empty = context_mask.new_zeros(context_embeds.size(0), 0)
-        block_mask = build_block_causal_mask(context_mask, memory_inputs.size(1), empty, empty, sequence.dtype, slot_attention=self.slot_attention)
-        # No logits are read from this pass, so skip the vocabulary head entirely.
-        out = self._transformer_body(inputs_embeds=sequence, attention_mask=block_mask, output_hidden_states=True, use_cache=True, return_dict=True)
-        states = out.hidden_states or (sequence, out.last_hidden_state)
-        layer_memory = []
-        for state in states[1:1 + int(self.qwen.config.num_hidden_layers)]:
-            layer_memory.append(state[:, context_embeds.size(1):context_embeds.size(1) + memory_inputs.size(1)])
-        while len(layer_memory) < int(self.qwen.config.num_hidden_layers):
-            layer_memory.append(layer_memory[-1])
-        layer_memory = torch.stack(layer_memory, dim=1)
-        cache = out.past_key_values
+        # One standard causal Qwen pass over the context. The context KV is not cached.
+        positions = torch.arange(context_embeds.size(1), device=context_embeds.device)
+        positions = positions.unsqueeze(0).expand(context_embeds.size(0), -1)
+        context_hidden, context_last_hidden = self._encode_context_hidden(
+            context_embeds, context_mask, positions,
+        )
+        memory_embedding = self.context_resampler(context_hidden, context_mask).to(dtype=self.dtype)
+
+        # Short Qwen pass over fixed-length memory embeddings produces the reusable KV.
+        memory_positions = torch.arange(memory_embedding.size(1), device=memory_embedding.device)
+        memory_positions = memory_positions.unsqueeze(0).expand(memory_embedding.size(0), -1)
+        memory_mask = torch.ones(memory_embedding.size(0), memory_embedding.size(1), dtype=torch.bool, device=memory_embedding.device)
+        memory_out = self._transformer_body(
+            inputs_embeds=memory_embedding,
+            attention_mask=memory_mask,
+            position_ids=memory_positions,
+            output_hidden_states=True,
+            use_cache=True,
+            return_dict=True,
+        )
+        layer_memory = torch.stack(memory_out.hidden_states[1:], dim=1)
+        cache = memory_out.past_key_values
         if cache is None:
             raise RuntimeError("Qwen did not return a KV cache for prefix encoding")
-        memory_layers = []
-        for layer in cache.layers:
-            # DynamicCache uses [batch, kv_heads, sequence, head_dim].
-            keys = layer.keys[..., context_embeds.size(1):, :]
-            values = layer.values[..., context_embeds.size(1):, :]
-            memory_layers.append((keys, values))
-        memory_cache = DynamicCache(ddp_cache_data=memory_layers, config=self.qwen.config)
-        recon = self._recon(layer_memory, context_embeds, context_mask) if self.embedding_recon else None
-        return ContextPrefix(layer_memory, self._memory_prefix(layer_memory), memory_cache, recon, context_embeds, context_mask, context_embeds.size(1), memory_inputs.size(1), context_hidden=states[-1][:, :context_embeds.size(1)])
+        return ContextPrefix(
+            layer_memory, self._memory_prefix(layer_memory), cache,
+            context_embeds.size(1), memory_embedding.size(1),
+            context_hidden=context_last_hidden if self.ae_lm else None,
+            memory_embedding=memory_embedding,
+        )
 
     @staticmethod
     def _select_cache(cache, indices, config):
@@ -789,7 +719,13 @@ class MetaLoRA(nn.Module):
             return self.resampler(question_embeds, question_mask, None).to(dtype=self.dtype)
         if prefix.memory is None:
             raise RuntimeError("the question read-out needs the memory representation")
-        memory = prefix.memory if indices is None else prefix.memory.index_select(0, indices)
+        if self.reader_memory_source == "memory_embedding":
+            source = prefix.memory_embedding
+        elif self.reader_memory_source == "layer_mean":
+            source = prefix.layer_memory.mean(dim=1)
+        else:
+            source = prefix.memory
+        memory = source if indices is None else source.index_select(0, indices)
         readout = self.resampler(question_embeds, question_mask, memory)
         return readout.to(dtype=self.dtype)
 
@@ -799,7 +735,7 @@ class MetaLoRA(nn.Module):
         The numbering is the one the generation path builds row by row
         (:meth:`generate_answers_with_prefix`), and it deliberately ignores left padding::
 
-            start = context_length + memory_length
+            start = memory_length
             real question token i (0-based among the real ones) -> start + i
             read-out slot j                                     -> start + valid + j
             answer token k                                      -> start + valid + readout_length + k
@@ -814,7 +750,7 @@ class MetaLoRA(nn.Module):
         """
         question_mask = question_mask.bool()
         valid = question_mask.sum(dim=1)
-        start = int(prefix.context_length) + int(prefix.memory_length)
+        start = int(prefix.memory_length)
         # cumsum-1 is the 0-based rank of each real token; padding slots get -1 and are
         # parked at ``start`` (they are masked out of attention either way).
         rank = question_mask.long().cumsum(dim=1) - 1
@@ -831,7 +767,7 @@ class MetaLoRA(nn.Module):
             )
         return torch.cat(blocks, dim=1).to(device)
 
-    def forward_qa_with_prefix(self, prefix, qa_context_indices, question_embeds, question_mask, answer_embeds, answer_mask, labels):
+    def forward_qa_with_prefix(self, prefix, qa_context_indices, question_embeds, question_mask, answer_embeds, answer_mask, labels, loss_only=False):
         question_embeds, answer_embeds = question_embeds.to(dtype=self.dtype), answer_embeds.to(dtype=self.dtype)
         indices = qa_context_indices.to(question_embeds.device, dtype=torch.long)
         cache = self._select_cache(prefix.memory_cache, indices, self.qwen.config)
@@ -843,16 +779,28 @@ class MetaLoRA(nn.Module):
             sequence = torch.cat([question_embeds, readout, answer_embeds], dim=1)
         mask = build_continuation_mask(question_mask, answer_mask, prefix.memory_length, sequence.dtype, readout_length=extra)
         positions = self._qa_positions(prefix, question_mask, answer_embeds.size(1), extra, sequence.device)
-        out = self.qwen(inputs_embeds=sequence, attention_mask=mask, position_ids=positions, past_key_values=cache, use_cache=True, return_dict=True)
+        if int(positions.max()) >= self.max_context_tokens:
+            raise ValueError("memory + prompt + readout + target exceeds the backbone window")
+        body = self._transformer_body if loss_only else self.qwen
+        out = body(inputs_embeds=sequence, attention_mask=mask, position_ids=positions, past_key_values=cache, use_cache=not loss_only, return_dict=True)
         ignored = torch.full((labels.size(0), question_embeds.size(1) + extra), -100, dtype=labels.dtype, device=labels.device)
+        full_labels = torch.cat([ignored, labels], dim=1)
+        row_losses = None
+        if loss_only:
+            from .losses import sequence_lm_loss
+            # Chunk vocabulary projections, then average tokens within each supervision
+            # row so a long Recon target does not outweigh a short QA answer.
+            head = self.qwen.get_output_embeddings()
+            row_losses = torch.stack([
+                sequence_lm_loss(hidden[None, :-1], target[None, 1:], head)
+                for hidden, target in zip(out.last_hidden_state, full_labels)
+            ])
         return MetaLoRAOutput(
-            logits=out.logits,
-            labels=torch.cat([ignored, labels], dim=1),
+            logits=None if loss_only else out.logits,
+            labels=full_labels,
             memory=prefix.memory,
             layer_memory=prefix.layer_memory,
-            recon=prefix.recon,
-            context_target=prefix.context_target,
-            context_mask=prefix.context_mask,
+            supervision_losses=row_losses,
         )
 
     def autoencode_with_memory(self, prefix, context_embeds, context_mask):
@@ -878,9 +826,12 @@ class MetaLoRA(nn.Module):
         """
         context_embeds = context_embeds.to(dtype=self.dtype)
         context_mask = context_mask.bool()
-        empty = context_mask.new_zeros(context_mask.size(0), 0)
-        mask = build_continuation_mask(context_mask, empty, prefix.memory_length, context_embeds.dtype)
-        start = prefix.context_length + prefix.memory_length
+        if prefix.memory_length + context_embeds.size(1) > self.max_context_tokens:
+            raise ValueError("autoencoding needs memory_length + context_length within the backbone window")
+        mask = torch.cat([
+            context_mask.new_ones(context_mask.size(0), prefix.memory_length), context_mask,
+        ], dim=1)
+        start = prefix.memory_length
         positions = torch.arange(start, start + context_embeds.size(1), device=context_embeds.device)
         positions = positions.unsqueeze(0).expand(context_embeds.size(0), -1)
         # Qwen updates a supplied DynamicCache even with use_cache=False. Keep
@@ -897,17 +848,14 @@ class MetaLoRA(nn.Module):
         )
         return out.last_hidden_state
 
-    def forward(self, context_embeds, context_mask, question_embeds, question_mask, answer_embeds, answer_mask, labels, qa_context_indices=None, context_ids=None, token_recon_positions=None, objective_config=None):
+    def forward(self, context_embeds, context_mask, question_embeds, question_mask, answer_embeds, answer_mask, labels, qa_context_indices=None, context_ids=None, token_recon_positions=None, objective_config=None, loss_only=False):
         """Training path.
 
-        ``context_ids`` is required when the auxiliary objective is ``token_recon``: the
-        regression target could be read back out of ``context_embeds`` but a token
-        classification target cannot, because the embedding lookup is not invertible. It is
-        also required for the autoencoding objective (``ae_lm``).
+        ``context_ids`` supplies targets for the optional token and causal objectives.
         """
         prefix = self.encode_context_prefix(context_embeds, context_mask)
         indices = qa_context_indices if qa_context_indices is not None else torch.arange(question_embeds.size(0), device=question_embeds.device)
-        output = self.forward_qa_with_prefix(prefix, indices, question_embeds, question_mask, answer_embeds, answer_mask, labels)
+        output = self.forward_qa_with_prefix(prefix, indices, question_embeds, question_mask, answer_embeds, answer_mask, labels, loss_only=loss_only)
         if objective_config is not None:
             from .losses import memory_objectives
             output.objective_terms = memory_objectives(self, prefix, context_ids, context_mask, objective_config)
@@ -958,7 +906,7 @@ class MetaLoRA(nn.Module):
         """
         embedding = self.qwen.get_input_embeddings()
         device = question_ids.device
-        start = prefix.context_length + prefix.memory_length
+        start = prefix.memory_length
         eos_id = getattr(tokenizer, "eos_token_id", None)
         n_rows = question_ids.size(0)
 
@@ -1081,8 +1029,22 @@ class MetaLoRA(nn.Module):
 def load_model(cfg):
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from utils.config import dtype_from_name
+    cfg.validate()
     tok=AutoTokenizer.from_pretrained(cfg.model.name_or_path, local_files_only=True); tok.pad_token=tok.pad_token or tok.eos_token
-    qwen=AutoModelForCausalLM.from_pretrained(cfg.model.name_or_path, dtype=dtype_from_name(cfg.model.torch_dtype), local_files_only=True)
+    qwen=AutoModelForCausalLM.from_pretrained(
+        cfg.model.name_or_path, dtype=dtype_from_name(cfg.model.torch_dtype),
+        attn_implementation=cfg.model.attn_implementation, local_files_only=True,
+    )
+    if cfg.memory.causal_recon_weight > 0 or cfg.memory.distill_weight > 0:
+        window = int(qwen.config.max_position_embeddings)
+        effective_context_tokens = min(
+            cfg.data.max_context_tokens, cfg.data.max_input_context_length,
+        )
+        if cfg.memory.memory_length + effective_context_tokens > window:
+            raise ValueError(
+                "causal reconstruction/distillation require "
+                f"memory_length + effective input context length <= backbone window ({window})"
+            )
     qwen.config.use_cache=False
     model=MetaLoRA(
         qwen, rank=cfg.model.lora_rank, alpha=cfg.model.lora_alpha,
@@ -1094,19 +1056,22 @@ def load_model(cfg):
         max_context_tokens=cfg.data.max_context_tokens,
         trainable_dtype=dtype_from_name(cfg.model.trainable_dtype),
         token_recon=cfg.memory.token_recon_weight > 0,
-        embedding_recon=cfg.memory.embedding_recon_weight > 0,
         use_peft=cfg.model.use_peft,
         head_mode=cfg.memory.head_mode,
         head_init=cfg.memory.head_init,
-        init_mode=cfg.memory.init_mode,
-        init_seed=cfg.memory.init_seed,
-        slot_attention=cfg.memory.slot_attention,
+        context_gradient_checkpointing=cfg.model.context_gradient_checkpointing,
         ae_lm=cfg.memory.causal_recon_weight > 0 or cfg.memory.distill_weight > 0,
         readout_length=cfg.memory.readout_length,
         readout_mode=cfg.memory.readout_mode,
         readout_layers=cfg.memory.readout_layers,
         readout_heads=cfg.memory.readout_heads,
         readout_hidden_size=cfg.memory.readout_hidden_size,
+        context_layer_indices=cfg.memory.context_layer_indices,
+        memory_resampler_layers=cfg.memory.memory_resampler_layers,
+        memory_resampler_heads=cfg.memory.memory_resampler_heads,
+        memory_resampler_hidden_size=cfg.memory.memory_resampler_hidden_size,
+        memory_resampler_ffn_ratio=cfg.memory.memory_resampler_ffn_ratio,
+        reader_memory_source=cfg.memory.reader_memory_source,
     )
     for name,p in model.named_parameters():
         p.requires_grad=is_trainable_parameter_name(name)
@@ -1118,8 +1083,8 @@ __all__ = [
     "StaticLoRALinear", "MemoryDecoder", "ContextPrefix", "ContextLMTerms",
     "VocabularyHead",
     "TiedUnembedding",
-    "QuestionResampler",
-    "build_block_causal_mask", "build_continuation_mask",
+    "ContextMemoryResampler", "QuestionResampler",
+    "build_continuation_mask",
     "is_trainable_parameter_name", "load_model",
     "disable_autocast_for_peft_lora",
 ]

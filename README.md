@@ -1,16 +1,30 @@
 # Qwen MetaLoRA Context Memory
 
-使用同一 Qwen backbone 将 context 编码为可复用的 memory KV，再根据 question 生成答案。训练更新 LoRA、memory slots 和所启用的辅助模块；默认使用内置 StaticLoRA，可配置 PEFT。辅助目标包括 memory-only context-LM，以及可选的 AE-LM 和蒸馏。
+使用同一 Qwen backbone 将一次 context forward 编码为固定长度 memory，再根据 question 生成答案。writer 收集配置层的 hidden states，用可学习的 softmax 层混合和 learned-query cross-attention 得到 `M` 个 memory embedding；短的 memory-only Qwen forward 将它们变成可复用的 per-layer KV。训练更新 LoRA、writer 和所启用的辅助模块；默认使用内置 StaticLoRA，可配置 PEFT。
 
 ## 三个运行命令
 
-先激活项目环境，执行 `pip install -e '.[train]'`，通过 `CUDA_VISIBLE_DEVICES` 选择 GPU。所有实验变体写在 YAML 中。
+先激活 `shine` 环境，执行 `pip install -e '.[train]'`，通过 `CUDA_VISIBLE_DEVICES` 选择 GPU。所有实验变体写在 YAML 中。
 
 ```bash
-bash scripts/train.sh --machine 4090 --config configs/4090/qwen-1.7b/baseline/train_baseline.yaml
+conda activate shine
+pip install -e '.[train]'
+bash scripts/train.sh --machine 4090 --config configs/train_baseline.yaml
 python -m utils.launcher test --machine 4090 --ckpt outputs/<run>/last.pt --datasets hotpotqa --bs 2
-python -m utils.launcher icl --machine h200 --model Qwen3-8B --config configs/4090/icl/icl_hotpotqa_4shot.yaml --bs 4
+python -m utils.launcher icl --machine h200 --model Qwen3-8B --datasets hotpotqa --config configs/icl_zeroshot.yaml --bs 4
 ```
+
+当前 Qwen3-1.7B snapshot 的 backbone window 是 40960；baseline 的 memory 长度为 64，数据加载默认只保留不超过 8192 tokenizer tokens 的输入 context（`data.max_input_context_length`），再由 `max_context_tokens` 控制实际 batch 截断上限。writer 的 context 计算仍是一次完整的 causal forward，时间和显存随 context 长度增长；固定 memory 是有损压缩，冒烟测试只验证形状、梯度和窗口边界，不代表问答质量已经得到验证。
+
+训练数据可以按比例混合 QA 与 Recon。每个 context 都能构造一条 QA 监督和一条生成完整 context 的 Recon 监督，任务通过自然语言 prompt 区分，不新增 special token：
+
+```yaml
+data:
+  train_tasks: mix
+  recon_ratio: 0.5
+```
+
+如果要先训练 Recon 再训练 QA，第二阶段使用 `--init-from` 加载第一阶段模型参数；该选项会重新开始 optimizer、scheduler、step 和随机状态。
 
 `<run>` 替换为实际运行目录。test 默认恢复 checkpoint 配置；HotpotQA 预设使用带答案的 validation split。完整参数、机器路径与 batch 语义见[运行指南](docs/guides/RUNNING.md)。
 

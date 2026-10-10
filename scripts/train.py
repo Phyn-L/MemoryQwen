@@ -9,9 +9,9 @@ from tqdm.auto import tqdm
 
 from utils.config import TrainConfig, dtype_from_name
 from utils.machines import machine_names
-from src.data import SortishSampler
+from src.data import SortishSampler, TrainingTaskDataset
 from src.evaluator import Evaluator
-from src.losses import objective_total, qa_loss
+from src.losses import objective_total, supervision_objectives
 from src.model import load_model
 from src.metrics import METRIC_KEYS
 from src.pipeline import (
@@ -36,8 +36,8 @@ ANSWER_METRIC_KEYS = (*METRIC_KEYS, "first_token_em")
 LOSS_KEYS = (
     "loss",
     "qa_loss",
+    "recon_loss",
     "ppl",
-    "embedding_recon_loss",
     "token_recon_loss",
     "causal_recon_loss",
     "distill_loss",
@@ -150,10 +150,15 @@ def main() -> None:
         "come from the MACHINE environment variable or, failing that, the hostname.",
     )
     parser.add_argument("--resume")
+    parser.add_argument("--init-from", help="Initialize model weights only; start a new optimizer, schedule and run.")
     parser.add_argument("--wandb-run-id")
     args = parser.parse_args()
 
     cfg = TrainConfig.from_file(args.config, machine=args.machine)
+    if args.init_from:
+        cfg.checkpoint.init_from = str(Path(args.init_from).resolve())
+    if args.resume and cfg.checkpoint.init_from:
+        parser.error("--resume and checkpoint.init_from/--init-from are mutually exclusive")
     cfg.validate()
     seed_everything(cfg.training.seed, deterministic=cfg.training.deterministic)
     tokenizer, model = load_model(cfg)
@@ -180,13 +185,16 @@ def main() -> None:
     _configure_run_paths(cfg, accelerator, args.resume)
     cache_dir = model_cache_dir(cfg.model.name_or_path)
 
-    train_collate = make_collate(cfg, tokenizer, sample_qa=True)
-    train_dataset = make_context_dataset(
+    train_context_dataset = make_context_dataset(
         cfg,
         "train",
         tokenizer,
         limit=resolve_split_limit(cfg, "train"),
     )
+    train_dataset = TrainingTaskDataset(
+        train_context_dataset, cfg.data.train_tasks, cfg.data.recon_ratio,
+    )
+    train_collate = make_collate(cfg, tokenizer, sample_qa=True, training=True)
     sampler = SortishSampler(
         train_dataset,
         tokenizer,
@@ -257,6 +265,11 @@ def main() -> None:
             flush=True,
         )
     manager = CheckpointManager(cfg.checkpoint.output_dir)
+    if cfg.checkpoint.init_from and not args.resume:
+        # Use a separate manager so phase-one selection metadata and RNG do not leak.
+        CheckpointManager(cfg.checkpoint.output_dir).load(
+            cfg.checkpoint.init_from, model, restore_rng=False,
+        )
 
     step = 0
     if args.resume:
@@ -352,11 +365,12 @@ def main() -> None:
                 ids["qa_context_indices"],
                 context_ids=ids["context_ids"],
                 objective_config=cfg.memory,
+                loss_only=True,
             )
-            qa = qa_loss(output.logits, output.labels)
-            terms = output.objective_terms
-            total = objective_total(qa, terms, cfg.memory)
-            terms = {**terms, "qa_loss": qa, "loss": total}
+            supervised, task_terms = supervision_objectives(output.supervision_losses, ids["task_ids"], cfg.memory)
+            auxiliary_terms = output.objective_terms or {}
+            total = supervised + objective_total(supervised * 0, auxiliary_terms, cfg.memory)
+            terms = {**auxiliary_terms, **task_terms, "loss": total}
             if accelerator is not None:
                 accelerator.backward(total)
             else:
@@ -372,7 +386,8 @@ def main() -> None:
             progress.update(1)
             progress.set_postfix(
                 loss=f"{float(total.detach()):.4f}",
-                qa=f"{float(qa.detach()):.4f}",
+                qa=f"{float(terms['qa_loss'].detach()):.4f}",
+                recon=f"{float(terms['recon_loss'].detach()):.4f}",
                 token_recon=f"{float(terms['token_recon_loss'].detach()):.4f}",
                 distill=f"{float(terms['distill_loss'].detach()):.4f}",
             )
@@ -386,6 +401,9 @@ def main() -> None:
                     {
                         **{f"train/{k}": float(v.detach()) for k, v in terms.items()},
                         "train/lr": float(scheduler.get_last_lr()[0]),
+                        "train/recon_rows": int(ids["task_ids"].eq(1).sum()),
+                        "train/qa_rows": int(ids["task_ids"].eq(0).sum()),
+                        "train/supervised_tokens": int(ids["labels"].ne(-100).sum()),
                     },
                     step=step,
                 )

@@ -230,7 +230,7 @@ def test_teacher_hidden_is_aligned_and_distillation_trains_the_memory():
     )
     assert torch.isfinite(loss)
     loss.backward()
-    assert model.memory_tokens.grad is not None and model.memory_tokens.grad.abs().sum() > 0
+    assert model.context_resampler.latents.grad is not None and model.context_resampler.latents.grad.abs().sum() > 0
 
 
 def test_teacher_hidden_is_absent_when_the_autoencoding_branch_is_off():

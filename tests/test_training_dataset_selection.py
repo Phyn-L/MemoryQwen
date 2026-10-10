@@ -15,7 +15,8 @@ def test_hotpotqa_excluded_only_from_implicit_training(tmp_path, monkeypatch, sp
     for name in ('hotpotqa', 'squad'):
         (tmp_path / name).mkdir()
     data = SimpleNamespace(root=str(tmp_path), dataset='all', cache_dataset=False,
-                           max_context_tokens=1024, filter_long_context=True, filter_no_qa=True)
+                           max_context_tokens=1024, max_input_context_length=8192,
+                           filter_long_context=True, filter_no_qa=True)
     setattr(data, f'{split}_datasets', selection)
     setattr(data, f'{split}_split', split)
     cfg = SimpleNamespace(data=data)

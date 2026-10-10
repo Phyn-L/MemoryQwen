@@ -71,7 +71,6 @@ base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
 # with 256 positions and entropy weighting disabled. Other objectives are off.
 base.setdefault("memory", {}).update(
     qa_weight=1.0,
-    embedding_recon_weight=0.0,
     token_recon_weight=1.0,
     causal_recon_weight=0.0,
     distill_weight=0.0,

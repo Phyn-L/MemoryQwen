@@ -66,7 +66,6 @@ config = copy.deepcopy(yaml.safe_load(base_path.read_text(encoding="utf-8")))
 
 # Best observed AR configuration: QA + distribution distillation only.
 config.setdefault("memory", {}).update(
-    embedding_recon_weight=0.0,
     token_recon_weight=0.0,
     causal_recon_weight=0.0,
     distill_weight=0.3,

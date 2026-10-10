@@ -4,7 +4,7 @@ import hashlib
 import json
 import os
 import random
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +49,7 @@ class ContextRecord:
     dataset: str = ""
     context_id: str = ""
     context_token_length: int | None = None
+    task: str = "qa"
 
 
 def render_question(tokenizer, question: str, use_chat_template: bool = False, enable_thinking: bool = False, system_prompt: str | None = None) -> str:
@@ -80,12 +81,14 @@ def _answers(qa: dict[str, Any]) -> tuple[str, ...]:
 class AggregatedContextDataset(Dataset):
     """Context-level dataset: one source JSONL row becomes one item."""
 
-    def __init__(self, root, dataset="all", split="train", tokenizer=None, max_context_tokens=2048, max_samples=None, filter_long_context=True, filter_no_qa=True, allow_empty=False, cache_dir=None, source_version=None, max_context_rows=None, qa_per_context=None, context_shuffle_seed=42):
+    def __init__(self, root, dataset="all", split="train", tokenizer=None, max_context_tokens=2048, max_samples=None, filter_long_context=True, filter_no_qa=True, allow_empty=False, cache_dir=None, source_version=None, max_context_rows=None, qa_per_context=None, context_shuffle_seed=42, max_input_context_length=8192):
+        if max_input_context_length <= 0:
+            raise ValueError("max_input_context_length must be positive")
         root = Path(root)
         names = [p.name for p in sorted(root.iterdir()) if p.is_dir()] if dataset in (None, "all") else ([dataset] if isinstance(dataset, str) else list(dataset))
         files = [(name, root / name / f"{split}.jsonl") for name in names]
         files = [(name, path) for name, path in files if path.exists()]
-        metadata = dataset_cache.build_metadata(files, split=split, max_context_tokens=max_context_tokens, filter_long_context=filter_long_context, filter_no_qa=filter_no_qa)
+        metadata = dataset_cache.build_metadata(files, split=split, max_context_tokens=max_input_context_length, filter_long_context=filter_long_context, filter_no_qa=filter_no_qa, tokenizer=tokenizer)
         self.source_version = source_version
         if source_version:
             import hashlib
@@ -94,9 +97,9 @@ class AggregatedContextDataset(Dataset):
         self.cache_metadata = {"root": str(root.resolve()), "datasets": names, "max_samples": max_samples, "filter": metadata}
         split_dir = Path(cache_dir) / dataset_cache.CACHE_DIR_NAME / f"{split}-{metadata['fingerprint'][:16]}" if cache_dir is not None else None
         if split_dir is not None:
-            rows = dataset_cache.cached_load(split_dir, metadata, lambda: self._build_records(files, tokenizer, max_context_tokens, filter_long_context, filter_no_qa), verbose=_progress_enabled())
+            rows = dataset_cache.cached_load(split_dir, metadata, lambda: self._build_records(files, tokenizer, max_input_context_length, filter_long_context, filter_no_qa), verbose=_progress_enabled())
         else:
-            rows = self._build_records(files, tokenizer, max_context_tokens, filter_long_context, filter_no_qa)
+            rows = self._build_records(files, tokenizer, max_input_context_length, filter_long_context, filter_no_qa)
         if max_samples is not None:
             rows = rows.select(range(min(max_samples, len(rows))))
         if max_context_rows is not None or qa_per_context is not None:
@@ -131,11 +134,7 @@ class AggregatedContextDataset(Dataset):
                     if filter_long_context and tokenizer is not None:
                         ids = tokenizer(context, add_special_tokens=False, truncation=True, max_length=max_context_tokens + 1).input_ids
                         if not ids:
-                            # A non-empty string that tokenizes to nothing would give this
-                            # row an all-False context_mask, i.e. memory query rows with no
-                            # key at all to attend to. build_block_causal_mask stays finite
-                            # in that case (it writes finfo.min, see the note there) but the
-                            # sample is meaningless, so drop it like an empty context.
+                            # Resampler queries need at least one valid context key.
                             empty_context += 1
                             continue
                         if len(ids) > max_context_tokens:
@@ -153,7 +152,7 @@ class AggregatedContextDataset(Dataset):
                                 question, answers[0], name, str(row.get("context_id", "")), answers,
                                 str((qa.get("metadata") or {}).get("answer_letter", "")).strip().upper(),
                             ))
-                    if pairs:
+                    if pairs or not filter_no_qa:
                         records.append(ContextRecord(context, tuple(pairs), name, str(row.get("context_id", ""))))
                     else:
                         dropped_no_qa += 1
@@ -190,6 +189,50 @@ class AggregatedContextDataset(Dataset):
         return ContextRecord(str(row["context"]), pairs, str(row.get("dataset", "")), str(row.get("context_id", "")))
 
 
+class TrainingTaskDataset(Dataset):
+    """One QA and one Recon candidate per context; the sampler controls their ratio.
+
+    A mixed candidate pool has two supervision rows per context. The sampler chooses
+    ``len(source)`` rows at the requested ratio, so a mixed epoch has the same context
+    scale as a pure task run while retaining one independently constructed QA and Recon
+    candidate.
+    """
+
+    def __init__(self, dataset, mode="mix", recon_ratio=0.5):
+        if mode not in {"mix", "qa", "recon"} or not 0 <= recon_ratio <= 1:
+            raise ValueError("invalid training task mixture")
+        self.source, self.mode, self.recon_ratio = dataset, mode, recon_ratio
+        self.cache_metadata = {
+            "source": dataset.cache_metadata, "mode": mode, "recon_ratio": recon_ratio,
+        }
+
+    def __len__(self):
+        return len(self.source) * (2 if self.mode == "mix" else 1)
+
+    def __getitem__(self, index):
+        if self.mode == "mix":
+            context_index, task = divmod(index, 2)
+            return replace(self.source[context_index], task="recon" if task else "qa")
+        return replace(self.source[index], task=self.mode)
+
+    def sample_indices(self, seed):
+        if self.mode != "mix":
+            return list(range(len(self)))
+        rng = random.Random(seed)
+        target_count = len(self.source)
+        recon_count = round(target_count * self.recon_ratio)
+        counts = (target_count - recon_count, recon_count)
+        selected = []
+        for task, count in enumerate(counts):
+            pool = list(range(task, len(self), 2))
+            while count:
+                rng.shuffle(pool)
+                take = min(count, len(pool))
+                selected.extend(pool[:take])
+                count -= take
+        return selected
+
+
 class SortishSampler(Sampler[int]):
     CACHE_VERSION = 3
 
@@ -221,13 +264,14 @@ class SortishSampler(Sampler[int]):
             lengths = self._build_lengths(tokenizer, use_chat_template, enable_thinking); tmp = path.with_suffix(".tmp"); tmp.write_text(json.dumps({"metadata": metadata, "lengths": lengths})); os.replace(tmp, path); return lengths
 
     def _rebuild(self):
-        size = max(self.batch_size, self.batch_size * self.bucket_multiplier); order = sorted(range(len(self.lengths)), key=self.lengths.__getitem__); self.buckets = []
+        indices = self.dataset.sample_indices(self.seed + self.epoch) if isinstance(self.dataset, TrainingTaskDataset) else range(len(self.lengths))
+        size = max(self.batch_size, self.batch_size * self.bucket_multiplier); order = sorted(indices, key=self.lengths.__getitem__); self.buckets = []
         for i in range(0, len(order), size):
             bucket = order[i:i + size]; random.Random(self.seed + i + self.epoch).shuffle(bucket); self.buckets.extend(bucket[j:j + self.batch_size] for j in range(0, len(bucket), self.batch_size))
 
     def __iter__(self):
         batches = list(self.buckets); random.Random(self.seed + self.epoch).shuffle(batches); return iter([i for batch in batches for i in batch])
-    def __len__(self): return len(self.dataset)
+    def __len__(self): return sum(len(batch) for batch in self.buckets)
     def set_epoch(self, epoch): self.epoch = epoch; self._rebuild()
 
 
@@ -241,7 +285,7 @@ def _encode(tokenizer, texts, max_length, padding_side=None):
         tokenizer.padding_side = previous
 
 
-def collate_context_records(rows, tokenizer, max_context_tokens=2048, max_question_tokens=128, max_answer_tokens=128, append_eos=True, use_chat_template=False, chat_template_enable_thinking=False, qa_per_context=4, sample_qa=True, question_padding_side="right", eos_mode="overwrite", system_prompt_mode="none", source_version=None):
+def collate_context_records(rows, tokenizer, max_context_tokens=2048, max_question_tokens=128, max_answer_tokens=128, append_eos=True, use_chat_template=False, chat_template_enable_thinking=False, qa_per_context=4, sample_qa=True, question_padding_side="right", eos_mode="overwrite", system_prompt_mode="none", source_version=None, training=False, qa_prompt="", recon_prompt="Reconstruct the original context from memory."):
     from .icl_baseline import system_prompt_for
     if system_prompt_mode not in ("none", "context", "separate"):
         raise ValueError("system_prompt_mode must be none, context, or separate")
@@ -257,25 +301,64 @@ def collate_context_records(rows, tokenizer, max_context_tokens=2048, max_questi
         c = _encode(tokenizer, contexts, max_context_tokens)
     sampled, mapping = [], []
     for i, record in enumerate(rows):
-        chosen = random.sample(record.qa_pairs, min(qa_per_context, len(record.qa_pairs))) if sample_qa else list(record.qa_pairs)
+        if training and record.task == "recon":
+            chosen = [QARecord(recon_prompt, record.context, record.dataset, record.context_id)]
+        elif training:
+            if not record.qa_pairs:
+                raise ValueError("QA training requires a usable question/answer pair")
+            chosen = [random.choice(record.qa_pairs)]
+        else:
+            chosen = random.sample(record.qa_pairs, min(qa_per_context, len(record.qa_pairs))) if sample_qa else list(record.qa_pairs)
         sampled.extend(chosen); mapping.extend([i] * len(chosen))
     if not sampled:
         raise ValueError("context batch contains no QA pairs")
+    task_ids = [int(training and rows[index].task == "recon") for index in mapping]
+    # Keep task instructions and chat delimiters outside the raw-question budget.
+    raw_questions = []
+    for question, task in zip(sampled, task_ids):
+        if task:
+            raw_questions.append(recon_prompt)
+        elif qa_prompt:
+            ids = tokenizer(
+                question.question, truncation=True, max_length=max_question_tokens,
+                add_special_tokens=False,
+            ).input_ids
+            raw_questions.append(qa_prompt + tokenizer.decode(ids, skip_special_tokens=False))
+        else:
+            raw_questions.append(question.question)
     if system_prompt_mode == "separate":
-        questions = [render_question(tokenizer, q.question, True, False, prompts[index]) for q, index in zip(sampled, mapping)]
+        questions = [render_question(tokenizer, question, True, False, prompts[index]) for question, index in zip(raw_questions, mapping)]
         # Account for the complete system message and chat delimiters separately.
         overhead = max(
             len(tokenizer(text, add_special_tokens=False).input_ids)
-            - len(tokenizer(record.question, add_special_tokens=False).input_ids)
-            for text, record in zip(questions, sampled)
+            - len(tokenizer(question, add_special_tokens=False).input_ids)
+            for text, question in zip(questions, raw_questions)
         )
         question_limit = max_question_tokens + max(0, overhead)
+        if qa_prompt:
+            question_limit = max(len(tokenizer(text, add_special_tokens=False).input_ids) for text in questions)
         if any(len(tokenizer(text, add_special_tokens=False).input_ids) > question_limit for text in questions):
             raise ValueError("Question exceeds max_question_tokens; increase the limit to preserve the system message and chat delimiters")
     else:
-        questions = [render_question(tokenizer, q.question, use_chat_template, chat_template_enable_thinking) for q in sampled]
-        question_limit = max_question_tokens
-    q = _encode(tokenizer, questions, question_limit, padding_side=question_padding_side); a = _encode(tokenizer, [x.answer for x in sampled], max_answer_tokens)
+        questions = [render_question(tokenizer, question, use_chat_template, chat_template_enable_thinking) for question in raw_questions]
+        question_limit = max(len(tokenizer(text, add_special_tokens=False).input_ids) for text in questions) if qa_prompt else max_question_tokens
+    q = _encode(tokenizer, questions, question_limit, padding_side=question_padding_side)
+    if training:
+        answer_rows = [
+            tokenizer(record.answer, truncation=True, max_length=max_context_tokens, add_special_tokens=False).input_ids
+            if task else tokenizer(record.answer, truncation=True, max_length=max_answer_tokens, add_special_tokens=False).input_ids
+            for record, index, task in zip(sampled, mapping, task_ids)
+        ]
+        # Recon targets are the exact tokens encoded into memory, including token 0.
+        # They must never be clipped by the short QA-answer budget.
+        previous = tokenizer.padding_side
+        tokenizer.padding_side = "right"
+        try:
+            a = tokenizer.pad({"input_ids": answer_rows}, padding=True, return_tensors="pt")
+        finally:
+            tokenizer.padding_side = previous
+    else:
+        a = _encode(tokenizer, [x.answer for x in sampled], max_answer_tokens)
     if append_eos and getattr(tokenizer, "eos_token_id", None) is not None:
         eos = int(tokenizer.eos_token_id)
         if eos_mode == "append":
@@ -299,7 +382,10 @@ def collate_context_records(rows, tokenizer, max_context_tokens=2048, max_questi
                 if valid < a.input_ids.size(1): a.input_ids[i, valid] = eos; a.attention_mask[i, valid] = True
                 elif valid: a.input_ids[i, valid - 1] = eos
     labels = torch.full_like(a.input_ids, -100); labels[a.attention_mask.bool()] = a.input_ids[a.attention_mask.bool()]
-    return {"context_ids": c.input_ids, "context_mask": c.attention_mask.bool(), "question_ids": q.input_ids, "question_mask": q.attention_mask.bool(), "answer_ids": a.input_ids, "answer_mask": a.attention_mask.bool(), "labels": labels, "qa_context_indices": torch.tensor(mapping, dtype=torch.long), "records": sampled}
+    batch = {"context_ids": c.input_ids, "context_mask": c.attention_mask.bool(), "question_ids": q.input_ids, "question_mask": q.attention_mask.bool(), "answer_ids": a.input_ids, "answer_mask": a.attention_mask.bool(), "labels": labels, "qa_context_indices": torch.tensor(mapping, dtype=torch.long), "records": sampled}
+    if training:
+        batch["task_ids"] = torch.tensor(task_ids, dtype=torch.long)
+    return batch
 
 
 # Public name for the collate. It used to be a pass-through wrapper that re-declared all

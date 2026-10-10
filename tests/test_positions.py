@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover - transformers is optional for the unit 
 VOCAB = 48
 CONTEXT_LENGTH = 6
 MEMORY_LENGTH = 2
-START = CONTEXT_LENGTH + MEMORY_LENGTH
+START = MEMORY_LENGTH
 
 
 class _Tokenizer:

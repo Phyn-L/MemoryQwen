@@ -48,7 +48,7 @@ class _FakeQwen(nn.Module):
         self.blocks = nn.ModuleList(
             [nn.ModuleDict({"q_proj": nn.Linear(dim, dim, bias=False)}) for _ in range(layers)]
         )
-        self.config = SimpleNamespace(hidden_size=dim, num_hidden_layers=layers)
+        self.config = SimpleNamespace(hidden_size=dim, num_hidden_layers=layers, max_position_embeddings=128)
 
     def get_input_embeddings(self):
         return self.embed

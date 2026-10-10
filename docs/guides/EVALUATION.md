@@ -167,7 +167,6 @@ here -- the current file is the one every recorded run used:
 
 以下定义取代本文历史 `reconstruction_loss`/`ae_loss` 字段：
 
-- `val_teacher_forced/embedding_recon_loss`：MemoryDecoder 输出与原文输入 embedding 的 MSE/cosine/MSE+cosine。
 - `val_teacher_forced/memory_token_recon_loss`：MemoryDecoder 从 memory hidden states 和位置查询预测原文 token 的 CE。
 - `val_teacher_forced/prefix_kv_recon_loss`：原 AE，Qwen 使用 memory KV 和真实原文前缀预测下一 token 的 CE。
 - `val_teacher_forced/distill_loss`：同一 prefix-KV student 的 KL 蒸馏。

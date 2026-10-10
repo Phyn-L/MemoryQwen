@@ -13,7 +13,7 @@ def test_reconstruction_preserves_prefix():
                       num_key_value_heads=2, head_dim=8)
     model = MetaLoRA(Qwen3ForCausalLM(cfg).to(dtype=dtype), memory_length=4,
                      rank=2, decoder_hidden_size=8, decoder_heads=2,
-                     max_context_tokens=12, embedding_recon=False, ae_lm=True).to(device)
+                     max_context_tokens=12, ae_lm=True).to(device)
     embed = model.qwen.get_input_embeddings()
     context = torch.randint(2,128,(2,12),device=device)
     question = torch.randint(2,128,(4,5),device=device)
@@ -37,7 +37,7 @@ def test_reconstruction_preserves_prefix():
                 torch.testing.assert_close(output.logits, baseline.logits)
             if training:
                 (output.logits.float().square().mean() + recon.float().square().mean()).backward()
-                assert model.memory_tokens.grad is not None
-                assert torch.isfinite(model.memory_tokens.grad).all()
-                assert model.memory_tokens.grad.abs().sum() > 0
+                assert model.context_resampler.latents.grad is not None
+                assert torch.isfinite(model.context_resampler.latents.grad).all()
+                assert model.context_resampler.latents.grad.abs().sum() > 0
     print(f'cache isolation, repeated QA and backward passed on {device}, {dtype}')

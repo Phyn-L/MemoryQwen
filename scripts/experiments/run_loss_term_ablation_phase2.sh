@@ -13,7 +13,7 @@ MACHINE=${MACHINE:-4090}
 NUM_PROCESSES=${NUM_PROCESSES:-}
 DRY_RUN=0
 
-RUNS=(05_full_no_embedding 06_qa_only_true 07_token_only 08_causal_only 09_distill_only)
+RUNS=(05_full_recon 06_qa_only_true 07_token_only 08_causal_only 09_distill_only)
 
 usage() {
   echo "Usage: $0 [--base-config PATH] [--output-root PATH] [--machine NAME] [--num-processes N] [--dry-run]"
@@ -61,34 +61,29 @@ base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
 
 # Keep the experiment controlled: only the loss weights differ across runs.
 runs = {
-    # Full auxiliary combination, with embedding reconstruction explicitly off.
-    "05_full_no_embedding": {
-        "embedding_recon_weight": 0.0,
+    # Full auxiliary combination, with embedding reconstruction removed.
+    "05_full_recon": {
         "token_recon_weight": 1.0,
         "causal_recon_weight": 1.0,
         "distill_weight": 0.3,
     },
     # True QA-only baseline: all auxiliary objectives are disabled.
     "06_qa_only_true": {
-        "embedding_recon_weight": 0.0,
         "token_recon_weight": 0.0,
         "causal_recon_weight": 0.0,
         "distill_weight": 0.0,
     },
     "07_token_only": {
-        "embedding_recon_weight": 0.0,
         "token_recon_weight": 1.0,
         "causal_recon_weight": 0.0,
         "distill_weight": 0.0,
     },
     "08_causal_only": {
-        "embedding_recon_weight": 0.0,
         "token_recon_weight": 0.0,
         "causal_recon_weight": 1.0,
         "distill_weight": 0.0,
     },
     "09_distill_only": {
-        "embedding_recon_weight": 0.0,
         "token_recon_weight": 0.0,
         "causal_recon_weight": 0.0,
         "distill_weight": 0.3,

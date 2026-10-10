@@ -10,12 +10,33 @@ export CUDA_VISIBLE_DEVICES=0,1,2,3
 ## 1. train.sh
 
 ```bash
-bash scripts/train.sh --machine 4090 --config configs/4090/qwen-1.7b/baseline/train_baseline.yaml
-bash scripts/train.sh --machine h200 --config configs/4090/qwen-1.7b/memory_length/train_reader-on_ctx1024_m32.yaml
-bash scripts/train.sh --machine h200 --config configs/4090/qwen-8b/reader/train_reader-on_ctx1024_m64.yaml --resume outputs/<run>/last.pt
+bash scripts/train.sh --machine 4090 --config configs/train_baseline.yaml
+bash scripts/train.sh --machine h200 --config configs/train_baseline.yaml
+bash scripts/train.sh --machine h200 --config configs/train_baseline.yaml --resume outputs/<run>/last.pt
 ```
 
 学习率、batch size、数据集、memory 大小、reader 开关、dtype、调度、日志和 checkpoint 路径均来自完整训练 YAML。恢复训练必须使用与原运行相符的配置。`<run>` 替换为实际路径。
+
+训练任务组合由 YAML 控制：
+
+```yaml
+data:
+  train_tasks: mix
+  recon_ratio: 0.5
+  max_input_context_length: 8192
+```
+
+`train_tasks: qa` 和 `train_tasks: recon` 分别执行单任务训练；`mix` 按 `recon_ratio` 选择 Recon 样本。任务类型通过 `qa_prompt` / `recon_prompt` 区分，不需要向 tokenizer 添加 special token。
+
+两阶段训练使用 `--init-from`：
+
+```bash
+bash scripts/train.sh --machine 4090 --config configs/train_recon.yaml
+bash scripts/train.sh --machine 4090 --config configs/train_qa.yaml \
+  --init-from outputs/<recon-run>/last.pt
+```
+
+`--init-from` 只加载模型的 trainable tensors，不恢复 optimizer、scheduler、global step、W&B run ID 或随机状态；`--resume` 才是同一运行的完整续训。
 
 默认每张可见 GPU 一个进程；Python launcher 使用当前解释器的 torchrun，训练代码依据 YAML dtype 初始化 Accelerator。不再在 shell 固定 bf16 或实验超参数。旧 `CONFIG=...`、`MACHINE=...` 和 `NUM_PROCESSES=...` 命令仍可用；新命令推荐通过 CUDA_VISIBLE_DEVICES 选择 GPU。
 
@@ -23,7 +44,7 @@ bash scripts/train.sh --machine h200 --config configs/4090/qwen-8b/reader/train_
 
 ```bash
 python -m utils.launcher test --machine 4090 --ckpt outputs/<run>/last.pt --datasets hotpotqa --bs 2
-python -m utils.launcher test --machine h200 --ckpt outputs/<run>/last.pt --config configs/4090/evaluation/test_hotpotqa.yaml --bs 4
+python -m utils.launcher test --machine h200 --ckpt outputs/<run>/last.pt --config configs/test.yaml --bs 4
 python -m utils.launcher test --machine 4090 --ckpt outputs/<run>/last.pt --datasets squad hotpotqa --split validation --bs 2
 ```
 
@@ -36,12 +57,11 @@ python -m utils.launcher test --machine 4090 --ckpt outputs/<run>/last.pt --data
 ## 3. 独立 ICL evaluator
 
 ```bash
-python -m utils.launcher icl --machine 4090 --model Qwen3-1.7B --config configs/4090/icl/icl_hotpotqa_4shot.yaml --bs 2
-python -m utils.launcher icl --machine h200 --model Qwen3-8B --datasets hotpotqa --config configs/4090/icl/icl_hotpotqa_0shot.yaml --bs 4
-python -m utils.launcher icl --machine 4090 --model Qwen3-4B-Instruct-2507 --config configs/4090/icl/icl_squad_4shot.yaml
+python -m utils.launcher icl --machine 4090 --model Qwen3-1.7B --config configs/icl_zeroshot.yaml --bs 2
+python -m utils.launcher icl --machine h200 --model Qwen3-8B --datasets hotpotqa --config configs/icl_zeroshot.yaml --bs 4
 ```
 
-`icl_test.sh` 是同一入口的简短别名。未传 `--config` 时使用 `configs/4090/icl/icl_squad_4shot.yaml`。shot 数、生成长度、输入长度、dtype、seed、chat template、数据 split 和输出目录均写入 ICL YAML；模型、数据集和 batch size 可由 CLI 覆盖。ICL 的 bs 是每 GPU 的 QA 数。
+shot 数、生成长度、输入长度、dtype、seed、chat template、数据 split 和输出目录均写入 ICL YAML；模型、数据集和 batch size 可由 CLI 覆盖。ICL 的 bs 是每 GPU 的 QA 数。
 
 模型名在当前机器 MODEL_ROOT 中匹配普通模型目录或 Hugging Face `models--Qwen--<模型名>` 缓存目录；优先 `refs/main`，无 ref 时要求仅有一个 snapshot。支持本地已有的 Qwen family 名称（大小写不敏感）和完整路径，不自动下载、不任意选择多个 revision 中的一个。实际架构兼容性仍取决于安装的 transformers 版本。
 
@@ -56,7 +76,7 @@ python -m utils.launcher icl --machine 4090 --model Qwen3-4B-Instruct-2507 --con
 
 所有数据采用 `<DATA_ROOT>/<dataset>/<split>.jsonl` 的 aggregated schema：每行 context + qa_pairs；HotpotQA 名称为 `hotpotqa`。当前本地 HotpotQA train/validation 有标注，test 为空，两类预设均使用 validation。ICL demonstrations 只从 train 取。
 
-两条路径均使用现有答案评分，不计算 supporting-fact/joint 指标。memory 会按 checkpoint 的 context 长度规则过滤；ICL 的对应限制写在 YAML 的 `data.max_context_tokens`，默认 null。公平比较时需对齐这个限制与样本集合，不能只对齐 bs。
+两条路径均使用现有答案评分，不计算 supporting-fact/joint 指标。训练 memory 数据先按 `data.max_input_context_length` 过滤，再按 `data.max_context_tokens` 截断；ICL 的对应限制写在 YAML 的 `data.max_context_tokens`，默认 null。公平比较时需对齐这个限制与样本集合，不能只对齐 bs。
 
 更多变体与旧名映射见[配置索引](../../configs/README.md)。原 A/B、8B、队列和 SQuAD 专用脚本暂作历史兼容工具；日常运行使用上述三个入口，不再新增专用变体 shell。旧脚本具有各自历史默认值，不等同于新预设。
 

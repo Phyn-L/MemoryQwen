@@ -101,9 +101,9 @@ def test_a_fresh_run_nests_its_directory_under_the_configured_output_dir():
 
     train = _train_module()
     config = TrainConfig.from_file(REPO / "configs/train_baseline.yaml")
+    output_root = Path(config.checkpoint.output_dir)
     train._configure_run_paths(config, None, None)
-    assert config.checkpoint.output_dir.startswith("outputs/ab_h200_on/")
-    assert config.checkpoint.output_dir.count("/") == 2, config.checkpoint.output_dir
+    assert Path(config.checkpoint.output_dir).parent == output_root
     assert config.logging.wandb_run_name in config.checkpoint.output_dir
 
     # Resuming keeps the checkpoint's own directory instead of making a new one.
@@ -118,7 +118,7 @@ def test_a_fresh_run_nests_its_directory_under_the_configured_output_dir():
 
 def test_the_training_loop_honours_the_resumed_position_and_the_step_budget():
     source = TRAIN_PY.read_text(encoding="utf-8")
-    assert "resume_plan(step, effective_loader_len, cfg.training.epochs)" in source
+    assert "resume_plan(step,effective_loader_len,cfg.training.epochs)" in "".join(source.split())
     assert "for epoch in range(start_epoch, cfg.training.epochs)" in source
     assert "batch_index < skip_batches" in source
     assert "if step >= total_steps:" in source, (

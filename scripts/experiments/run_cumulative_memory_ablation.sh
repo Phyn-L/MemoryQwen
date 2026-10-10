@@ -55,9 +55,9 @@ base_path = Path(os.environ["BASE_CONFIG"])
 out_root = Path(os.environ["OUTPUT_ROOT"])
 base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
 
-# Shape and slot attention are fixed for all three independent runs.
+# Context and memory lengths are fixed for all three independent runs.
 base.setdefault("data", {})["max_context_tokens"] = 1024
-base.setdefault("memory", {}).update(memory_length=64, slot_attention="causal")
+base.setdefault("memory", {}).update(memory_length=64)
 resolved = TrainConfig.from_dict(base)
 targets = list(resolved.model.target_modules)
 if not targets:
@@ -66,7 +66,7 @@ reader_length = resolved.memory.readout_length
 if reader_length <= 0:
     raise SystemExit("base config must specify positive memory.readout_length for reader arm")
 runs = {
-    "04_bidirectional": {"model": {"target_modules": targets}, "memory": {"slot_attention": "bidirectional"}},
+    "04_multilayer": {"model": {"target_modules": targets}, "memory": {"context_layer_indices": [-1, -8, -16]}},
     "05_reader_len_16": {"model": {"target_modules": targets}, "memory": {"readout_length": 16}},
     "06_reader_len16_layer4": {"model": {"target_modules": targets}, "memory": {"readout_length": 16, "readout_layers": 4}},
 }

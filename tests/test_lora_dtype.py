@@ -145,7 +145,7 @@ class _FakeQwen(nn.Module):
         self.blocks = nn.ModuleList(
             [nn.ModuleDict({"q_proj": nn.Linear(dim, dim, bias=False)}) for _ in range(layers)]
         )
-        self.config = SimpleNamespace(hidden_size=dim, num_hidden_layers=layers)
+        self.config = SimpleNamespace(hidden_size=dim, num_hidden_layers=layers, max_position_embeddings=128)
 
     def get_input_embeddings(self):
         return self.embed
@@ -186,7 +186,7 @@ def test_trainable_parameters_are_fp32_and_flagged():
     assert trainable, "no trainable parameters found"
     assert all(is_trainable_parameter_name(name) for name in trainable)
     assert any("lora_A" in name for name in trainable)
-    assert "memory_tokens" in trainable
+    assert "context_resampler.latents" in trainable
     assert any(name.startswith("decoders.") for name in trainable)
 
 
@@ -211,7 +211,8 @@ def test_use_peft_true_without_peft_raises_or_uses_peft():
         else:
             raise AssertionError("use_peft=True without peft installed must raise, not fall back silently")
     else:
-        model = _fake_metaloRA(use_peft=True)
+        from test_context_writer import tiny_model
+        model = tiny_model(use_peft=True)
         assert model.lora_backend == "peft"
 
 

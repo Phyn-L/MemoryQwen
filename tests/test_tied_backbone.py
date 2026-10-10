@@ -132,7 +132,7 @@ def test_tied_head_trains_end_to_end_on_a_real_backbone():
 
     adapter_grad = model.token_recon_head.adapter.weight.grad
     assert adapter_grad is not None and adapter_grad.abs().sum() > 0
-    assert model.memory_tokens.grad is not None and model.memory_tokens.grad.abs().sum() > 0
+    assert model.context_resampler.latents.grad is not None and model.context_resampler.latents.grad.abs().sum() > 0
     # The frozen backbone must not accumulate gradient.
     assert all(
         p.grad is None for p in model.qwen.parameters() if not p.requires_grad
@@ -162,13 +162,7 @@ def test_linear_and_tied_heads_train_and_differ():
     assert losses["linear_trainable"] - losses["tied_trainable"] == 1024 - 512
 
 
-def test_slot_attention_changes_the_encoder_pass_deterministically():
-    """``slot_attention`` must reach ``encode_context_prefix``, not just the model.
-
-    The rule itself is pinned by ``tests/test_masks.py``; here we check the plumbing on a
-    real backbone: with the flag off two calls agree bit for bit, and turning it on (which
-    lets slot k read slots <= k) changes the per-layer memory states.
-    """
+def test_context_content_changes_the_memory_deterministically():
     if Qwen3ForCausalLM is None:
         print("skip: transformers is not installed")
         return
@@ -177,27 +171,22 @@ def test_slot_attention_changes_the_encoder_pass_deterministically():
     embedding = model.qwen.get_input_embeddings()
     context = embedding(batch["context_ids"])
 
-    model.slot_attention = "isolated"
     off_first = model.encode_context_prefix(context, batch["context_mask"])
     off_second = model.encode_context_prefix(context, batch["context_mask"])
     assert torch.equal(off_first.layer_memory, off_second.layer_memory)
 
-    model.slot_attention = "causal"
-    on = model.encode_context_prefix(context, batch["context_mask"])
+    on = model.encode_context_prefix(context + torch.randn_like(context) * 0.1, batch["context_mask"])
     assert off_first.layer_memory.shape == on.layer_memory.shape
     assert not torch.allclose(off_first.layer_memory, on.layer_memory), (
-        "slot attention did not change the memory states"
+        "context content did not change the memory states"
     )
-    model.slot_attention = "bidirectional"
-    bidirectional = model.encode_context_prefix(context, batch["context_mask"])
-    assert not torch.allclose(on.layer_memory, bidirectional.layer_memory)
     model.zero_grad(set_to_none=True)
     _, qa, recon = _forward_losses(model, batch)
     (qa + recon).backward()
     assert torch.isfinite(qa + recon)
-    assert model.memory_tokens.grad is not None
-    assert torch.isfinite(model.memory_tokens.grad).all()
-    assert model.memory_tokens.grad.abs().sum() > 0
+    assert model.context_resampler.latents.grad is not None
+    assert torch.isfinite(model.context_resampler.latents.grad).all()
+    assert model.context_resampler.latents.grad.abs().sum() > 0
 
 
 if __name__ == "__main__":

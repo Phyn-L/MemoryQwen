@@ -7,7 +7,12 @@ data:
   filter_long_context: true
   filter_no_qa: true
   max_answer_tokens: 64
-  max_context_tokens: 1024
+  max_context_tokens: 40960
+  max_input_context_length: 8192
+  train_tasks: mix
+  recon_ratio: 0.5
+  qa_prompt: "Answer the question using the information in memory.\nQuestion: "
+  recon_prompt: "Reconstruct the original context from memory."
   max_question_tokens: 128
   qa_per_context: 4
   root: ${DATA_ROOT:-/data/lz/contexts/aggregated}
@@ -32,11 +37,14 @@ logging:
   wandb_mode: offline
   wandb_project: MemoryQwen
 memory:
-  # Memory slots and initialization
+  # Fixed-length context writer
   memory_length: 64
-  slot_attention: causal
-  init_mode: token_embed
-  init_seed: 0
+  context_layer_indices: [-1]
+  memory_resampler_layers: 2
+  memory_resampler_heads: 4
+  memory_resampler_hidden_size: 256
+  memory_resampler_ffn_ratio: 2
+  reader_memory_source: memory
 
   # Question-conditioned readout
   readout_length: 8
@@ -53,14 +61,10 @@ memory:
 
   # QA objective
   qa_weight: 1.0
-
-  # Embedding reconstruction
-  embedding_recon_weight: 0.0
-  embedding_recon_loss: mse_cosine
-  embedding_recon_cosine_weight: 0.5
+  recon_weight: 1.0
 
   # Token reconstruction
-  token_recon_weight: 1.0
+  token_recon_weight: 0.0
   token_recon_positions: 128
 
   # Causal reconstruction
@@ -68,12 +72,14 @@ memory:
   causal_recon_positions: 128
 
   # Distillation
-  distill_weight: 0.3
+  distill_weight: 0.0
   distill_positions: 128
   distill_temperature: 1.0
   distill_topk: 0
   distill_entropy_weight: true
 model:
+  attn_implementation: sdpa
+  context_gradient_checkpointing: true
   lora_alpha: 16.0
   lora_dropout: 0.0
   lora_rank: 8
@@ -96,8 +102,8 @@ scheduler:
   name: cosine
   warmup_steps: 200
 training:
-  batch_size: 10
+  batch_size: 1
   epochs: 1
   max_grad_norm: 1.0
   seed: 42
-  deterministic: true # Enable deterministic algorithms; may reduce performance.
+  deterministic: false

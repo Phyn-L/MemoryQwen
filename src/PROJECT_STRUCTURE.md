@@ -1,16 +1,16 @@
 # MemoryQwen `src` 项目结构与训练目标
 
-本文档按当前源码说明数据流、memory 的组成和五个训练 loss。配置字段以 `utils/config.py::MemoryConfig` 为准；实际运行时还要结合所选 YAML（例如 `configs/train_baseline.yaml`），因为 dataclass 默认值和实验配置可能不同。
+本文档按当前源码说明数据流、memory 的组成和训练目标。配置字段以 `utils/config.py` 的 `MemoryConfig`、`DataConfig` 为准；实际运行时还要结合所选 YAML（例如 `configs/train_baseline.yaml`），因为 dataclass 默认值和实验配置可能不同。
 
 ## 1. `src` 中各模块的职责
 
 | 文件 | 作用 |
 | --- | --- |
-| `data.py` | 读取聚合后的 JSONL，过滤/缓存 context，采样 QA，tokenize，并生成 batch。 |
+| `data.py` | 读取聚合后的 JSONL，按输入长度过滤/缓存 context，构造 QA/Recon 任务，tokenize，并生成 batch。 |
 | `dataset_cache.py` | Hugging Face Dataset 与 sortish 长度缓存；用文件指纹避免旧缓存误用。 |
 | `pipeline.py` | 根据配置创建 train/validation/test dataset、collator 和 sortish sampler。 |
-| `model.py` | 冻结 Qwen 主干，写入 memory slot，构造每层 memory KV，执行 QA、重构和蒸馏前向。 |
-| `MemoryDecoder.py` | 将每层 memory hidden 映射为 context embedding 或 token-reconstruction hidden。 |
+| `model.py` | 冻结 Qwen 主干，写入 memory slot，构造每层 memory KV，执行 QA、Recon、token reconstruction 和蒸馏前向。 |
+| `MemoryDecoder.py` | 将每层 memory hidden 映射为 memory-only token reconstruction hidden。 |
 | `resampler.py` | 可选的 question-conditioned readout，把 memory 变成插入 QA 序列的 R 个 latent。 |
 | `losses.py` | QA CE、embedding/token/causal reconstruction 和 KL distillation 的实现与加权求和。 |
 | `evaluator.py` | teacher-forced 与 autoregressive 评估，并记录每个 loss/指标。 |
@@ -22,7 +22,7 @@
 入口是 `pipeline.make_context_dataset()`，底层是 `AggregatedContextDataset`：
 
 1. 在 `data.root/<dataset>/<split>.jsonl` 查找文件；`dataset="all"` 时读取所有子目录。
-2. 每行读取 `context` 和 `qa_pairs`。空 context、超过 `max_context_tokens` 的 context，或没有有效 question/answer 的行会被过滤。
+2. 每行读取 `context` 和 `qa_pairs`。空 context、超过 `data.max_input_context_length` 的 context，或没有有效 question/answer 的行会被过滤；纯 Recon 训练允许没有 QA 的 context。
 3. 一个 JSONL 行对应一个 `ContextRecord`，其中包含一个 context 和多个 `QARecord`。所有非空 `answers` 会保留；训练使用第一个答案，评估可使用全部 reference。
 4. 可选 `source_version` 只保留匹配版本的 QA。构建结果写入 HF Dataset cache；文件大小、mtime、过滤条件等组成 fingerprint，避免数据或 tokenizer 配置变化后错误复用缓存。
 5. `SortishSampler` 先按 context token 长度排序，再在 bucket 内随机打乱，减少 padding；长度缓存同时绑定数据 fingerprint 和 tokenizer 信息。
@@ -32,23 +32,15 @@
    - `answer_ids/answer_mask`: `[Q, La]`
    - `labels`: answer 的有效 token 保留 id，其余位置为 `-100`
    - `qa_context_indices`: `[Q]`，指出每个 QA 属于哪个 context
-7. 每个 context 随机采样最多 `qa_per_context` 个 QA（`sample_qa=false` 时全取）。answer 可追加 EOS；`eos_mode="append"` 会扩展一列，避免覆盖最后一个真实 token。
+7. 训练时 `TrainingTaskDataset` 为每个 context 保留 QA 和 Recon 两个候选，按 `data.train_tasks` 与 `data.recon_ratio` 选择任务。QA 使用 `data.qa_prompt`，Recon 使用 `data.recon_prompt`；评估只构造 QA。answer 可追加 EOS；`eos_mode="append"` 会扩展一列，避免覆盖最后一个真实 token。
 
-因此一个 batch 中 context 数 C 和 QA 行数 Q 可以不同。memory 只对 C 个 context 编码一次，QA 行通过 `qa_context_indices` 复用对应的 memory KV。
+因此一个 batch 中 context 数 C 和监督行数 Q 可以不同。memory 只对 C 个 context 编码一次，监督行通过 `qa_context_indices` 复用对应的 memory KV。
 
 ## 3. memory 的运行过程
 
 ### 3.1 写入 memory：context + M 个 slot
 
-`MetaLoRA.encode_context_prefix()` 先把 context embedding 与可学习的 `memory_tokens` 拼接：`[context (Lc), memory slots (M)]`。Qwen 主干默认冻结，指定 `target_modules` 的线性层插入 LoRA；真正训练的主要是 memory slot、LoRA、decoder、可选 readout/head。
-
-`build_block_causal_mask` 控制 slot 如何读取 context 及彼此关系：
-
-- `isolated`：每个 slot 都读取有效 context，slot 之间不互读；
-- `causal`：slot 可读取更早 slot（含自身）；
-- `bidirectional`：slot 全互读。
-
-Qwen 输出每层 hidden state 和 KV cache。截取每层 context 之后的 M 个位置，形成 `layer_memory [C, num_layers, M, H]` 和 `memory_cache`。最后一层 slot hidden 是 QA 前缀表示；每层 KV 则用于后续 continuation。context hidden 同时保留作 distillation teacher。
+`MetaLoRA.encode_context_prefix()` 只对 context 做一次 Qwen forward，并通过临时 hook 收集配置的层。softmax 层权重混合这些 hidden 后，`ContextMemoryResampler` 的 M 个 learned queries 跨注意力读取全部 context，输出固定的 memory embeddings。随后只对这 M 个 embedding 做一次短 Qwen forward，形成 `layer_memory [C, num_layers, M, H]` 和可复用的 memory KV cache。Qwen 主干默认冻结，指定 `target_modules` 的线性层插入 LoRA；真正训练的主要是 resampler、层权重、LoRA、decoder、可选 readout/head。
 
 ### 3.2 读取 memory：QA、readout 与生成
 
@@ -60,13 +52,12 @@ Qwen 输出每层 hidden state 和 KV cache。截取每层 context 之后的 M �
 
 每层 `MemoryDecoder` 只接收该层的 memory hidden 和位置查询，不读取原 context token，因此 token reconstruction 能检验信息是否真的进入 bottleneck。另一条 causal reconstruction 路径把 memory KV 作为前缀，再用冻结 Qwen 对 context 做 teacher-forced 解码；该路径允许读取真实的历史 context token，主要衡量 memory 对主干预测分布的影响。
 
-## 4. 五个 loss 与参数
+## 4. 训练目标与参数
 
 总目标在 `losses.objective_total()` 中为：
 
 ```text
-L = qa_weight * L_qa
-  + embedding_recon_weight * L_emb
+L = task_weighted_mean(L_qa, L_recon)
   + token_recon_weight * L_tok
   + causal_recon_weight * L_causal
   + distill_weight * L_distill
@@ -81,11 +72,9 @@ L = qa_weight * L_qa
 - `memory.qa_weight`：QA loss 的总权重，默认 `1.0`。
 - `max_answer_tokens`、`append_eos`、`eos_mode`：决定被监督的 answer 序列长度和 EOS 标签。
 
-### 4.2 `embedding_recon_loss`（连续 embedding 重构）
+### 4.2 `Recon`（memory-conditioned context token CE）
 
-`MemoryDecoder` 输出 `[C, layers, Lc, H]`，目标是 context 输入 embedding。可选 `mse`、`cosine`、`mse_cosine`（即 `MSE + embedding_recon_cosine_weight * cosine`）。
-
-相关参数：`embedding_recon_weight` 控制总项；`embedding_recon_cosine_weight` 控制 cosine 子项；`decoder_hidden_size`、`decoder_heads`、`decoder_ffn_ratio` 定义 decoder 容量。该目标容易学到平均向量，因此单独下降不能证明 memory 能恢复具体 token。
+训练数据可为每个 context 构造一条 Recon 样本，使用固定 prompt 后生成完整 context。该目标直接检验 memory 是否保留可生成的离散内容。
 
 ### 4.3 `token_recon_loss`（memory-only token CE）
 
@@ -120,7 +109,8 @@ teacher 是 encoder 中普通 causal context hidden 产生的分布，student �
 | 参数 | 含义 |
 | --- | --- |
 | `memory_length` | memory slot 数 M，决定压缩 bottleneck 长度。 |
-| `slot_attention` | slot 间 isolated/causal/bidirectional 连接方式。 |
+| `context_layer_indices` | context 编码中参与 softmax 融合的 Qwen 层，`-1` 表示最后一层。 |
+| `memory_resampler_*` | learned queries 的数量、深度、头数和 bottleneck 宽度。 |
 | `lora_rank`, `lora_alpha`, `target_modules` | 主干 LoRA 的秩、缩放和插入层。 |
 | `readout_length` | 每个问题额外生成的 readout latent 数 R；0 为关闭。 |
 | `readout_layers`, `readout_heads`, `readout_hidden_size` | readout Transformer 的深度、头数和宽度。 |

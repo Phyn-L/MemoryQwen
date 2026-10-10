@@ -134,6 +134,58 @@ class QuestionResampler(nn.Module):
             return self.output_projection(self.output_norm(latents))
 
 
+class ContextMemoryResampler(nn.Module):
+    """Compress arbitrary in-window context states into a fixed memory sequence.
+
+    The context is encoded once by the backbone.  This module is deliberately
+    independent of the backbone's KV cache: learned queries cross-attend to all
+    valid context hidden states and emit ``num_memory`` embeddings in the
+    backbone input space.  A short backbone pass then turns those embeddings into
+    the reusable per-layer memory KV cache.
+    """
+
+    def __init__(self, hidden_size: int, num_memory: int, num_layers: int = 2,
+                 num_heads: int = 4, width: int = 256,
+                 ffn_ratio: int = 2, dtype: torch.dtype | None = None):
+        super().__init__()
+        if num_memory <= 0:
+            raise ValueError("num_memory must be positive")
+        if num_heads <= 0 or num_layers <= 0 or ffn_ratio <= 0:
+            raise ValueError("num_heads, num_layers and ffn_ratio must be positive")
+        if width <= 0 or width % num_heads:
+            raise ValueError("width must be positive and divisible by num_heads")
+        self.hidden_size = int(hidden_size)
+        self.num_memory = int(num_memory)
+        self.width = int(width)
+        self.latents = nn.Parameter(torch.randn(num_memory, width) * 0.02)
+        self.context_projection = nn.Linear(hidden_size, width)
+        self.input_norm = nn.LayerNorm(width)
+        self.blocks = nn.ModuleList(
+            [_ResamplerBlock(width, num_heads, ffn_ratio)
+             for _ in range(num_layers)]
+        )
+        self.output_norm = nn.LayerNorm(width)
+        self.output_projection = nn.Linear(width, hidden_size)
+        nn.init.normal_(self.output_projection.weight, std=0.02 / math.sqrt(width))
+        nn.init.zeros_(self.output_projection.bias)
+        if dtype is not None:
+            self.to(dtype=dtype)
+
+    def forward(self, context_hidden: torch.Tensor, context_mask: torch.Tensor) -> torch.Tensor:
+        if context_hidden.ndim != 3:
+            raise ValueError("context_hidden must have shape [B, L, H]")
+        if context_mask.shape != context_hidden.shape[:2]:
+            raise ValueError("context_mask must have shape [B, L]")
+        dtype = self.latents.dtype
+        with no_autocast(context_hidden.device):
+            context = self.context_projection(context_hidden.to(dtype))
+            latents = self.input_norm(self.latents).unsqueeze(0).expand(context.size(0), -1, -1)
+            padding = ~context_mask.bool()
+            for block in self.blocks:
+                latents = block(latents, context, padding)
+            return self.output_projection(self.output_norm(latents))
+
+
 class LearnedPrefix(nn.Module):
     """Shared input embeddings; no question or memory content is read here."""
 
@@ -145,4 +197,4 @@ class LearnedPrefix(nn.Module):
         return self.latents.unsqueeze(0).expand(question_embeds.size(0), -1, -1)
 
 
-__all__ = ["QuestionResampler", "LearnedPrefix"]
+__all__ = ["ContextMemoryResampler", "QuestionResampler", "LearnedPrefix"]
