@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from datasets import Dataset
 
-CACHE_VERSION = 5  # Independent source-context limit and tokenizer-aware filtering.
+CACHE_VERSION = 6  # Conversation schema replaces the legacy qa_pairs cache column.
 CACHE_DIR_NAME = "dataset_cache"
 DATASET_DIR_NAME = "hf_dataset"
 
@@ -49,7 +49,7 @@ def load_records(cache_dir: Path, metadata: dict[str, Any]) -> Dataset | None:
         if json.loads(meta_path.read_text(encoding="utf-8")).get("fingerprint") != metadata["fingerprint"]: return None
         ds = Dataset.load_from_disk(str(dataset_dir))
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        return ds if meta.get("contexts", meta.get("count")) == len(ds) and "qa_pairs" in ds.column_names else None
+        return ds if meta.get("contexts", meta.get("count")) == len(ds) and "conversations" in ds.column_names else None
     except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError): return None
 
 def save_records(cache_dir: Path, metadata: dict[str, Any], records) -> None:
@@ -62,7 +62,7 @@ def save_records(cache_dir: Path, metadata: dict[str, Any], records) -> None:
     os.replace(temp_dir, dataset_dir)
     meta = dict(metadata)
     meta["contexts"] = len(dataset)
-    meta["qa_pairs"] = sum(len(row["qa_pairs"]) for row in dataset)
+    meta["conversations"] = sum(len(row["conversations"]) for row in dataset)
     tmp = cache_dir / f"records.meta.json.{os.getpid()}.tmp"
     tmp.write_text(json.dumps(meta), encoding="utf-8"); os.replace(tmp, cache_dir / "records.meta.json")
 
@@ -72,12 +72,12 @@ def cached_load(cache_dir: Path, metadata: dict[str, Any], build, *, verbose=Tru
         ds = load_records(cache_dir, metadata)
         if ds is not None:
             if verbose:
-                qa_pairs = sum(len(row["qa_pairs"]) for row in ds)
-                print(f"Reusing Hugging Face dataset cache: {cache_dir / DATASET_DIR_NAME} (contexts={len(ds)}, qa_pairs={qa_pairs})")
+                conversations = sum(len(row["conversations"]) for row in ds)
+                print(f"Reusing Hugging Face dataset cache: {cache_dir / DATASET_DIR_NAME} (contexts={len(ds)}, conversation_messages={conversations})")
             return ds
         records = build(); save_records(cache_dir, metadata, records); ds = load_records(cache_dir, metadata)
         if ds is None: raise RuntimeError(f"Failed to load dataset cache: {cache_dir}")
         if verbose:
-            qa_pairs = sum(len(row["qa_pairs"]) for row in ds)
-            print(f"Saved Hugging Face dataset cache: {cache_dir / DATASET_DIR_NAME} (contexts={len(ds)}, qa_pairs={qa_pairs})")
+            conversations = sum(len(row["conversations"]) for row in ds)
+            print(f"Saved Hugging Face dataset cache: {cache_dir / DATASET_DIR_NAME} (contexts={len(ds)}, conversation_messages={conversations})")
         return ds

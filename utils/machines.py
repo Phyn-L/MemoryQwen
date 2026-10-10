@@ -36,7 +36,7 @@ MACHINES: dict[str, dict[str, str]] = {
     # 8x H200, no internet, so W&B has to stay offline.
     "h200": {
         "MODEL_ROOT": "/home/lijie/proj2/xmu/lz/Qwen",
-        "DATA_ROOT": "/home/lijie/proj2/xmu/lz/aggregated",
+        "DATA_ROOT": "/mnt/shared-storage-user/evoagi-share/lijie/proj2/xmu/lz/contexts",
         "WANDB_MODE": "offline",
     },
     "a800": {

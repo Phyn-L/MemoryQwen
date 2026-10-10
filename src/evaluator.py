@@ -13,6 +13,10 @@ from .metrics import METRIC_KEYS, answer_line, best_reference_metrics, normalize
 from .icl_baseline import parse_race_prediction
 
 
+def _batch_value(batch, new_key, old_key):
+    return batch[new_key] if new_key in batch else batch[old_key]
+
+
 def _distributed_sum(values, device):
     """All-reduce local scalar sums so that every rank sees the global total.
 
@@ -116,21 +120,25 @@ class Evaluator:
         return False
 
     def _batch(self, model, prefix, batch, device, start=0, end=None):
-        end = end or batch["question_ids"].size(0)
+        end = end or _batch_value(batch, "input_ids", "question_ids").size(0)
         ids = {
             key: value.to(device)
             for key, value in batch.items()
             if key not in {"records"}
         }
+        if "input_ids" not in ids and "question_ids" in ids:
+            ids["input_ids"], ids["input_mask"] = ids["question_ids"], ids["question_mask"]
+        if "target_ids" not in ids and "answer_ids" in ids:
+            ids["target_ids"], ids["target_mask"] = ids["answer_ids"], ids["answer_mask"]
         qa_indices = ids["qa_context_indices"][start:end]
         embed = model.qwen.get_input_embeddings()
         output = model.forward_qa_with_prefix(
             prefix,
             qa_indices,
-            embed(ids["question_ids"][start:end]),
-            ids["question_mask"][start:end],
-            embed(ids["answer_ids"][start:end]),
-            ids["answer_mask"][start:end],
+            embed(ids["input_ids"][start:end]),
+            ids["input_mask"][start:end],
+            embed(ids["target_ids"][start:end]),
+            ids["target_mask"][start:end],
             ids["labels"][start:end],
         )
         qa = qa_loss(output.logits, output.labels)
@@ -138,7 +146,7 @@ class Evaluator:
 
     def _chunks(self, batch):
         size = self.cfg.evaluation.qa_batch_size
-        return range(0, batch["question_ids"].size(0), size)
+        return range(0, _batch_value(batch, "input_ids", "question_ids").size(0), size)
 
     def auxiliary_loss(self, model, prefix, ids):
         return memory_objectives(model, prefix, ids["context_ids"], ids["context_mask"], self.cfg.memory)
@@ -174,6 +182,10 @@ class Evaluator:
                 for key, value in batch.items()
                 if key != "records"
             }
+            if "input_ids" not in ids and "question_ids" in ids:
+                ids["input_ids"], ids["input_mask"] = ids["question_ids"], ids["question_mask"]
+            if "target_ids" not in ids and "answer_ids" in ids:
+                ids["target_ids"], ids["target_mask"] = ids["answer_ids"], ids["answer_mask"]
             embed = model.qwen.get_input_embeddings()
             prefix = model.encode_context_prefix(
                 embed(ids["context_ids"]), ids["context_mask"]
@@ -186,7 +198,7 @@ class Evaluator:
             for start in self._chunks(batch):
                 end = min(
                     start + self.cfg.evaluation.qa_batch_size,
-                    batch["question_ids"].size(0),
+                    _batch_value(batch, "input_ids", "question_ids").size(0),
                 )
                 output, qa, ids, _ = self._batch(
                     model, prefix, batch, device, start, end
@@ -306,7 +318,7 @@ class Evaluator:
             leave=False,
         )
         for batch in progress:
-            rows = batch["question_ids"].size(0)
+            rows = _batch_value(batch, "input_ids", "question_ids").size(0)
             batch_start, batch_end = cursor, cursor + rows
             cursor = batch_end
             # Only the rows inside this rank's window are decoded. The batches outside it
@@ -324,6 +336,10 @@ class Evaluator:
                 for key, value in batch.items()
                 if key != "records"
             }
+            if "input_ids" not in ids and "question_ids" in ids:
+                ids["input_ids"], ids["input_mask"] = ids["question_ids"], ids["question_mask"]
+            if "target_ids" not in ids and "answer_ids" in ids:
+                ids["target_ids"], ids["target_mask"] = ids["answer_ids"], ids["answer_mask"]
             q = ids["qa_context_indices"][rows_slice]
             records = batch["records"][rows_slice]
             embed = model.qwen.get_input_embeddings()
@@ -337,8 +353,8 @@ class Evaluator:
             generated = model.generate_answers_with_prefix(
                 prefix,
                 q,
-                ids["question_ids"][rows_slice],
-                ids["question_mask"][rows_slice],
+                ids["input_ids"][rows_slice],
+                ids["input_mask"][rows_slice],
                 self.tokenizer,
                 self.cfg.evaluation.max_new_tokens,
                 group_by_context=True,

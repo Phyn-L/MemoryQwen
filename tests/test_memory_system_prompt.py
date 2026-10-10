@@ -29,17 +29,17 @@ def test_prompt_placement_preserves_evidence_and_qa_mapping(tokenizer, dataset, 
     separate = collate_context_records(rows, tokenizer, system_prompt_mode="separate", **kwargs)
     expected = tokenizer(system_prompt_for(dataset, version) + "\n\n", add_special_tokens=False).input_ids
     assert context["context_ids"][0].tolist() == expected + plain["context_ids"][0].tolist()
-    assert context["question_ids"].equal(plain["question_ids"])
+    assert context["input_ids"].equal(plain["input_ids"])
     assert separate["context_ids"].equal(plain["context_ids"])
     message = tokenizer.apply_chat_template([
         {"role": "system", "content": system_prompt_for(dataset, version)},
         {"role": "user", "content": "question"},
     ], tokenize=False, add_generation_prompt=True, enable_thinking=False)
-    assert separate["question_ids"][0].tolist() == tokenizer(message, add_special_tokens=False).input_ids
+    assert separate["input_ids"][0].tolist() == tokenizer(message, add_special_tokens=False).input_ids
     for batch in (context, separate):
         assert batch["qa_context_indices"].tolist() == [0, 0]
         assert batch["labels"].equal(plain["labels"])
-        assert batch["context_mask"].all() and batch["question_mask"].all()
+        assert batch["context_mask"].all() and batch["input_mask"].all()
 
 
 def test_separate_rejects_silent_question_truncation(tokenizer):

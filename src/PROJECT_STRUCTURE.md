@@ -19,20 +19,20 @@
 
 ## 2. 数据处理：JSONL 到训练 batch
 
-入口是 `pipeline.make_context_dataset()`，底层是 `AggregatedContextDataset`：
+入口是 `pipeline.make_context_dataset()`，底层是 `ConversationDataset`：
 
-1. 在 `data.root/<dataset>/<split>.jsonl` 查找文件；`dataset="all"` 时读取所有子目录。
-2. 每行读取 `context` 和 `qa_pairs`。空 context、超过 `data.max_input_context_length` 的 context，或没有有效 question/answer 的行会被过滤；纯 Recon 训练允许没有 QA 的 context。
-3. 一个 JSONL 行对应一个 `ContextRecord`，其中包含一个 context 和多个 `QARecord`。所有非空 `answers` 会保留；训练使用第一个答案，评估可使用全部 reference。
-4. 可选 `source_version` 只保留匹配版本的 QA。构建结果写入 HF Dataset cache；文件大小、mtime、过滤条件等组成 fingerprint，避免数据或 tokenizer 配置变化后错误复用缓存。
-5. `SortishSampler` 先按 context token 长度排序，再在 bucket 内随机打乱，减少 padding；长度缓存同时绑定数据 fingerprint 和 tokenizer 信息。
-6. `collate_context_records` 对 context、question、answer 分别 tokenize：
+1. 每个 split 直接读取配置中的 JSONL 文件；每行包含 `context` 和 `conversations`。
+2. `ConversationDataset` 建立字节 offset 索引，随机访问时只解析当前行，不把整个文件载入内存。空 context、超过 `data.max_input_context_length` 的 context，或没有 assistant turn 的行会被过滤。
+3. 一个 JSONL 行对应一个 `ContextRecord`。`ContextRecord.turns()` 将每个 assistant 消息配对为一个监督 turn，并保留此前所有 system/user/assistant 消息作为历史。
+4. `SortishSampler` 先按 context token 长度排序，再在 bucket 内随机打乱，减少 padding；长度缓存同时绑定数据 fingerprint 和 tokenizer 信息。
+5. `collate_context_records` 对 context、conversation prompt、answer 分别 tokenize：
    - `context_ids/context_mask`: `[C, Lc]`
-   - `question_ids/question_mask`: `[Q, Lq]`
-   - `answer_ids/answer_mask`: `[Q, La]`
+   - `input_ids/input_mask`: `[Q, Lq]`
+   - `target_ids/target_mask`: `[Q, La]`
    - `labels`: answer 的有效 token 保留 id，其余位置为 `-100`
    - `qa_context_indices`: `[Q]`，指出每个 QA 属于哪个 context
-7. 训练时 `TrainingTaskDataset` 为每个 context 保留 QA 和 Recon 两个候选，按 `data.train_tasks` 与 `data.recon_ratio` 选择任务。QA 使用 `data.qa_prompt`，Recon 使用 `data.recon_prompt`；评估只构造 QA。answer 可追加 EOS；`eos_mode="append"` 会扩展一列，避免覆盖最后一个真实 token。
+6. conversation prompt 始终通过 tokenizer 的 `apply_chat_template(..., add_generation_prompt=True)` 构造；训练目标是当前 assistant 内容，因此当前答案不会泄漏到输入，PWC 的历史答案会保留在后续 turn 的输入中。
+7. 训练时 `mix` 为每个 context 展开一条 QA 和一条 Recon 行；`qa`/`recon` 只展开对应任务。batch 字段为 `input_ids/input_mask`、`target_ids/target_mask`、`labels`，Recon target 是完整 context token，不追加 EOS。`recon_ratio` 调度只改变 QA/Recon 损失权重；评估只构造 QA。
 
 因此一个 batch 中 context 数 C 和监督行数 Q 可以不同。memory 只对 C 个 context 编码一次，监督行通过 `qa_context_indices` 复用对应的 memory KV。
 
@@ -114,7 +114,7 @@ teacher 是 encoder 中普通 causal context hidden 产生的分布，student �
 | `lora_rank`, `lora_alpha`, `target_modules` | 主干 LoRA 的秩、缩放和插入层。 |
 | `readout_length` | 每个问题额外生成的 readout latent 数 R；0 为关闭。 |
 | `readout_layers`, `readout_heads`, `readout_hidden_size` | readout Transformer 的深度、头数和宽度。 |
-| `max_context_tokens`, `max_question_tokens`, `max_answer_tokens` | 三类序列的截断上限。 |
+| `max_context_tokens`, `max_conversation_tokens`, `max_answer_tokens` | context、chat-template prompt 和 assistant target 的截断上限。 |
 | `qa_per_context`, `sample_qa` | 每个 context 放入 batch 的 QA 数量和采样方式。 |
 
 分析结果时应同时看 QA 指标和 memory-only 指标；仅比较总 loss 不足以判断 memory 是否真正存储了 context，因为不同配置可能启用了不同 loss 项。

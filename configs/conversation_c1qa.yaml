@@ -1,0 +1,10 @@
+# Conversation-format C1QA input.
+data:
+  root: ${DATA_ROOT:-/data/lz/contexts}
+  conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_c1qa.jsonl
+  train_conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_c1qa.jsonl
+  validation_conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_c1qa.jsonl
+  test_conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_c1qa.jsonl
+  train_tasks: qa
+  max_conversation_tokens: 1024
+  validation_max_samples: 2000

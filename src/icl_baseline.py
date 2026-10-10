@@ -57,32 +57,43 @@ class ICLExample:
 def iter_examples(path: str | Path, dataset: str):
     """Yield ``(flat_row, line_number, index_within_line)`` from an aggregated file.
 
-    Every data file in this project comes from the aggregated tree, where one context's
-    questions are grouped under ``qa_pairs`` and the per-question fields are the original
-    ones -- also for RACE, whose ``metadata.options``/``answer_letter`` survive the
-    aggregation. Flattening that nesting here is the only schema handling any consumer needs.
-
-    A file without ``qa_pairs`` raises instead of yielding rows with no question in them:
-    pointing ``--squad-validation-file`` at the old one-question-per-line ``standardized``
-    tree used to look like an empty evaluation set rather than a mistake.
+    Every file uses one context and a ``conversations`` list. Each user message is paired
+    with the following assistant message and yielded as one evaluation example.
     """
     with Path(path).open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
                 continue
             row = json.loads(line)
-            pairs = row.get("qa_pairs")
-            if pairs is None:
+            conversations = row.get("conversations")
+            if not isinstance(conversations, list):
                 raise ValueError(
-                    f"{path}:{line_number} has no 'qa_pairs'; expected the aggregated context "
-                    "schema (contexts/aggregated). The one-question-per-line 'standardized' "
-                    "files are not a supported input."
+                    f"{path}:{line_number} has no 'conversations'; expected the conversation schema"
                 )
-            for index, pair in enumerate(pairs or ()):
-                flat = dict(pair)
-                flat["context"] = row.get("context", "")
-                flat.setdefault("dataset", row.get("dataset", dataset))
-                yield flat, line_number, index
+            pending = None
+            index = 0
+            for message in conversations:
+                role = str(message.get("role", "")).strip().lower()
+                if role == "user":
+                    pending = message
+                elif role == "assistant" and pending is not None:
+                    references = message.get("answers", [message.get("content", "")])
+                    if isinstance(references, str):
+                        references = [references]
+                    flat = {
+                        "question": pending.get("content", ""),
+                        "answers": references,
+                        "context": row.get("context", ""),
+                        "dataset": row.get("dataset", dataset),
+                        "context_id": row.get("context_id", row.get("id", "")),
+                    }
+                    metadata = dict(message.get("metadata") or {})
+                    if message.get("answer_letter"):
+                        metadata["answer_letter"] = message["answer_letter"]
+                    flat["metadata"] = metadata
+                    yield flat, line_number, index
+                    index += 1
+                    pending = None
 
 
 def load_jsonl(

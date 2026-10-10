@@ -155,12 +155,16 @@ class MemoryConfig:
     memory_resampler_hidden_size: int = 256
     memory_resampler_ffn_ratio: int = 2
     # Source exposed to the optional question-conditioned reader.
-    reader_memory_source: str = "memory"
+    reader_memory_source: str = "memory_hidden"
 
 
 @dataclass
 class DataConfig:
-    root: str = "/data/lz/contexts/aggregated"
+    root: str = "/data/lz/contexts"
+    conversation_file: str | None = "/data/lz/contexts/ift_c1qa.jsonl"
+    train_conversation_file: str | None = None
+    validation_conversation_file: str | None = None
+    test_conversation_file: str | None = None
     dataset: str = "all"
     train_datasets: tuple[str, ...] | None = None
     validation_datasets: tuple[str, ...] | None = None
@@ -172,11 +176,15 @@ class DataConfig:
     # Reject source contexts before truncation, independently of the encoder limit.
     max_input_context_length: int = 8192
     train_tasks: str = "mix"
-    # Fraction of Recon supervision rows in the mixed training stream.
+    # Recon loss fraction for constant mixed supervision.
     recon_ratio: float = 0.5
-    qa_prompt: str = "Answer the question using the information in memory.\nQuestion: "
+    recon_schedule: str = "constant"
+    recon_schedule_curve: str = "linear"
+    recon_ratio_start: float = 0.5
+    recon_ratio_end: float = 0.5
+    recon_ratio_min: float = 0.1
     recon_prompt: str = "Reconstruct the original context from memory."
-    max_question_tokens: int = 128
+    max_conversation_tokens: int = 1024
     max_answer_tokens: int = 128
     max_samples: int | None = None
     train_max_samples: int | None = None
@@ -187,7 +195,6 @@ class DataConfig:
     cache_sortish_lengths: bool = True
     cache_dataset: bool = True
     append_eos: bool = True
-    use_chat_template: bool = False
     chat_template_enable_thinking: bool = False
     qa_per_context: int = 4
     # Left-padding keeps the question's real tokens adjacent to the answer; right
@@ -196,7 +203,6 @@ class DataConfig:
     question_padding_side: str = "left"
     # "append" writes EOS after the last answer token; the legacy "overwrite" mode
     # overwrites that token whenever the answer is the longest in the batch.
-    eos_mode: str = "append"
 
 
 @dataclass
@@ -302,6 +308,13 @@ class TrainConfig:
         values = expand_env_values(raw, overrides)
         values = dict(values)
         data_values = dict(values.get("data", {}))
+        # Conversation files are the only supported training source. Keep the default
+        # machine-aware so a legacy YAML without an explicit path still resolves to the
+        # current JSONL location.
+        data_values.setdefault(
+            "conversation_file",
+            f"{overrides.get('DATA_ROOT', '/data/lz/contexts')}/ift_c1qa.jsonl",
+        )
         for key in ("train_datasets", "validation_datasets", "test_datasets"):
             if isinstance(data_values.get(key), list):
                 data_values[key] = tuple(data_values[key])
@@ -339,24 +352,45 @@ class TrainConfig:
             raise ValueError("model.attn_implementation must be sdpa or eager")
         if d.max_context_tokens <= 0:
             raise ValueError("data.max_context_tokens must be positive")
+        if not (d.conversation_file or d.train_conversation_file or d.validation_conversation_file or d.test_conversation_file):
+            raise ValueError("conversation data requires at least one conversation file")
         if d.max_input_context_length <= 0:
             raise ValueError("data.max_input_context_length must be positive")
         if d.train_tasks not in {"mix", "qa", "recon"}:
             raise ValueError("data.train_tasks must be mix, qa or recon")
         if not 0 <= d.recon_ratio <= 1:
             raise ValueError("data.recon_ratio must be within [0, 1]")
-        if not d.qa_prompt.strip() or not d.recon_prompt.strip():
-            raise ValueError("QA and Recon prompts must be non-empty")
-        if d.max_question_tokens <= 0 or d.max_answer_tokens <= 0:
-            raise ValueError("question/answer token limits must be positive")
+        if d.recon_schedule not in {"decay", "front_loaded", "constant"}:
+            raise ValueError("data.recon_schedule must be decay, front_loaded or constant")
+        if d.recon_schedule_curve not in {"linear", "cosine"}:
+            raise ValueError("data.recon_schedule_curve must be linear or cosine")
+        for name in ("recon_ratio_start", "recon_ratio_end", "recon_ratio_min"):
+            value = getattr(d, name)
+            if not 0 <= value <= 1:
+                raise ValueError(f"data.{name} must be within [0, 1]")
+        if d.train_tasks == "mix" and d.recon_ratio_min <= 0:
+            raise ValueError("mixed training requires data.recon_ratio_min > 0")
+        if d.train_tasks == "mix":
+            if d.recon_schedule == "constant":
+                if not d.recon_ratio_min <= d.recon_ratio < 1:
+                    raise ValueError("constant mixed ratio must be >= recon_ratio_min and < 1")
+            else:
+                if d.recon_ratio_start < d.recon_ratio_min or d.recon_ratio_end < d.recon_ratio_min:
+                    raise ValueError("recon schedule endpoints must be >= recon_ratio_min")
+                if d.recon_ratio_end > d.recon_ratio_start:
+                    raise ValueError("Recon decay schedules require end <= start")
+                if d.recon_schedule == "front_loaded" and d.recon_ratio_start >= 1:
+                    raise ValueError("front_loaded mixed ratio must be < 1 to retain QA")
+        if not d.recon_prompt.strip():
+            raise ValueError("data.recon_prompt must be non-empty")
+        if d.max_conversation_tokens <= 0 or d.max_answer_tokens <= 0:
+            raise ValueError("conversation/answer token limits must be positive")
         if d.sortish_bucket_multiplier <= 0:
             raise ValueError("sortish_bucket_multiplier must be positive")
         if d.qa_per_context <= 0:
             raise ValueError("data.qa_per_context must be positive")
         if d.question_padding_side not in {"left", "right"}:
             raise ValueError("data.question_padding_side must be left or right")
-        if d.eos_mode not in {"overwrite", "append"}:
-            raise ValueError("data.eos_mode must be overwrite or append")
         if self.model.trainable_dtype not in {"float32", "float16", "bfloat16"}:
             raise ValueError("model.trainable_dtype must be float32, float16 or bfloat16")
         if self.model.lora_rank <= 0 or m.memory_length <= 0:
@@ -377,8 +411,8 @@ class TrainConfig:
             raise ValueError("memory resampler width and FFN ratio must be positive")
         if m.memory_resampler_hidden_size % m.memory_resampler_heads:
             raise ValueError("memory_resampler_hidden_size must be divisible by memory_resampler_heads")
-        if m.reader_memory_source not in {"memory", "memory_embedding", "layer_mean"}:
-            raise ValueError("memory.reader_memory_source must be memory, memory_embedding or layer_mean")
+        if m.reader_memory_source not in {"memory_hidden", "memory_embedding", "layer_mean"}:
+            raise ValueError("memory.reader_memory_source must be memory_hidden, memory_embedding or layer_mean")
         if m.token_recon_weight < 0:
             raise ValueError("token_recon_weight must be non-negative")
         if m.head_mode not in {"linear", "tied"}:
@@ -414,8 +448,8 @@ class TrainConfig:
             raise ValueError("memory.token_recon_positions must be >= 0 (0 scores every position)")
         if m.qa_weight < 0 or m.recon_weight < 0:
             raise ValueError("loss weights must be non-negative")
-        qa_active = d.train_tasks == "qa" or (d.train_tasks == "mix" and d.recon_ratio < 1)
-        recon_active = d.train_tasks == "recon" or (d.train_tasks == "mix" and d.recon_ratio > 0)
+        qa_active = d.train_tasks in {"qa", "mix"}
+        recon_active = d.train_tasks in {"recon", "mix"}
         if qa_active and m.qa_weight <= 0:
             raise ValueError("QA training requires memory.qa_weight > 0")
         if recon_active and m.recon_weight <= 0:

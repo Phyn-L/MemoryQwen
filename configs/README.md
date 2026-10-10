@@ -26,16 +26,21 @@
 | `causal_recon_positions` | prefix-KV CE 打分位置数；0 为全部 | — |
 | `distill_weight` | prefix-KV student 的分布蒸馏；可独立于 prefix CE 开启 | 0 |
 
-训练任务通过 `data.train_tasks` 和 `data.recon_ratio` 控制：
+训练任务通过 `data.train_tasks` 和动态 Recon 调度控制：
 
 ```yaml
 data:
   train_tasks: mix   # mix、qa、recon
-  recon_ratio: 0.5   # mix 时 Recon 样本比例
+  recon_ratio: 0.5   # constant 调度的 Recon 比例
+  recon_schedule: constant
+  recon_schedule_curve: linear
+  recon_ratio_start: 0.5
+  recon_ratio_end: 0.5
+  recon_ratio_min: 0.1
 ```
 
-每个 context 都保留一个 QA 候选和一个 Recon 候选。Recon 使用
-`data.recon_prompt`，QA 使用 `data.qa_prompt`；这里采用自然语言 prompt 来区分任务，
+`mix` 为每个 context 同时生成一条 QA 行和一条 Recon 行，比例调度只改变损失权重。Recon 使用
+`data.recon_prompt` 用于重建任务；QA 输入直接来自 conversation 消息，使用模型原生 chat template。
 不新增 tokenizer special token，避免新增词表参数和 checkpoint 兼容问题。需要先做 Recon
 再做 QA 时，把第一阶段 checkpoint 传给 `scripts/train.py --init-from`，第二阶段设
 `train_tasks: qa`。

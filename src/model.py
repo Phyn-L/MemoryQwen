@@ -332,7 +332,7 @@ class MetaLoRA(nn.Module):
         readout_mode="memory_question", context_layer_indices=(-1,),
         memory_resampler_layers=2, memory_resampler_heads=4,
         memory_resampler_hidden_size=256, memory_resampler_ffn_ratio=2,
-        reader_memory_source="memory", context_gradient_checkpointing=False,
+        reader_memory_source="memory_hidden", context_gradient_checkpointing=False,
     ):
         super().__init__()
         self.rank, self.alpha = rank, alpha
@@ -414,8 +414,8 @@ class MetaLoRA(nn.Module):
         if readout_length < 0:
             raise ValueError("readout_length must be non-negative")
         self.readout_mode = readout_mode
-        if reader_memory_source not in {"memory", "memory_embedding", "layer_mean"}:
-            raise ValueError("reader_memory_source must be memory, memory_embedding or layer_mean")
+        if reader_memory_source not in {"memory_hidden", "memory_embedding", "layer_mean"}:
+            raise ValueError("reader_memory_source must be memory_hidden, memory_embedding or layer_mean")
         self.reader_memory_source = reader_memory_source
         self.readout_length = 0 if readout_mode == "off" else int(readout_length)
         self.resampler = None

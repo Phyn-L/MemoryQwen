@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn.functional as F
 
@@ -322,12 +324,33 @@ def objective_total(qa, terms, cfg):
     return cfg.qa_weight * qa + sum(getattr(cfg, name.removesuffix("_loss") + "_weight") * loss for name, loss in terms.items())
 
 
-def supervision_objectives(row_losses, task_ids, cfg):
-    """Sample-weighted mixture; ratios are not overwritten by per-task reduction."""
+def scheduled_task_weights(step, total_steps, cfg):
+    """Return QA weight, Recon weight and effective Recon fraction for one step."""
+    if cfg.train_tasks == "qa":
+        return 1.0, 0.0, 0.0
+    if cfg.train_tasks == "recon":
+        return 0.0, 1.0, 1.0
+    start, end = cfg.recon_ratio_start, cfg.recon_ratio_end
+    minimum = cfg.recon_ratio_min
+    if cfg.recon_schedule == "constant":
+        ratio = cfg.recon_ratio
+    else:
+        progress = min(max(step, 0) / max(total_steps - 1, 1), 1.0)
+        if cfg.recon_schedule_curve == "cosine":
+            progress = (1.0 - math.cos(progress * math.pi)) / 2.0
+        ratio = start + (end - start) * progress
+    ratio = max(minimum, min(1.0, ratio))
+    if cfg.recon_schedule == "decay":
+        return 1.0, ratio, ratio / (1.0 + ratio)
+    return 1.0 - ratio, ratio, ratio
+
+
+def supervision_objectives(row_losses, task_ids, cfg, qa_weight=None, recon_weight=None):
+    """Per-task means with externally scheduled task weights."""
     qa_mask, recon_mask = task_ids.eq(0), task_ids.eq(1)
-    weights = torch.where(recon_mask, cfg.recon_weight, cfg.qa_weight)
+    qa_weight = cfg.qa_weight if qa_weight is None else qa_weight
+    recon_weight = cfg.recon_weight if recon_weight is None else recon_weight
     zero = row_losses.sum() * 0
-    return (row_losses * weights).mean(), {
-        "qa_loss": row_losses[qa_mask].mean() if bool(qa_mask.any()) else zero,
-        "recon_loss": row_losses[recon_mask].mean() if bool(recon_mask.any()) else zero,
-    }
+    qa = row_losses[qa_mask].mean() if bool(qa_mask.any()) else zero
+    recon = row_losses[recon_mask].mean() if bool(recon_mask.any()) else zero
+    return qa_weight * qa + recon_weight * recon, {"qa_loss": qa, "recon_loss": recon}

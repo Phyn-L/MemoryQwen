@@ -1,6 +1,4 @@
 test:
-  datasets:
-  - squad
   split: validation
   batch_size: 2
   qa_batch_size: 4

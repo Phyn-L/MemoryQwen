@@ -9,9 +9,9 @@ from tqdm.auto import tqdm
 
 from utils.config import TrainConfig, dtype_from_name
 from utils.machines import machine_names
-from src.data import SortishSampler, TrainingTaskDataset
+from src.data import SortishSampler
 from src.evaluator import Evaluator
-from src.losses import objective_total, supervision_objectives
+from src.losses import objective_total, scheduled_task_weights, supervision_objectives
 from src.model import load_model
 from src.metrics import METRIC_KEYS
 from src.pipeline import (
@@ -185,14 +185,11 @@ def main() -> None:
     _configure_run_paths(cfg, accelerator, args.resume)
     cache_dir = model_cache_dir(cfg.model.name_or_path)
 
-    train_context_dataset = make_context_dataset(
+    train_dataset = make_context_dataset(
         cfg,
         "train",
         tokenizer,
         limit=resolve_split_limit(cfg, "train"),
-    )
-    train_dataset = TrainingTaskDataset(
-        train_context_dataset, cfg.data.train_tasks, cfg.data.recon_ratio,
     )
     train_collate = make_collate(cfg, tokenizer, sample_qa=True, training=True)
     sampler = SortishSampler(
@@ -201,7 +198,6 @@ def main() -> None:
         cfg.training.batch_size,
         cfg.data.sortish_bucket_multiplier,
         cfg.training.seed,
-        cfg.data.use_chat_template,
         cfg.data.chat_template_enable_thinking,
         cache_dir if cfg.data.cache_sortish_lengths else None,
     )
@@ -357,20 +353,30 @@ def main() -> None:
             output = model(
                 embedding(ids["context_ids"]),
                 ids["context_mask"],
-                embedding(ids["question_ids"]),
-                ids["question_mask"],
-                embedding(ids["answer_ids"]),
-                ids["answer_mask"],
+                embedding(ids["input_ids"]),
+                ids["input_mask"],
+                embedding(ids["target_ids"]),
+                ids["target_mask"],
                 ids["labels"],
                 ids["qa_context_indices"],
                 context_ids=ids["context_ids"],
                 objective_config=cfg.memory,
                 loss_only=True,
             )
-            supervised, task_terms = supervision_objectives(output.supervision_losses, ids["task_ids"], cfg.memory)
+            qa_weight, recon_weight, effective_ratio = scheduled_task_weights(step, total_steps, cfg.data)
+            supervised, task_terms = supervision_objectives(
+                output.supervision_losses, ids["task_ids"], cfg.memory,
+                qa_weight=qa_weight * cfg.memory.qa_weight,
+                recon_weight=recon_weight * cfg.memory.recon_weight,
+            )
             auxiliary_terms = output.objective_terms or {}
             total = supervised + objective_total(supervised * 0, auxiliary_terms, cfg.memory)
-            terms = {**auxiliary_terms, **task_terms, "loss": total}
+            terms = {
+                **auxiliary_terms, **task_terms, "loss": total,
+                "qa_weight": total.detach() * 0 + qa_weight * cfg.memory.qa_weight,
+                "recon_weight": total.detach() * 0 + recon_weight * cfg.memory.recon_weight,
+                "recon_ratio": total.detach() * 0 + effective_ratio,
+            }
             if accelerator is not None:
                 accelerator.backward(total)
             else:

@@ -17,5 +17,4 @@ inference:
   max_new_tokens: 32
   seed: 42
   num_workers: 0
-  use_chat_template: true
 output_dir: null

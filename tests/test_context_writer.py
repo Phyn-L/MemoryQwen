@@ -86,7 +86,7 @@ def test_padding_content_cannot_change_memory():
     torch.testing.assert_close(before.memory, after.memory)
 
 
-@pytest.mark.parametrize("source", ["memory", "memory_embedding", "layer_mean"])
+@pytest.mark.parametrize("source", ["memory_hidden", "memory_embedding", "layer_mean"])
 def test_qa_gradients_reach_writer_lora_layer_weights_and_reader(source):
     model = tiny_model(
         context_layer_indices=(-1, -2), reader_memory_source=source, readout_length=2,

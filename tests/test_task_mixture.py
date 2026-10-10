@@ -47,8 +47,8 @@ def test_mixed_task_rows_have_distinct_prompts_and_targets():
         qa_prompt="Q ", recon_prompt="R ",
     )
     assert batch["task_ids"].tolist() == [0, 1]
-    assert batch["question_ids"].shape[1] > 1
-    assert batch["answer_ids"].shape[1] == 2
+    assert batch["input_ids"].shape[1] > 1
+    assert batch["target_ids"].shape[1] == 2
 
 
 def test_task_dataset_ratio_selects_qa_and_recon_candidates():

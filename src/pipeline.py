@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 import re
 
-from .data import AggregatedContextDataset, collate_fn
+from .data import ConversationDataset, collate_fn
 
 MODEL_LABEL_PATTERN = re.compile(r"Qwen(?:3)?[-_]?([0-9]+(?:\.[0-9]+)?)[Bb]", re.IGNORECASE)
 
@@ -46,53 +46,45 @@ def resolve_split_limit(cfg, split: str) -> int | None:
     return limit
 
 
-def make_context_dataset(cfg, split: str, tokenizer, limit=None, allow_empty: bool = False, source_version: str | None = None, max_context_rows=None, qa_per_context=None, context_shuffle_seed=42):
+def make_context_dataset(cfg, split: str, tokenizer, limit=None, allow_empty: bool = False):
     """Build one split. ``limit`` is the resolved sample cap (see :func:`resolve_split_limit`)."""
-    names = getattr(cfg.data, f"{split}_datasets") or cfg.data.dataset
-    # Keep HotpotQA held out of the implicit training mixture for now.
-    # Explicit selections and validation/test datasets remain available.
-    if split == "train" and names in (None, "all"):
-        names = [p.name for p in sorted(Path(cfg.data.root).iterdir())
-                 if p.is_dir() and p.name.lower() != "hotpotqa"]
-    split_name = getattr(cfg.data, f"{split}_split")
+    path = (
+        getattr(cfg.data, f"{split}_conversation_file", None)
+        or getattr(cfg.data, "conversation_file", None)
+    )
+    if not path:
+        raise ValueError(
+            f"data.{split}_conversation_file or data.conversation_file is required"
+        )
     cache_dir = model_cache_dir(cfg.model.name_or_path) if cfg.data.cache_dataset else None
-    filter_no_qa = cfg.data.filter_no_qa
-    train_tasks = getattr(cfg.data, "train_tasks", "mix")
-    recon_ratio = getattr(cfg.data, "recon_ratio", 0.5)
-    if split == "train" and (
-        train_tasks == "recon" or (train_tasks == "mix" and recon_ratio >= 1)
-    ):
-        filter_no_qa = False
-    return AggregatedContextDataset(
-        cfg.data.root, names, split_name, tokenizer,
-        cfg.data.max_context_tokens, limit,
-        cfg.data.filter_long_context, filter_no_qa,
-        allow_empty=allow_empty, cache_dir=cache_dir, source_version=source_version,
-        max_context_rows=max_context_rows, qa_per_context=qa_per_context,
-        context_shuffle_seed=context_shuffle_seed,
+    return ConversationDataset(
+        path,
+        tokenizer=tokenizer,
+        max_context_tokens=cfg.data.max_context_tokens,
         max_input_context_length=cfg.data.max_input_context_length,
+        max_samples=limit,
+        filter_long_context=cfg.data.filter_long_context,
+        filter_no_conversation=cfg.data.filter_no_qa,
+        cache_dir=cache_dir,
+        allow_empty=allow_empty,
     )
 
 
-def make_collate(cfg, tokenizer, sample_qa: bool, system_prompt_mode="none", source_version=None, training=False):
+def make_collate(cfg, tokenizer, sample_qa: bool, training=False):
     """Keyword-only collate: positional drift would change the target format silently."""
     def collate(rows):
         return collate_fn(
             rows, tokenizer,
             max_context_tokens=cfg.data.max_context_tokens,
-            max_question_tokens=cfg.data.max_question_tokens,
+            max_conversation_tokens=cfg.data.max_conversation_tokens,
             max_answer_tokens=cfg.data.max_answer_tokens,
             append_eos=cfg.data.append_eos,
-            use_chat_template=cfg.data.use_chat_template,
             chat_template_enable_thinking=cfg.data.chat_template_enable_thinking,
             qa_per_context=cfg.data.qa_per_context,
             sample_qa=sample_qa,
             question_padding_side=cfg.data.question_padding_side,
-            eos_mode=cfg.data.eos_mode,
-            system_prompt_mode=system_prompt_mode,
-            source_version=source_version,
             training=training,
-            qa_prompt=cfg.data.qa_prompt,
+            train_tasks=cfg.data.train_tasks if training else "qa",
             recon_prompt=cfg.data.recon_prompt,
         )
     return collate

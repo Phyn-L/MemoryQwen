@@ -1,6 +1,7 @@
 checkpoint:
   output_dir: outputs
 data:
+  conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_c1qa.jsonl
   cache_dataset: true
   cache_sortish_lengths: true
   chat_template_enable_thinking: false
@@ -11,9 +12,12 @@ data:
   max_input_context_length: 8192
   train_tasks: mix
   recon_ratio: 0.5
-  qa_prompt: "Answer the question using the information in memory.\nQuestion: "
+  recon_schedule: constant
+  recon_schedule_curve: linear
+  recon_ratio_start: 0.5
+  recon_ratio_end: 0.5
+  recon_ratio_min: 0.1
   recon_prompt: "Reconstruct the original context from memory."
-  max_question_tokens: 128
   qa_per_context: 4
   root: ${DATA_ROOT:-/data/lz/contexts/aggregated}
   sortish_bucket_multiplier: 50
@@ -21,7 +25,6 @@ data:
   - squad
   train_datasets: all
   train_max_samples: null
-  use_chat_template: false
   validation_datasets:
   - squad
   validation_max_samples: 2000
@@ -44,7 +47,7 @@ memory:
   memory_resampler_heads: 4
   memory_resampler_hidden_size: 256
   memory_resampler_ffn_ratio: 2
-  reader_memory_source: memory
+  reader_memory_source: memory_hidden
 
   # Question-conditioned readout
   readout_length: 8

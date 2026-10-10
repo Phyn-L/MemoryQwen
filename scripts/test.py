@@ -35,8 +35,6 @@ def evaluation_config(checkpoint, config=None, machine=None):
 def main():
     parser = argparse.ArgumentParser(description="Evaluate a trained Qwen memory checkpoint")
     parser.add_argument("--config", help="Test YAML (checkpoint architecture), or explicit full training YAML")
-    parser.add_argument("--datasets", nargs="+", help="Dataset directory names under data.root")
-    parser.add_argument("--data-root", help="Aggregated dataset root")
     parser.add_argument("--output-dir", help="Directory for evaluation JSON reports")
     parser.add_argument(
         "--report-file",
@@ -48,15 +46,9 @@ def main():
     )
     parser.add_argument("--checkpoint", "--ckpt", required=True)
     parser.add_argument("--split", choices=("validation", "test"), default="validation")
-    parser.add_argument("--source-version", choices=("ms_marco_v1_1", "ms_marco_v2_1"))
-    parser.add_argument("--system-prompt-mode", choices=("none", "context", "separate"), default="none",
-                        help="Dataset-specific ICL prompt: disabled, compressed with context, or separate chat system message")
     parser.add_argument("--no-filter-long-context", action="store_true")
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--max-context-tokens", type=int)
-    parser.add_argument("--max-context-rows", type=int)
-    parser.add_argument("--qa-per-context", type=int)
-    parser.add_argument("--context-shuffle-seed", type=int, default=42)
     parser.add_argument(
         "--batch-size", "--bs", type=int,
         help="Contexts per batch for the evaluation loader (default: the checkpoint config's "
@@ -94,33 +86,19 @@ def main():
         if 'test' in raw:
             if set(raw) - {'test', 'machine'}:
                 parser.error("Test YAML supports only test and machine sections")
-            allowed = {'datasets', 'split', 'batch_size', 'qa_batch_size', 'max_new_tokens',
-                       'max_samples', 'teacher_forced', 'system_prompt_mode'}
+            allowed = {'split', 'batch_size', 'qa_batch_size', 'max_new_tokens',
+                       'max_samples', 'teacher_forced'}
             if not isinstance(raw['test'], dict) or set(raw['test']) - allowed:
                 parser.error("Unknown test YAML fields")
             parser.set_defaults(**raw['test'], machine=raw.get('machine'))
     args = parser.parse_args()
-    if args.system_prompt_mode not in ("none", "context", "separate"):
-        parser.error("system-prompt-mode must be none, context, or separate")
-    if args.system_prompt_mode == "context" and args.teacher_forced:
-        parser.error("context prompt mode supports autoregressive evaluation only; auxiliary reconstruction positions have checkpoint-fixed capacity")
     if args.split not in ('validation', 'test'):
         parser.error("split must be validation or test")
-    if args.datasets is not None and (not isinstance(args.datasets, (list, tuple)) or not args.datasets or
-            any(not isinstance(x, str) or not x or '/' in x or x in ('.', '..') for x in args.datasets)):
-        parser.error("datasets must be a list of dataset directory names")
     if args.max_samples is not None and args.max_samples <= 0:
         parser.error("max-samples must be positive")
-    for name in ("max_context_rows", "qa_per_context"):
-        if getattr(args, name) is not None and getattr(args, name) <= 0:
-            parser.error(f"{name.replace('_', '-')} must be positive")
     cfg = evaluation_config(args.checkpoint, args.config, args.machine)
-    if args.data_root:
-        cfg.data.root = args.data_root
     if args.max_context_tokens is not None:
         cfg.data.max_context_tokens = args.max_context_tokens
-    if args.datasets:
-        setattr(cfg.data, f"{args.split}_datasets", tuple(args.datasets))
     for name, value in (
         ("--batch-size", args.batch_size),
         ("--qa-batch-size", args.qa_batch_size),
@@ -168,14 +146,11 @@ def main():
         # --max-samples is the only cap here: the config's {split}_max_samples belongs to
         # the training loop, and silently applying it would change previous eval numbers.
         limit=args.max_samples,
-        max_context_rows=args.max_context_rows, qa_per_context=args.qa_per_context,
-        context_shuffle_seed=args.context_shuffle_seed,
-        allow_empty=True, source_version=args.source_version,
+        allow_empty=True,
     )
     loader = DataLoader(
         ds, batch_size=cfg.training.batch_size, shuffle=False,
-        collate_fn=make_collate(cfg, tokenizer, sample_qa=False,
-                                system_prompt_mode=args.system_prompt_mode, source_version=args.source_version),
+        collate_fn=make_collate(cfg, tokenizer, sample_qa=False),
     )
     if accelerator is not None:
         loader = accelerator.prepare(loader)
@@ -219,19 +194,11 @@ def main():
         if teacher_forced is not None:
             print("teacher-forced (diagnostic only):", teacher_forced)
     if is_main:
-        from src.icl_baseline import system_prompt_for
-        prompt_datasets = sorted({record.dataset for record in ds})
         report = {"checkpoint": str(checkpoint_path), "split": args.split,
-                  "datasets": getattr(cfg.data, f"{args.split}_datasets") or cfg.data.dataset,
+                  "conversation_file": getattr(cfg.data, f"{args.split}_conversation_file", None)
+                  or cfg.data.conversation_file,
                   "config": cfg.to_dict(), "autoregressive": autoregressive,
-                  "teacher_forced": teacher_forced,
-                  "prompt_protocol": {
-                      "mode": args.system_prompt_mode,
-                      "source_version": args.source_version,
-                      "system_prompts": {name: system_prompt_for(name, args.source_version) for name in prompt_datasets}
-                          if args.system_prompt_mode != "none" else {},
-                      "length_budget": "Prompt overhead is additional to source context/question limits",
-                  }}
+                  "teacher_forced": teacher_forced}
         if args.report_file:
             report_path = Path(args.report_file)
             report_path.parent.mkdir(parents=True, exist_ok=True)

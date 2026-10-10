@@ -1,0 +1,10 @@
+# Conversation-format PWC input.
+data:
+  root: ${DATA_ROOT:-/data/lz/contexts}
+  conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_pwc.jsonl
+  train_conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_pwc.jsonl
+  validation_conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_pwc.jsonl
+  test_conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_pwc.jsonl
+  train_tasks: qa
+  max_conversation_tokens: 1024
+  validation_max_samples: 2000
