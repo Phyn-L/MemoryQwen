@@ -7,4 +7,4 @@ data:
   test_conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_pwc.jsonl
   train_tasks: qa
   max_conversation_tokens: 1024
-  validation_max_samples: 2000
+  validation_max_samples: 4096

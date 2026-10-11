@@ -27,7 +27,7 @@ data:
   train_max_samples: null
   validation_datasets:
   - squad
-  validation_max_samples: 2000
+  validation_max_samples: 4096
 evaluation:
   autoregressive_every: 400
   autoregressive_max_qa: 1024
