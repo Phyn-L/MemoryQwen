@@ -9,7 +9,7 @@ source array in memory.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures import ProcessPoolExecutor
 import json
 from collections import deque
 from pathlib import Path
@@ -22,6 +22,7 @@ def iter_array(path: Path, chunk_size: int = 8 * 1024 * 1024):
     with path.open("r", encoding="utf-8") as handle:
         buffer = ""
         started = finished = False
+        row_number = 0
         while not finished:
             chunk = handle.read(chunk_size)
             if chunk:
@@ -38,6 +39,10 @@ def iter_array(path: Path, chunk_size: int = 8 * 1024 * 1024):
                     started = True
                     buffer = buffer[1:]
                 buffer = buffer.lstrip()
+                # The comma separating two array items can be the first bytes
+                # of a newly read chunk after the previous item was decoded.
+                if buffer.startswith(","):
+                    buffer = buffer[1:].lstrip()
                 if not buffer:
                     break
                 if buffer[0] == "]":
@@ -46,10 +51,12 @@ def iter_array(path: Path, chunk_size: int = 8 * 1024 * 1024):
                     break
                 try:
                     value, end = decoder.raw_decode(buffer)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as error:
+                    decode_error = error
                     break
                 if not isinstance(value, dict):
                     raise ValueError(f"{path} contains a non-object array item")
+                row_number += 1
                 yield value
                 buffer = buffer[end:].lstrip()
                 if buffer.startswith(","):
@@ -66,9 +73,14 @@ def iter_array(path: Path, chunk_size: int = 8 * 1024 * 1024):
                 break
             if not chunk:
                 tail = buffer.lstrip()
-                if tail.startswith("]") or not tail:
+                if tail.startswith("]"):
                     break
-                raise ValueError(f"truncated JSON array: {path}")
+                excerpt = tail[:160].replace("\n", "\\n")
+                raise ValueError(
+                    f"invalid or truncated JSON near array row {row_number + 1} in {path}: "
+                    f"{decode_error.msg} at line {decode_error.lineno}, "
+                    f"column {decode_error.colno}; remaining input starts with {excerpt!r}"
+                )
 
 
 def normalize_row(item):
@@ -99,6 +111,7 @@ def convert(source: Path, destination: Path, max_rows: int | None = None, worker
     if workers < 1:
         raise ValueError("workers must be at least 1")
     destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + ".incomplete")
     count = 0
     skipped_turns = skipped_rows = 0
     rows = iter(enumerate(iter_array(source), 1))
@@ -110,7 +123,7 @@ def convert(source: Path, destination: Path, max_rows: int | None = None, worker
                 pending.append(executor.submit(normalize_row, next(rows)))
             except StopIteration:
                 break
-        with destination.open("w", encoding="utf-8") as output, tqdm(
+        with temporary.open("w", encoding="utf-8") as output, tqdm(
             desc="Converting", unit="rows", total=max_rows
         ) as progress:
             while pending:
@@ -130,6 +143,10 @@ def convert(source: Path, destination: Path, max_rows: int | None = None, worker
                     pending.append(executor.submit(normalize_row, next(rows)))
                 except StopIteration:
                     continue
+        temporary.replace(destination)
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
     finally:
         executor.shutdown(wait=True, cancel_futures=True)
     print(f"skipped empty turns={skipped_turns}, rows without assistant={skipped_rows}")
