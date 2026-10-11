@@ -72,7 +72,7 @@ def test_the_table_holds_both_machines_with_distinct_paths():
         assert entry["DATA_ROOT"].endswith(("aggregated", "contexts")), name
     assert MACHINES["4090"]["MODEL_ROOT"] != MACHINES["h200"]["MODEL_ROOT"]
     assert MACHINES["4090"]["DATA_ROOT"] == "/data/lz/contexts"
-    assert MACHINES["h200"]["DATA_ROOT"] == "/data/lz/contexts"
+    assert MACHINES["h200"]["DATA_ROOT"] == "/home/lijie/proj2/xmu/lz/contexts"
     # The H200 has no internet, so its entry has to keep wandb offline.
     assert MACHINES["h200"]["WANDB_MODE"] == "offline"
 

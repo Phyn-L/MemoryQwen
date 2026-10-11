@@ -32,10 +32,10 @@ MACHINES: dict[str, dict[str, str]] = {
         "MODEL_ROOT": "/data/lz/hf_cache/hub",
         "DATA_ROOT": "/data/lz/contexts",
     },
-    # 8x H200: use the same conversation-data root; W&B stays offline.
+    # 8x H200: model and conversation data live under the shared project tree.
     "h200": {
         "MODEL_ROOT": "/home/lijie/proj2/xmu/lz/Qwen",
-        "DATA_ROOT": "/data/lz/contexts",
+        "DATA_ROOT": "/home/lijie/proj2/xmu/lz/contexts",
         "WANDB_MODE": "offline",
     },
     "a800": {
