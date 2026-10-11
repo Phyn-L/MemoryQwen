@@ -253,7 +253,6 @@ def main() -> None:
             f"steps={total_steps} (epochs={cfg.training.epochs}) "
             f"batch={cfg.training.batch_size}x{ranks} ranks={cfg.training.batch_size * ranks} "
             f"warmup={cfg.scheduler.warmup_steps} "
-            f"teacher_forced_every={cfg.evaluation.teacher_forced_every} "
             f"autoregressive_every={cfg.evaluation.autoregressive_every} "
             f"checkpoint_every={cfg.evaluation.autoregressive_every} "
             f"log_every={cfg.logging.log_every} "
@@ -420,16 +419,6 @@ def main() -> None:
             # DDP collective for the entire evaluation, which the NCCL watchdog aborts
             # after 10 minutes ("Watchdog caught collective operation timeout").  The
             # evaluators all-reduce their accumulators, so every rank must call them.
-            # Teacher forcing feeds the answer prefix back in, so its em/f1 mostly reward
-            # lexical continuation.  Run it as a diagnostic, and reuse its scalars for the
-            # autoregressive block below when both happen to fire on the same step.
-            teacher_metrics = None
-            if len(validation_loader) and should_evaluate(
-                step, cfg.evaluation.teacher_forced_every, total_steps
-            ):
-                teacher_metrics = evaluator.teacher_forced(
-                    base_model, validation_loader, device
-                )
             metrics = None
             if len(validation_loader) and should_evaluate(
                 step, cfg.evaluation.autoregressive_every, total_steps
@@ -438,21 +427,19 @@ def main() -> None:
                     base_model,
                     validation_loader,
                     device,
-                    include_teacher_metrics=teacher_metrics is None,
+                    include_teacher_metrics=False,
                     max_qa=cfg.evaluation.autoregressive_max_qa,
                     row_loader=validation_row_loader,
                 )
             if run and is_main:
-                # Both evaluations are logged together; the step is explicit, so the two
-                # sections share a step whether or not both ran.
-                for payload in eval_log_payloads(teacher_metrics, metrics):
+                for payload in eval_log_payloads(None, metrics):
                     run.log(payload, step=step)
             if accelerator is not None:
                 # Resynchronise explicitly so a rank whose shard finished early cannot
                 # race ahead into the next training step.
                 accelerator.wait_for_everyone()
             if (
-                teacher_metrics is not None or metrics is not None
+                metrics is not None
             ) and torch.cuda.is_available():
                 # An evaluation allocates a very different tensor mix from a training step
                 # (whole contexts through every decoder, a full validation loader), and the

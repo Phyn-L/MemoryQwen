@@ -117,4 +117,6 @@ for name in "${RUNS[@]}"; do
 done
 
 echo "[ablation] all runs finished; outputs: $OUTPUT_ROOT"
-python /home/sean/burn.py
+
+sleep 1m
+python /home/lijie/proj2/xmu/lz/cardhold/hold_train.py

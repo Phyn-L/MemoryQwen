@@ -73,7 +73,9 @@ def test_the_loop_takes_its_cadences_from_the_config():
     source = _train_source()
     assert "step % cfg.logging.log_every == 0" in source
     assert "step % 10 == 0" not in source, "the loss-logging cadence must come from the config"
-    assert source.count("should_evaluate(") >= 3, "both evaluations must use the final-step rule"
+    assert source.count("should_evaluate(") >= 2, "autoregressive evaluation must use the final-step rule"
+    assert "teacher_metrics = evaluator.teacher_forced" not in source
+    assert "include_teacher_metrics=False" in source
 
 
 def test_the_loop_echoes_the_resolved_schedule():
@@ -89,7 +91,7 @@ def test_the_allocator_cache_is_released_after_an_evaluation():
         "the evaluation's cached blocks must not be left for the next backward"
     )
     # It must be tied to an evaluation having happened, not run every step.
-    assert "teacher_metrics is not None or metrics is not None" in source
+    assert "metrics is not None" in source
 
 
 def _parenthesised_call(source: str, needle: str) -> str:
