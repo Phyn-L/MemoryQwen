@@ -7,7 +7,7 @@
 | 文件 | 作用 |
 | --- | --- |
 | `data.py` | 读取聚合后的 JSONL，按输入长度过滤/缓存 context，构造 QA/Recon 任务，tokenize，并生成 batch。 |
-| `dataset_cache.py` | Hugging Face Dataset 与 sortish 长度缓存；用文件指纹避免旧缓存误用。 |
+| `cache_utils.py` | offset 和 sortish 长度缓存共用的指纹与文件锁工具。 |
 | `pipeline.py` | 根据配置创建 train/validation/test dataset、collator 和 sortish sampler。 |
 | `model.py` | 冻结 Qwen 主干，写入 memory slot，构造每层 memory KV，执行 QA、Recon、token reconstruction 和蒸馏前向。 |
 | `MemoryDecoder.py` | 将每层 memory hidden 映射为 memory-only token reconstruction hidden。 |
@@ -22,7 +22,7 @@
 入口是 `pipeline.make_context_dataset()`，底层是 `ConversationDataset`：
 
 1. 每个 split 直接读取配置中的 JSONL 文件；每行包含 `context` 和 `conversations`。
-2. `ConversationDataset` 建立字节 offset 索引，随机访问时只解析当前行，不把整个文件载入内存。空 context、超过 `data.max_input_context_length` 的 context，或没有 assistant turn 的行会被过滤。
+2. `ConversationDataset` 建立字节 offset 索引，随机访问时只解析当前行，不把整个文件载入内存。首次扫描会显示 `Indexing conversation data` 进度条，并在 `data.cache_offsets=true` 时缓存过滤后的 offsets；长 context 的 tokenizer 过滤按 `data.tokenizer_filter_batch_size` 批量执行，当前默认 batch size 为 1024。缓存放在共享的 `outputs/conversation_cache` 下，并按数据文件、过滤参数和 tokenizer 内容指纹复用，因此兼容模型无需重复处理。空 context、超过 `data.max_context_tokens` 的 context，或没有 assistant turn 的行会被过滤。
 3. 一个 JSONL 行对应一个 `ContextRecord`。`ContextRecord.turns()` 将每个 assistant 消息配对为一个监督 turn，并保留此前所有 system/user/assistant 消息作为历史。
 4. `SortishSampler` 先按 context token 长度排序，再在 bucket 内随机打乱，减少 padding；长度缓存同时绑定数据 fingerprint 和 tokenizer 信息。
 5. `collate_context_records` 对 context、conversation prompt、answer 分别 tokenize：

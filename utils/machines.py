@@ -1,6 +1,6 @@
 """Per-machine locations, so a run needs one ``machine`` field instead of an env file.
 
-The Qwen weights and the aggregated data tree sit in different places on the two machines
+The Qwen weights and conversation data sit in different places on the machines
 this project trains on, and that used to be a gitignored ``scripts/env.local.sh`` exporting
 ``MODEL_ROOT`` / ``DATA_ROOT``. Keeping the table in the repository makes a run
 self-describing: ``machine: h200`` in the config, ``--machine h200`` on the command line, or
@@ -27,16 +27,15 @@ import socket
 from typing import Mapping
 
 MACHINES: dict[str, dict[str, str]] = {
-    # 4x RTX 4090: the tracked configs' own ${MODEL_ROOT:-...} defaults apply here, and the
-    # entry makes the machine name explicit.
+    # 4x RTX 4090: local conversation data and local model weights.
     "4090": {
         "MODEL_ROOT": "/data/lz/hf_cache/hub",
-        "DATA_ROOT": "/data/lz/contexts/aggregated",
+        "DATA_ROOT": "/data/lz/contexts",
     },
-    # 8x H200, no internet, so W&B has to stay offline.
+    # 8x H200: use the same conversation-data root; W&B stays offline.
     "h200": {
         "MODEL_ROOT": "/home/lijie/proj2/xmu/lz/Qwen",
-        "DATA_ROOT": "/mnt/shared-storage-user/evoagi-share/lijie/proj2/xmu/lz/contexts",
+        "DATA_ROOT": "/data/lz/contexts",
         "WANDB_MODE": "offline",
     },
     "a800": {

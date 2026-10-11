@@ -76,8 +76,8 @@ shot 数、生成长度、输入长度、dtype、seed、chat template、数据 s
 
 | machine | MODEL_ROOT | DATA_ROOT |
 |---|---|---|
-| 4090 | `/data/lz/hf_cache/hub` | `/data/lz/contexts/aggregated` |
-| h200 | `/home/lijie/proj2/xmu/lz` | `/mnt/shared-storage-user/evoagi-share/lijie/proj2/xmu/lz/contexts` |
+| 4090 | `/data/lz/hf_cache/hub` | `/data/lz/contexts` |
+| h200 | `/home/lijie/proj2/xmu/lz` | `/data/lz/contexts` |
 
 训练数据采用 `<DATA_ROOT>/ift_c1qa.jsonl` 或 `<DATA_ROOT>/ift_pwc.jsonl` 的 conversation schema：每行包含 context + conversations。PWC 保留多轮 user/assistant 历史；C1QA 通常每行一个 assistant turn。独立 ICL 评估仍使用其自身配置的数据源。
 

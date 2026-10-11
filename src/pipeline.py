@@ -22,9 +22,9 @@ def model_run_label(model_path: str) -> str:
     return f"Qwen{match.group(1)}B" if match else "Qwen"
 
 
-def model_cache_dir(model_path: str) -> Path:
-    """Per-model directory for the reusable dataset / sortish-length caches."""
-    return Path("outputs") / model_run_label(model_path)
+def data_cache_dir() -> Path:
+    """Shared cache directory for data preprocessing across compatible models."""
+    return Path("outputs") / "conversation_cache"
 
 
 def new_run_name(model_path: str) -> str:
@@ -56,7 +56,7 @@ def make_context_dataset(cfg, split: str, tokenizer, limit=None, allow_empty: bo
         raise ValueError(
             f"data.{split}_conversation_file or data.conversation_file is required"
         )
-    cache_dir = model_cache_dir(cfg.model.name_or_path) if cfg.data.cache_dataset else None
+    cache_dir = data_cache_dir() if cfg.data.cache_offsets else None
     return ConversationDataset(
         path,
         tokenizer=tokenizer,
@@ -66,6 +66,7 @@ def make_context_dataset(cfg, split: str, tokenizer, limit=None, allow_empty: bo
         filter_long_context=cfg.data.filter_long_context,
         filter_no_conversation=cfg.data.filter_no_qa,
         cache_dir=cache_dir,
+        tokenizer_filter_batch_size=cfg.data.tokenizer_filter_batch_size,
         allow_empty=allow_empty,
     )
 

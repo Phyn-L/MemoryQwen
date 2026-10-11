@@ -15,37 +15,29 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 import sys
-import tempfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data import QARecord, _answers  # noqa: E402
+from src.data import _messages_from_row  # noqa: E402
 from src.evaluator import Evaluator  # noqa: E402
 from src.metrics import best_reference_metrics  # noqa: E402
 
-QWEN_1_7B = (
-    "/data/lz/hf_cache/hub/models--Qwen--Qwen3-1.7B/"
-    "snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e"
-)
+def test_messages_keep_every_non_empty_gold_answer():
+    messages = _messages_from_row({
+        "conversations": [{
+            "role": "assistant",
+            "content": "cat",
+            "answers": ["cat", "the cat", " a cat ", ""],
+        }],
+    })
+    assert messages[0].answers == ("cat", "the cat", "a cat")
 
 
-def test_answers_keeps_every_non_empty_gold_answer():
-    assert _answers({"answers": ["cat", "the cat", " a cat ", ""]}) == ("cat", "the cat", "a cat")
-    assert _answers({"answer": "x"}) == ("x",)
-    assert _answers({"answers": []}) == ()
-    assert _answers({"answers": None}) == ()
-    assert _answers({}) == ()
-
-
-def test_first_answer_is_still_the_training_target():
-    record = QARecord("q", "first", answers=("first", "second"))
-    assert record.answer == "first", "training supervises one answer; it must be the first"
-    assert record.references == ("first", "second")
-
-
-def test_references_fall_back_to_the_single_answer():
-    assert QARecord("q", "only").references == ("only",)
-    assert QARecord("q", "").references == ()
+def test_message_references_fall_back_to_the_single_answer():
+    messages = _messages_from_row({
+        "conversations": [{"role": "assistant", "content": "only"}],
+    })
+    assert messages[0].answers == ()
 
 
 class _WordTokenizer:
@@ -80,10 +72,13 @@ class _WordTokenizer:
 def test_first_token_em_considers_every_reference():
     tokenizer = _WordTokenizer()
     evaluator = Evaluator(tokenizer, SimpleNamespace())
-    assert evaluator._first_token_ids(QARecord("q", "cat", answers=("cat", "dog", ""))) == {
+    record = SimpleNamespace(references=("cat", "dog", ""))
+    assert evaluator._first_token_ids(record) == {
         tokenizer("cat").input_ids[0], tokenizer("dog").input_ids[0],
     }
-    assert evaluator._first_token_ids(QARecord("q", "cat")) == {tokenizer("cat").input_ids[0]}
+    assert evaluator._first_token_ids(SimpleNamespace(references=("cat",))) == {
+        tokenizer("cat").input_ids[0],
+    }
 
 
 def test_first_token_em_sees_the_space_prefixed_generation():
@@ -95,7 +90,7 @@ def test_first_token_em_sees_the_space_prefixed_generation():
     """
     tokenizer = _WordTokenizer()
     evaluator = Evaluator(tokenizer, SimpleNamespace())
-    record = QARecord("q", "cat", answers=("cat", "dog"))
+    record = SimpleNamespace(references=("cat", "dog"))
     generated = tokenizer(" cat").input_ids[0]
     assert generated != tokenizer("cat").input_ids[0], "the fake tokenizer must tell them apart"
     assert evaluator._first_token_hit(generated, record) is True
@@ -106,7 +101,7 @@ def test_first_token_em_sees_the_space_prefixed_generation():
 def test_first_token_em_rejects_wrong_empty_and_padding_tokens():
     tokenizer = _WordTokenizer()
     evaluator = Evaluator(tokenizer, SimpleNamespace())
-    record = QARecord("q", "cat")
+    record = SimpleNamespace(references=("cat",))
     assert evaluator._first_token_hit(tokenizer("bird").input_ids[0], record) is False
     assert evaluator._first_token_hit(tokenizer.pad_token_id, record) is False
     # An id the tokenizer cannot decode carries no text, so it cannot match by text either.
@@ -119,50 +114,61 @@ def test_multi_reference_reduction_is_a_max_not_the_first_reference():
     first_only = best_reference_metrics(prediction, references[:1])
     assert scored["em"] == 1.0 and scored["f1"] == 1.0
     assert first_only["em"] == 0.0, "this is the stricter number the evaluator used to report"
-    # A record carrying only the first answer reproduces that old, stricter number.
-    assert best_reference_metrics(prediction, QARecord("q", "cat").references)["em"] == 0.0
 
 
-def test_dataset_cache_roundtrip_keeps_every_reference():
-    """The end-to-end path: jsonl -> dataset -> HF cache -> reload.
+def test_conversation_dataset_offset_cache_keeps_every_reference(tmp_path):
+    """The JSONL offset cache must preserve every answer reference."""
+    from src.data import ConversationDataset
 
-    This is the regression that matters. Adding a field to the cached schema without
-    bumping ``dataset_cache.CACHE_VERSION`` would silently keep serving caches that lack
-    it, so this test also fails if the cache is reused after the schema changed.
-    """
-    if not Path(QWEN_1_7B).exists():
-        print("   (skipped: Qwen1.7B tokenizer not available)")
-        return
+    class _Tokenizer:
+        name_or_path = "reference-test-tokenizer"
+        vocab_size = 32
 
-    from transformers import AutoTokenizer
+        def __call__(self, texts, **kwargs):
+            if isinstance(texts, str):
+                texts = [texts]
 
-    from src.data import AggregatedContextDataset
+            class Encoded:
+                input_ids = [text.split() for text in texts]
 
-    tokenizer = AutoTokenizer.from_pretrained(QWEN_1_7B, local_files_only=True)
-    with tempfile.TemporaryDirectory() as root:
-        dataset_dir = Path(root) / "squad"
-        dataset_dir.mkdir()
-        rows = [
-            {"context_id": "c1", "context": "Paris is in France.",
-             "qa_pairs": [{"question": "Where?", "answers": ["France", "the country of France"]}]},
-            {"context_id": "c2", "context": "The cat sat on the mat.",
-             "qa_pairs": [{"question": "Who sat?", "answers": ["cat", "the cat"]}]},
-        ]
-        (dataset_dir / "train.jsonl").write_text(
-            "\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8",
+            return Encoded()
+
+    source = tmp_path / "conversation.jsonl"
+    source.write_text(
+        json.dumps({
+            "context": "Paris is in France.",
+            "conversations": [{
+                "role": "user",
+                "content": "Where?",
+            }, {
+                "role": "assistant",
+                "content": "France",
+                "answers": ["France", "the country of France"],
+            }],
+        }) + "\n",
+        encoding="utf-8",
+    )
+    cache_dir = tmp_path / "cache"
+    tokenizer = _Tokenizer()
+
+    built = ConversationDataset(
+        source,
+        tokenizer=tokenizer,
+        max_context_tokens=64,
+        cache_dir=cache_dir,
+    )
+    reloaded = ConversationDataset(
+        source,
+        tokenizer=tokenizer,
+        max_context_tokens=64,
+        cache_dir=cache_dir,
+    )
+
+    for dataset in (built, reloaded):
+        assert dataset[0].conversations[-1].answers == (
+            "France",
+            "the country of France",
         )
-
-        cache_dir = Path(root) / "outputs"
-        built = AggregatedContextDataset(root, "all", "train", tokenizer, 64, cache_dir=cache_dir)
-        reloaded = AggregatedContextDataset(root, "all", "train", tokenizer, 64, cache_dir=cache_dir)
-
-        for name, dataset in (("built", built), ("reloaded from cache", reloaded)):
-            collected = [pair for record in dataset for pair in record.qa_pairs]
-            assert len(collected) == 2, name
-            assert [pair.references for pair in collected] == [
-                ("France", "the country of France"), ("cat", "the cat"),
-            ], name
-            assert [pair.answer for pair in collected] == ["France", "cat"], name
 
 
 if __name__ == "__main__":

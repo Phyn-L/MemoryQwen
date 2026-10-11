@@ -112,23 +112,6 @@ def test_icl_yaml_cli_precedence_and_hotpot_paths(tmp_path):
         module.parse_args(['--config', str(ROOT / 'configs/icl_zeroshot.yaml'), '--bs', '0'])
 
 
-def test_hotpot_aggregated_records_shared_by_memory_and_icl(tmp_path):
-    import json
-    from src.icl_baseline import load_jsonl, format_prompt
-    from src.data import AggregatedContextDataset
-    folder = tmp_path / 'hotpotqa'; folder.mkdir()
-    (folder / 'validation.jsonl').write_text(json.dumps({'context': 'Paris is in France.', 'qa_pairs': [
-        {'id': 'hp1', 'question': 'Where is Paris?', 'answers': ['France'], 'metadata': {'supporting_facts': {'title': ['Paris'], 'sent_id': [0]}}} ]})+'\n')
-    class Tokenizer:
-        def __call__(self, text, **kwargs):
-            return type('Encoding', (), {'input_ids': list(range(len(text.split())))})()
-    ds = AggregatedContextDataset(tmp_path, ['hotpotqa'], 'validation', Tokenizer(), 2048, None, True, True)
-    icl = load_jsonl(folder / 'validation.jsonl', 'hotpotqa')
-    assert len(ds) == len(icl) == 1
-    assert icl[0].references == ('France',)
-    assert 'Where is Paris?' in format_prompt(icl[0], [])
-
-
 def test_launch_uses_current_interpreter_and_gpu_count(monkeypatch):
     monkeypatch.delenv('NUM_PROCESSES', raising=False)
     args = ['--config', 'path with spaces/train.yaml', '--machine', 'h200']

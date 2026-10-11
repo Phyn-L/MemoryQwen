@@ -101,7 +101,7 @@ MemoryQwen/
 | `src/MemoryDecoder.py` | 原位 | 本轮不改大小写或导入路径 |
 | `src/__init__.py` | 原位 | 保持内容与接口 |
 | `src/data.py` | 原位 | 保持内容与接口 |
-| `src/dataset_cache.py` | 原位 | 保持内容与接口 |
+| `src/cache_utils.py` | 原位 | 保持 offset / sortish cache 工具 |
 | `src/dtypes.py` | 原位 | 保持内容与接口 |
 | `src/evaluator.py` | 原位 | 保持内容与接口 |
 | `src/icl_baseline.py` | 原位 | 保持内容与接口 |

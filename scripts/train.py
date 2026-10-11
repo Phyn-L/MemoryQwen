@@ -17,7 +17,7 @@ from src.metrics import METRIC_KEYS
 from src.pipeline import (
     make_collate,
     make_context_dataset,
-    model_cache_dir,
+    data_cache_dir,
     new_run_name,
     resolve_split_limit,
 )
@@ -183,7 +183,7 @@ def main() -> None:
         model.to(device)
 
     _configure_run_paths(cfg, accelerator, args.resume)
-    cache_dir = model_cache_dir(cfg.model.name_or_path)
+    cache_dir = data_cache_dir()
 
     train_dataset = make_context_dataset(
         cfg,

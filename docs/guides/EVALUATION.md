@@ -93,16 +93,12 @@ Both evaluators additionally report `first_token_em`: the first answer token mus
 produced from memory alone, so it is the retrieval signal that `em`/`f1` are not.
 
 Both evaluators reduce over *every* gold answer with a metric-wise max, and
-`src/data.py` now carries all of them through the dataset cache (`QARecord.answers`,
-`dataset_cache.CACHE_VERSION = 4`; the older schema kept only the first answer, which made
-the evaluator see one reference where the baseline sees up to six -- of the 16498 answered
-QA pairs in `aggregated/squad/validation.jsonl`, 12728 have 3 references, 2092 have 5 and
-1384 have 4). `first_token_em` uses the same rule: matching any annotator's first token
+`src/data.py` carries all of them through each conversation record. The JSONL offset cache
+stores byte positions only, so it cannot drop answer references. `first_token_em` uses the
+same rule: matching any annotator's first token
 counts as a hit, compared as a token id or as normalized text so the leading-space
 encoding of a generated token does not hide a hit. `tests/test_references.py` covers the
-end-to-end path
-(jsonl -> dataset -> HF cache -> reload), which is where a missed `CACHE_VERSION` bump would
-show up.
+end-to-end JSONL -> dataset -> offset-cache -> reload path.
 
 Both harnesses read the same file, and it is the only supported one:
 `scripts/evaluation/test_icl_suite.py` defaults to `<data.root>/squad/validation.jsonl` and reads it

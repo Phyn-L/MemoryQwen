@@ -14,7 +14,7 @@ from tqdm.auto import tqdm
 
 from utils.ddp import is_main_process
 
-from . import dataset_cache
+from . import cache_utils
 
 
 def _progress_enabled() -> bool:
@@ -154,15 +154,21 @@ def _messages_from_row(row: dict[str, Any]) -> tuple[ConversationMessage, ...]:
 class ConversationDataset(Dataset):
     """Random-access JSONL dataset with a compact byte-offset index."""
 
+    CACHE_VERSION = 1
+
     def __init__(self, path: str | Path, tokenizer=None, max_context_tokens=2048,
                  max_input_context_length=8192, max_samples=None,
                  filter_long_context=True, filter_no_conversation=True,
-                 cache_dir: str | Path | None = None, allow_empty=False):
+                 cache_dir: str | Path | None = None, allow_empty=False,
+                 tokenizer_filter_batch_size: int = 1024):
         self.path = Path(path)
         if self.path.suffix != ".jsonl":
             raise ValueError(f"conversation loader expects JSONL: {self.path}")
         if not self.path.exists():
             raise FileNotFoundError(self.path)
+        if tokenizer_filter_batch_size <= 0:
+            raise ValueError("tokenizer_filter_batch_size must be positive")
+        self.tokenizer_filter_batch_size = tokenizer_filter_batch_size
         self.cache_metadata = {
             "path": str(self.path.resolve()), "size": self.path.stat().st_size,
             "mtime_ns": self.path.stat().st_mtime_ns,
@@ -172,37 +178,186 @@ class ConversationDataset(Dataset):
             "filter_long_context": filter_long_context,
             "filter_no_conversation": filter_no_conversation,
         }
-        self._offsets = []
-        with self.path.open("rb") as handle:
-            while True:
-                offset = handle.tell()
-                line = handle.readline()
-                if not line:
-                    break
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                context = str(row.get("context", "")).strip()
-                if not context:
-                    continue
-                if filter_long_context and tokenizer is not None:
-                    ids = tokenizer(
-                        context,
-                        add_special_tokens=False,
-                        truncation=True,
-                        max_length=max_input_context_length + 1,
-                    ).input_ids
-                    if not ids or len(ids) > max_context_tokens:
-                        continue
-                messages = _messages_from_row(row)
-                if filter_no_conversation and not any(m.role == "assistant" for m in messages):
-                    continue
-                self._offsets.append(offset)
-                if max_samples is not None and len(self._offsets) >= max_samples:
-                    break
+        self._offsets = self._load_or_build_offsets(
+            tokenizer,
+            max_context_tokens,
+            max_input_context_length,
+            max_samples,
+            filter_long_context,
+            filter_no_conversation,
+            Path(cache_dir) if cache_dir else None,
+        )
         if not self._offsets and not allow_empty:
             raise RuntimeError(f"No usable conversation rows found in {self.path}")
         self._handle = None
+
+    def _cache_metadata(self, tokenizer) -> dict[str, Any]:
+        metadata = {
+            "version": self.CACHE_VERSION,
+            **self.cache_metadata,
+            "tokenizer": cache_utils.tokenizer_fingerprint(tokenizer),
+        }
+        metadata["fingerprint"] = cache_utils.compute_fingerprint(metadata)
+        return metadata
+
+    def _offset_cache_path(self, cache_dir: Path, metadata: dict[str, Any]) -> Path:
+        return cache_dir / f"conversation_offsets-{metadata['fingerprint']}.json"
+
+    def _load_offsets(self, path: Path, metadata: dict[str, Any]) -> list[int] | None:
+        try:
+            cached = json.loads(path.read_text(encoding="utf-8"))
+            if cached.get("metadata", {}).get("fingerprint") != metadata["fingerprint"]:
+                return None
+            offsets = cached.get("offsets")
+            if not isinstance(offsets, list) or any(
+                type(offset) is not int or offset < 0 for offset in offsets
+            ):
+                return None
+            return offsets
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    def _save_offsets(self, path: Path, metadata: dict[str, Any], offsets: list[int]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        temporary.write_text(
+            json.dumps({"metadata": metadata, "offsets": offsets}),
+            encoding="utf-8",
+        )
+        os.replace(temporary, path)
+
+    def _build_offsets(
+        self,
+        tokenizer,
+        max_context_tokens,
+        max_input_context_length,
+        max_samples,
+        filter_long_context,
+        filter_no_conversation,
+    ) -> list[int]:
+        offsets = []
+        pending_offsets = []
+        pending_contexts = []
+        batch_size = self.tokenizer_filter_batch_size
+
+        def accept_batch(batch_offsets, lengths) -> bool:
+            for offset, length in zip(batch_offsets, lengths):
+                if length == 0 or length > max_context_tokens:
+                    continue
+                offsets.append(offset)
+                if max_samples is not None and len(offsets) >= max_samples:
+                    return True
+            return False
+
+        def flush_tokenizer_batch() -> bool:
+            if not pending_offsets:
+                return False
+            if filter_long_context and tokenizer is not None:
+                encoded = tokenizer(
+                    pending_contexts,
+                    add_special_tokens=False,
+                    truncation=True,
+                    max_length=max_input_context_length + 1,
+                    padding=False,
+                )
+                input_ids = (
+                    encoded.input_ids
+                    if hasattr(encoded, "input_ids")
+                    else encoded["input_ids"]
+                )
+                lengths = [len(ids) for ids in input_ids]
+            else:
+                lengths = [0] * len(pending_offsets)
+            reached_limit = accept_batch(pending_offsets, lengths)
+            pending_offsets.clear()
+            pending_contexts.clear()
+            return reached_limit
+
+        total_bytes = self.path.stat().st_size
+        progress = tqdm(
+            total=total_bytes,
+            desc="Indexing conversation data",
+            unit="B",
+            unit_scale=True,
+            disable=not _progress_enabled(),
+        )
+
+        try:
+            with self.path.open("rb") as handle:
+                while True:
+                    offset = handle.tell()
+                    line = handle.readline()
+                    progress.update(handle.tell() - offset)
+                    if not line:
+                        break
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    context = str(row.get("context", "")).strip()
+                    if not context:
+                        continue
+                    messages = _messages_from_row(row)
+                    if filter_no_conversation and not any(
+                        message.role == "assistant" for message in messages
+                    ):
+                        continue
+                    if filter_long_context and tokenizer is not None:
+                        pending_offsets.append(offset)
+                        pending_contexts.append(context)
+                        if len(pending_offsets) >= batch_size:
+                            if flush_tokenizer_batch():
+                                break
+                    else:
+                        offsets.append(offset)
+                    if max_samples is not None and len(offsets) >= max_samples:
+                        break
+                if pending_offsets:
+                    flush_tokenizer_batch()
+        finally:
+            progress.close()
+        if max_samples is not None:
+            offsets = offsets[:max_samples]
+        return offsets
+
+    def _load_or_build_offsets(
+        self,
+        tokenizer,
+        max_context_tokens,
+        max_input_context_length,
+        max_samples,
+        filter_long_context,
+        filter_no_conversation,
+        cache_dir: Path | None,
+    ) -> list[int]:
+        metadata = self._cache_metadata(tokenizer)
+        if cache_dir is None:
+            return self._build_offsets(
+                tokenizer, max_context_tokens, max_input_context_length, max_samples,
+                filter_long_context, filter_no_conversation,
+            )
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        path = self._offset_cache_path(cache_dir, metadata)
+        with cache_utils.file_lock(path.with_suffix(".lock")):
+            offsets = self._load_offsets(path, metadata) if path.exists() else None
+            if offsets is None:
+                offsets = self._build_offsets(
+                    tokenizer, max_context_tokens, max_input_context_length, max_samples,
+                    filter_long_context, filter_no_conversation,
+                )
+                self._save_offsets(path, metadata, offsets)
+                if _progress_enabled():
+                    print(
+                        f"Saved conversation index cache: {path} "
+                        f"(contexts={len(offsets)})",
+                        flush=True,
+                    )
+            elif _progress_enabled():
+                print(
+                    f"Reusing conversation index cache: {path} "
+                    f"(contexts={len(offsets)})",
+                    flush=True,
+                )
+            return offsets
 
     def __len__(self):
         return len(self._offsets)
@@ -254,7 +409,7 @@ class TrainingTaskDataset(Dataset):
 
 
 class SortishSampler(Sampler[int]):
-    CACHE_VERSION = 4
+    CACHE_VERSION = 5
 
     def __init__(self, dataset, tokenizer, batch_size, bucket_multiplier=50, seed=42, chat_template_enable_thinking=False, cache_dir=None):
         self.dataset, self.batch_size, self.seed, self.epoch = dataset, batch_size, seed, 0
@@ -263,25 +418,84 @@ class SortishSampler(Sampler[int]):
         self.bucket_multiplier = bucket_multiplier; self._rebuild()
 
     def _cache_metadata(self, tokenizer, enable_thinking):
-        payload = {"version": self.CACHE_VERSION, "dataset": getattr(self.dataset, "cache_metadata", {}), "record_count": len(self.dataset), "tokenizer": str(getattr(tokenizer, "name_or_path", tokenizer.__class__.__name__)), "tokenizer_class": tokenizer.__class__.__name__, "vocab_size": getattr(tokenizer, "vocab_size", None), "chat_template_enable_thinking": enable_thinking}
+        payload = {
+            "version": self.CACHE_VERSION,
+            "dataset": getattr(self.dataset, "cache_metadata", {}),
+            "record_count": len(self.dataset),
+            "tokenizer": cache_utils.tokenizer_fingerprint(tokenizer),
+            "chat_template_enable_thinking": enable_thinking,
+        }
         payload["fingerprint"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest(); return payload
 
     def _build_lengths(self, tokenizer, enable_thinking):
         lengths = []
-        for record in tqdm(self.dataset, total=len(self.dataset), desc="Preparing sortish lengths", unit="context", disable=not _progress_enabled()):
-            lengths.append(len(tokenizer(record.context, add_special_tokens=False).input_ids))
+        batch_size = max(1, int(getattr(self.dataset, "tokenizer_filter_batch_size", 1024)))
+        pending_contexts = []
+        progress = tqdm(
+            total=len(self.dataset),
+            desc="Preparing sortish lengths",
+            unit="context",
+            disable=not _progress_enabled(),
+        )
+
+        def flush() -> None:
+            if not pending_contexts:
+                return
+            encoded = tokenizer(
+                pending_contexts,
+                add_special_tokens=False,
+                truncation=False,
+                padding=False,
+            )
+            input_ids = (
+                encoded.input_ids
+                if hasattr(encoded, "input_ids")
+                else encoded["input_ids"]
+            )
+            if len(input_ids) != len(pending_contexts):
+                raise ValueError(
+                    "tokenizer returned a different number of rows for sortish lengths"
+                )
+            lengths.extend(len(ids) for ids in input_ids)
+            progress.update(len(pending_contexts))
+            pending_contexts.clear()
+
+        try:
+            for record in self.dataset:
+                pending_contexts.append(record.context)
+                if len(pending_contexts) >= batch_size:
+                    flush()
+            flush()
+        finally:
+            progress.close()
         return lengths
 
     def _load_or_build_lengths(self, tokenizer, enable_thinking, cache_dir, metadata):
-        if cache_dir is None: return self._build_lengths(tokenizer, enable_thinking)
-        cache_dir.mkdir(parents=True, exist_ok=True); path = cache_dir / "sortish_lengths.json"
-        with dataset_cache.file_lock(cache_dir / "sortish_lengths.lock"):
+        if cache_dir is None:
+            return self._build_lengths(tokenizer, enable_thinking)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        path = cache_dir / f"sortish_lengths-{metadata['fingerprint']}.json"
+        with cache_utils.file_lock(path.with_suffix(".lock")):
             if path.exists():
                 try:
-                    cached = json.loads(path.read_text()); lengths = cached.get("lengths")
-                    if cached.get("metadata", {}).get("fingerprint") == metadata["fingerprint"] and isinstance(lengths, list) and len(lengths) == len(self.dataset): return lengths
-                except (OSError, ValueError, TypeError, json.JSONDecodeError): pass
-            lengths = self._build_lengths(tokenizer, enable_thinking); tmp = path.with_suffix(".tmp"); tmp.write_text(json.dumps({"metadata": metadata, "lengths": lengths})); os.replace(tmp, path); return lengths
+                    cached = json.loads(path.read_text())
+                    lengths = cached.get("lengths")
+                    if (
+                        cached.get("metadata", {}).get("fingerprint")
+                        == metadata["fingerprint"]
+                        and isinstance(lengths, list)
+                        and len(lengths) == len(self.dataset)
+                    ):
+                        return lengths
+                except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                    pass
+            lengths = self._build_lengths(tokenizer, enable_thinking)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(
+                json.dumps({"metadata": metadata, "lengths": lengths})
+            )
+            os.replace(temporary, path)
+            return lengths
 
     def _rebuild(self):
         indices = range(len(self.lengths))

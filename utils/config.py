@@ -191,9 +191,10 @@ class DataConfig:
     validation_max_samples: int | None = None
     filter_long_context: bool = True
     filter_no_qa: bool = True
+    tokenizer_filter_batch_size: int = 1024
     sortish_bucket_multiplier: int = 50
     cache_sortish_lengths: bool = True
-    cache_dataset: bool = True
+    cache_offsets: bool = True
     append_eos: bool = True
     chat_template_enable_thinking: bool = False
     qa_per_context: int = 4
@@ -356,6 +357,8 @@ class TrainConfig:
             raise ValueError("conversation data requires at least one conversation file")
         if d.max_input_context_length <= 0:
             raise ValueError("data.max_input_context_length must be positive")
+        if d.tokenizer_filter_batch_size <= 0:
+            raise ValueError("data.tokenizer_filter_batch_size must be positive")
         if d.train_tasks not in {"mix", "qa", "recon"}:
             raise ValueError("data.train_tasks must be mix, qa or recon")
         if not 0 <= d.recon_ratio <= 1:
