@@ -1,16 +1,19 @@
 import torch
-from tests.test_tied_backbone import _tiny_qwen3, _batch, _forward_losses
-from src.model import MetaLoRA
+from transformers import Qwen3Config, Qwen3ForCausalLM
+
+from src.model import ContextMemoryModel
 
 
-def test_empty_targets_disable_lora_but_preserve_memory_gradient():
-    model = MetaLoRA(_tiny_qwen3(), target_modules=[], memory_length=4,
-                     decoder_hidden_size=16, decoder_heads=4,
-                     max_context_tokens=16, token_recon=True)
+def test_empty_lora_preserves_memory_gradient():
+    config = Qwen3Config(
+        vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=64,
+        tie_word_embeddings=True,
+    )
+    model = ContextMemoryModel(Qwen3ForCausalLM(config), target_modules=[], memory_length=4, max_context_tokens=16)
     assert model.lora_backend == "none"
-    assert not any("lora_" in n for n, _ in model.named_parameters())
-    assert not any(p.requires_grad for p in model.qwen.parameters())
-    _, qa, rec = _forward_losses(model, _batch())
-    (qa + rec).backward()
-    assert torch.isfinite(model.context_resampler.latents.grad).all()
+    ids = torch.randint(0, 64, (1, 8))
+    prefix = model.encode_context_prefix(model.qwen.get_input_embeddings()(ids), ids.bool())
+    prefix.memory.square().mean().backward()
+    assert model.context_resampler.latents.grad is not None
     assert model.context_resampler.latents.grad.abs().sum() > 0

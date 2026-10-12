@@ -8,9 +8,11 @@ data:
   filter_long_context: true
   filter_no_qa: true
   max_answer_tokens: 64
-  max_context_tokens: 40960
-  max_input_context_length: 8192
-  tokenizer_filter_batch_size: 1024
+  max_question_tokens: 96
+  max_conversation_tokens: 768
+  max_context_tokens: 2048
+  max_input_tokens: 40960
+  tokenizer_filter_batch_size: 2048
   train_tasks: mix
   recon_ratio: 0.5
   recon_schedule: constant
@@ -33,12 +35,11 @@ evaluation:
   autoregressive_max_qa: 1024
   max_new_tokens: 32
   qa_batch_size: 4
-  teacher_forced_every: 200
 logging:
-  wandb_run_name: null
+  swanlab_run_name: null
   log_every: 25
-  wandb_mode: offline
-  wandb_project: MemoryQwen
+  swanlab_mode: offline
+  swanlab_project: MemoryQwen
 memory:
   memory_length: 64
   context_layer_indices:
@@ -49,22 +50,14 @@ memory:
   memory_resampler_heads: 4
   memory_resampler_hidden_size: 256
   memory_resampler_ffn_ratio: 2
+  memory_resampler_output_mode: layer0
   reader_memory_source: memory_hidden
   readout_length: 8
   readout_hidden_size: 256
   readout_layers: 2
   readout_heads: 4
-  decoder_hidden_size: 256
-  decoder_heads: 8
-  decoder_ffn_ratio: 2
-  head_mode: tied
-  head_init: auto
   qa_weight: 1.0
   recon_weight: 1.0
-  token_recon_weight: 0.0
-  token_recon_positions: 128
-  causal_recon_weight: 0.0
-  causal_recon_positions: 128
   distill_weight: 0.0
   distill_positions: 128
   distill_temperature: 1.0

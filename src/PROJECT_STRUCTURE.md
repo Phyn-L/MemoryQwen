@@ -9,10 +9,9 @@
 | `data.py` | 读取聚合后的 JSONL，按输入长度过滤/缓存 context，构造 QA/Recon 任务，tokenize，并生成 batch。 |
 | `cache_utils.py` | offset 和 sortish 长度缓存共用的指纹与文件锁工具。 |
 | `pipeline.py` | 根据配置创建 train/validation/test dataset、collator 和 sortish sampler。 |
-| `model.py` | 冻结 Qwen 主干，写入 memory slot，构造每层 memory KV，执行 QA、Recon、token reconstruction 和蒸馏前向。 |
-| `MemoryDecoder.py` | 将每层 memory hidden 映射为 memory-only token reconstruction hidden。 |
+| `model.py` | 冻结 Qwen 主干，写入 memory slot，输出第 0 层 memory embedding，并由 Qwen 前向构造各层 memory KV，执行 QA、Recon 和蒸馏前向。 |
 | `resampler.py` | 可选的 question-conditioned readout，把 memory 变成插入 QA 序列的 R 个 latent。 |
-| `losses.py` | QA CE、embedding/token/causal reconstruction 和 KL distillation 的实现与加权求和。 |
+| `losses.py` | QA CE、Recon CE 和 KL distillation 的实现与加权求和。 |
 | `evaluator.py` | teacher-forced 与 autoregressive 评估，并记录每个 loss/指标。 |
 | `metrics.py` | EM、F1、ROUGE-L 等答案指标。 |
 | `dtypes.py` | 关闭 autocast 等 dtype 辅助，保证 loss 用 float32 reduction。 |
@@ -22,7 +21,7 @@
 入口是 `pipeline.make_context_dataset()`，底层是 `ConversationDataset`：
 
 1. 每个 split 直接读取配置中的 JSONL 文件；每行包含 `context` 和 `conversations`。
-2. `ConversationDataset` 建立字节 offset 索引，随机访问时只解析当前行，不把整个文件载入内存。首次扫描会显示 `Indexing conversation data` 进度条，并在 `data.cache_offsets=true` 时缓存过滤后的 offsets；长 context 的 tokenizer 过滤按 `data.tokenizer_filter_batch_size` 批量执行，当前默认 batch size 为 1024。缓存放在共享的 `outputs/conversation_cache` 下，并按数据文件、过滤参数和 tokenizer 内容指纹复用，因此兼容模型无需重复处理。空 context、超过 `data.max_context_tokens` 的 context，或没有 assistant turn 的行会被过滤。
+2. `ConversationDataset` 建立字节 offset 索引，随机访问时只解析当前行，不把整个文件载入内存。首次扫描会显示 `Indexing conversation data` 进度条，并在 `data.cache_offsets=true` 时缓存过滤后的 offsets；长 context、chat-template Question 和 Answer 的 tokenizer 过滤按 `data.tokenizer_filter_batch_size` 批量执行，当前默认 batch size 为 2048。`max_question_tokens` 限制单个 Question，`max_answer_tokens` 限制单个 Answer，`max_conversation_tokens` 限制一行内所有 Question+Answer 的总长度。缓存放在共享的 `outputs/conversation_cache` 下，并按数据文件、过滤参数和 tokenizer 内容指纹复用，因此兼容模型无需重复处理。空 context、超限 context、Question、Answer 或 conversation，或没有 assistant turn 的行会被过滤。
 3. 一个 JSONL 行对应一个 `ContextRecord`。`ContextRecord.turns()` 将每个 assistant 消息配对为一个监督 turn，并保留此前所有 system/user/assistant 消息作为历史。
 4. `SortishSampler` 先按 context token 长度排序，再在 bucket 内随机打乱，减少 padding；长度缓存同时绑定数据 fingerprint 和 tokenizer 信息。
 5. `collate_context_records` 对 context、conversation prompt、answer 分别 tokenize：
@@ -40,17 +39,17 @@
 
 ### 3.1 写入 memory：context + M 个 slot
 
-`MetaLoRA.encode_context_prefix()` 只对 context 做一次 Qwen forward，并通过临时 hook 收集配置的层。softmax 层权重混合这些 hidden 后，`ContextMemoryResampler` 的 M 个 learned queries 跨注意力读取全部 context，输出固定的 memory embeddings。随后只对这 M 个 embedding 做一次短 Qwen forward，形成 `layer_memory [C, num_layers, M, H]` 和可复用的 memory KV cache。Qwen 主干默认冻结，指定 `target_modules` 的线性层插入 LoRA；真正训练的主要是 resampler、层权重、LoRA、decoder、可选 readout/head。
+`ContextMemoryModel.encode_context_prefix()` 只对 context 做一次 Qwen forward，并通过临时 hook 收集配置的层。softmax 层权重混合这些 hidden 后，`ContextMemoryResampler` 的 M 个 learned queries 跨注意力读取全部 context，输出固定的 memory embeddings。随后只对这 M 个 embedding 做一次短 Qwen forward，形成 `layer_memory [C, num_layers, M, H]` 和可复用的 memory KV cache。Qwen 主干默认冻结，指定 `target_modules` 的线性层插入 LoRA；真正训练的主要是 resampler、层权重、LoRA、decoder、可选 readout/head。
 
 ### 3.2 读取 memory：QA、readout 与生成
 
-`forward_qa_with_prefix()` 按 `qa_context_indices` 选择 cache，拼接 `question + answer`，并让 question/answer 读取 memory。answer 的 label 前缀全部为 `-100`，所以 QA loss 只计算 answer token。
+`forward_qa_with_prefix()` 按 `qa_context_indices` 选择 cache，拼接 `task + question + answer`，并让 question/answer 读取 memory。`task_embeddings[0]` 对应 Recon，`task_embeddings[1]` 对应 QA；Recon 的 question 为空。answer 的 label 前缀全部为 `-100`，所以监督只计算 target token。
 
-当 `readout_length > 0` 时，`QuestionResampler` 根据 question 和 memory 生成 R 个 readout latent，序列变为 `question + readout(R) + answer`；R 个位置只服务于当前问题，不会改变可缓存的 context memory。生成阶段复用同一 memory cache，按 context 分组解码。
+当 `readout_length > 0` 时，`QuestionResampler` 根据 task、question 和 memory 生成 R 个 readout latent，序列变为 `task + question + readout(R) + answer`；R 个位置只服务于当前问题，不会改变可缓存的 context memory。生成阶段复用同一 memory cache，按 context 分组解码。
 
-### 3.3 memory-only 重构分支
+### 3.3 memory embedding 与辅助目标
 
-每层 `MemoryDecoder` 只接收该层的 memory hidden 和位置查询，不读取原 context token，因此 token reconstruction 能检验信息是否真的进入 bottleneck。另一条 causal reconstruction 路径把 memory KV 作为前缀，再用冻结 Qwen 对 context 做 teacher-forced 解码；该路径允许读取真实的历史 context token，主要衡量 memory 对主干预测分布的影响。
+当前默认模式只由 resampler 输出第 0 层的 `memory_embedding [C,M,H]`。随后将该 embedding 作为 Qwen 的 memory 前缀重新前向，由 Qwen 自身生成所有层的 memory hidden states 和 KV cache；QA、Recon 和蒸馏都复用这份 cache。当前主模型不包含独立的 token reconstruction decoder 分支。
 
 ## 4. 训练目标与参数
 
@@ -58,8 +57,6 @@
 
 ```text
 L = task_weighted_mean(L_qa, L_recon)
-  + token_recon_weight * L_tok
-  + causal_recon_weight * L_causal
   + distill_weight * L_distill
 ```
 
@@ -74,27 +71,9 @@ L = task_weighted_mean(L_qa, L_recon)
 
 ### 4.2 `Recon`（memory-conditioned context token CE）
 
-训练数据可为每个 context 构造一条 Recon 样本，使用固定 prompt 后生成完整 context。该目标直接检验 memory 是否保留可生成的离散内容。
+训练数据可为每个 context 构造一条 Recon 样本，使用空的任务输入直接生成完整 context。该目标直接检验 memory 是否保留可生成的离散内容。
 
-### 4.3 `token_recon_loss`（memory-only token CE）
-
-每个 layer decoder 从 memory hidden 和位置 query 直接预测 context token，不能读取其他 context token；使用共享 vocabulary head，按 layer 平均 CE。它比 embedding MSE 更直接地要求 memory 保存离散内容。
-
-- `token_recon_weight`：总权重；
-- `token_recon_positions`：每个 context 每步采样的目标位置数，`<=0` 表示全部；
-- `head_mode`：`linear` 从头学习 `[vocab, decoder_hidden]`，`tied` 使用冻结 Qwen embedding 加小 adapter；
-- `head_init`：tied head 的 `auto`、`random` 或 `memory_projection` 初始化；
-- `token_recon`：模型侧是否创建 decoder/head（由训练配置映射）。
-
-### 4.4 `causal_recon_loss`（memory-prefixed causal LM CE）
-
-将 memory KV 作为 Qwen 前缀，对 context 的下一 token 做 teacher-forced CE：`P(t_i | memory, t_<i)`。它使用冻结主干自己的 tied unembedding，context 历史 token 可见，因此更像压缩前缀对语言模型预测的恢复能力，而非严格 memory-only 探针。
-
-- `causal_recon_weight`：总权重，0 表示关闭；
-- `causal_recon_positions`：采样位置数，`<=0` 表示所有有效位置；
-- `ae_lm`：模型是否启用 memory-prefixed autoencoding 路径。
-
-### 4.5 `distill_loss`（full-context 到 memory-conditioned 的 KL）
+### 4.3 `distill_loss`（full-context 到 memory-conditioned 的 KL）
 
 teacher 是 encoder 中普通 causal context hidden 产生的分布，student 是带 memory KV 的 autoencoding hidden。两者使用同一 unembedding，计算 `T² * KL(p_teacher || p_student)`；teacher 不反传。它保留 teacher 的软分布，训练 memory 补足主干先验无法确定的 residual information。
 
@@ -114,7 +93,7 @@ teacher 是 encoder 中普通 causal context hidden 产生的分布，student �
 | `lora_rank`, `lora_alpha`, `target_modules` | 主干 LoRA 的秩、缩放和插入层。 |
 | `readout_length` | 每个问题额外生成的 readout latent 数 R；0 为关闭。 |
 | `readout_layers`, `readout_heads`, `readout_hidden_size` | readout Transformer 的深度、头数和宽度。 |
-| `max_context_tokens`, `max_conversation_tokens`, `max_answer_tokens` | context、chat-template prompt 和 assistant target 的截断上限。 |
+| `max_context_tokens`, `max_question_tokens`, `max_answer_tokens`, `max_conversation_tokens` | context、单个 Question、单个 Answer，以及一行内所有 Question+Answer 的总长度上限。 |
 | `qa_per_context`, `sample_qa` | 每个 context 放入 batch 的 QA 数量和采样方式。 |
 
-分析结果时应同时看 QA 指标和 memory-only 指标；仅比较总 loss 不足以判断 memory 是否真正存储了 context，因为不同配置可能启用了不同 loss 项。
+分析结果时应同时看 QA 指标和 Recon 指标；仅比较总 loss 不足以判断 memory 是否真正存储了 context，因为不同配置可能启用了不同 loss 项。

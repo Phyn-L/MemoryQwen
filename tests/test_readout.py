@@ -22,7 +22,7 @@ from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.model import MetaLoRA, QuestionResampler, is_trainable_parameter_name  # noqa: E402
+from src.model import ContextMemoryModel, QuestionResampler, is_trainable_parameter_name  # noqa: E402
 
 try:
     from transformers import Qwen3Config, Qwen3ForCausalLM
@@ -150,12 +150,9 @@ def _tiny_qwen3(vocab=64, hidden=32, layers=2, heads=4, kv_heads=2, intermediate
 
 def _model(readout_length=0, readout_mode="memory_question"):
     torch.manual_seed(0)
-    model = MetaLoRA(
-        _tiny_qwen3(), rank=2, alpha=4.0, memory_length=4, decoder_hidden_size=16,
-        decoder_heads=4, decoder_ffn_ratio=2,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], dropout=0.0,
-        max_context_tokens=16, trainable_dtype=torch.float32, token_recon=True,
-        readout_length=readout_length, readout_layers=2, readout_heads=4, readout_mode=readout_mode,
+    model = ContextMemoryModel(
+        _tiny_qwen3(), rank=2, alpha=4.0, memory_length=4,                  target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], dropout=0.0,
+        max_context_tokens=16, trainable_dtype=torch.float32,         readout_length=readout_length, readout_layers=2, readout_heads=4, readout_mode=readout_mode,
     )
     for name, parameter in model.named_parameters():
         parameter.requires_grad = is_trainable_parameter_name(name)
@@ -181,7 +178,7 @@ def _forward(model, batch):
         embedding(batch["question_ids"]), batch["question_mask"],
         embedding(batch["answer_ids"]), batch["answer_mask"], batch["answer_ids"],
         torch.arange(batch["context_ids"].size(0)),
-        context_ids=batch["context_ids"], token_recon_positions=4,
+        context_ids=batch["context_ids"],
     )
 
 
@@ -192,8 +189,8 @@ def test_readout_off_keeps_the_historical_model():
     model = _model(readout_length=0)
     assert model.resampler is None
     output = _forward(model, _batch())
-    assert output.logits.shape[:2] == (2, 4 + 5), "labels must stay [question + answer]"
-    assert output.labels.shape == (2, 9)
+    assert output.logits.shape[:2] == (2, 1 + 4 + 5), "labels include the QA task embedding"
+    assert output.labels.shape == (2, 10)
     # the resampler name is still wired into the trainable-parameter rule
     assert is_trainable_parameter_name("resampler.latents")
 
@@ -209,10 +206,10 @@ def test_readout_is_conditioned_and_trains_the_resampler():
     # The forward runs [question, read-out, answer], so the logits gain R positions -- but
     # the read-out rows are not supervised (-100), exactly like the question rows, and the
     # answer labels keep their alignment.
-    assert output.logits.shape[:2] == (2, 4 + 3 + 5)
-    assert output.labels.shape == (2, 4 + 3 + 5)
-    assert bool((output.labels[:, 4:7] == -100).all()), "the read-out rows must not be supervised"
-    assert torch.equal(output.labels[:, 7:], batch["answer_ids"])
+    assert output.logits.shape[:2] == (2, 1 + 4 + 3 + 5)
+    assert output.labels.shape == (2, 13)
+    assert bool((output.labels[:, 5:8] == -100).all()), "the read-out rows must not be supervised"
+    assert torch.equal(output.labels[:, 8:], batch["answer_ids"])
     loss = output.logits.float().logsumexp(-1).mean()      # any differentiable scalar
     loss.backward()
     grads = [p.grad for p in model.resampler.parameters()]
@@ -295,10 +292,10 @@ def test_new_modes_forward_gradient_and_generation():
         batch = _batch()
         output = _forward(model, batch)
         extra = 0 if mode == "off" else 3
-        assert output.logits.shape[1] == 9 + extra
-        assert torch.equal(output.labels[:, 4 + extra:], batch["answer_ids"])
+        assert output.logits.shape[1] == 10 + extra
+        assert torch.equal(output.labels[:, 5 + extra:], batch["answer_ids"])
         if extra:
-            assert (output.labels[:, 4:7] == -100).all()
+            assert (output.labels[:, 5:8] == -100).all()
         qa_loss(output.logits, output.labels).backward()
         if mode == "off":
             assert model.resampler is None and model.readout_length == 0

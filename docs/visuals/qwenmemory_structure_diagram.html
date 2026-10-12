@@ -164,7 +164,7 @@
 <text x="1116" y="455" class="">问题和 readout 的 labels = −100</text>
 </g><path class="edge train" d="M1256 240 V348"/><text x="1266" y="326" class="label">QA logits</text><text x="28" y="531" class="small">符号：C = 文章数；Q = 问答行数；H = 2048；28 层；V = 151936；R = 8。</text><text x="28" y="557" class="small">位置编号延续原文长度：question 从 L + M 开始；不能直接用缩短后的 memory KV 长度替代。</text><text x="28" y="583" class="small">缓存复用指当前 batch / 评估内的可微或推理缓存；当前结构不等于已实现跨训练步的持久化缓存。</text></svg></div>
 <h2>02 · 三项开启的损失，两个可选目标</h2><p class="section-note">QA 在主通路中计算。下面两条辅助路径分别约束 token 恢复能力和预测分布；它们允许看到的输入不同。</p>
-<div class="dia"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 762" role="img" aria-label="训练辅助分支：memory-only token 重构、memory 前缀 student、原文历史 teacher、停止 teacher 梯度的 KL 蒸馏"><defs>
+<div class="dia"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 762" role="img" aria-label="训练辅助分支：layer0 memory embedding、memory 前缀 student、原文历史 teacher、停止 teacher 梯度的 KL 蒸馏"><defs>
 <marker id="arrowAUX" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10Z" fill="#7b98b7"/></marker>
 <marker id="arrowTrainAUX" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0 0 L10 5 L0 10Z" fill="#dbab50"/></marker></defs><text x="28" y="34" class="banner">辅助目标只在训练 / 相应损失评估时使用；回答新问题无需重构原文。</text><g><rect class="node purple" x="28" y="68" width="290" height="152" rx="10"/>
 <text x="44" y="98" class="title">逐层 memory hidden</text>
@@ -173,7 +173,7 @@
 <text x="44" y="175" class="">不输入任何原文 token</text>
 <text x="44" y="199" class="">目标 token xₜ 只作为 CE 标签</text>
 </g><g><rect class="node green" x="382" y="68" width="430" height="152" rx="10"/>
-<text x="398" y="98" class="title">28 × MemoryDecoder + 共享词表头</text>
+<text x="398" y="98" class="title">Qwen memory-prefix forward</text>
 <text x="398" y="127" class="">位置查询 cross-attend 该层 memory</text>
 <text x="398" y="151" class="code">hidden [C,28,P,256]；P ≤ 128</text>
 <text x="398" y="175" class="">tied head：可训练小投影 + 冻结 embedding</text>
@@ -220,9 +220,9 @@
 <div class="formula">当前基线：L = L_QA + 1.0 × L_token + 0.3 × L_distill</div>
 <div class="table-scroll"><table><thead><tr><th>目标 / 配置字段</th><th>当前权重</th><th>直接输入</th><th>监督信号</th></tr></thead><tbody>
 <tr><td>QA · <code>qa_weight</code></td><td class="on">1.0</td><td>memory KV、问题、readout、历史答案</td><td>真实答案 token</td></tr>
-<tr><td>Token · <code>token_recon_weight</code></td><td class="on">1.0</td><td>各层 memory hidden、位置查询</td><td>原文 token；最多采样 128 个目标位置</td></tr>
+<tr><td>Causal · <code>causal_recon_weight</code></td><td class="on">1.0</td><td>memory KV + context teacher forcing</td><td>context next-token CE</td></tr>
 <tr><td>Distill · <code>distill_weight</code></td><td class="on">0.3</td><td>student：memory KV + 原文历史；teacher：原文历史</td><td>teacher 概率分布；最多采样 128 个位置，按熵加权</td></tr>
-<tr><td>Embedding · <code>embedding_recon_weight</code></td><td class="off">0</td><td>各层 memory hidden、位置查询</td><td>原文输入 embeddings，MSE + 0.5 × cosine loss</td></tr>
+<tr><td>Embedding · <code>embedding_recon_weight</code></td><td class="off">0</td><td>memory KV + context teacher forcing</td><td>原文输入 embeddings，MSE + 0.5 × cosine loss</td></tr>
 <tr><td>Causal · <code>causal_recon_weight</code></td><td class="off">0</td><td>memory KV + 真实原文历史</td><td>原文 token 的 CE；与蒸馏共用 student 前向</td></tr>
 </tbody></table></div>
 <div class="cap"><b>组合方式：</b><code>memory_objectives()</code> 计算四种辅助损失，<code>objective_total()</code> 与 QA 按独立权重相加；不是旧版的重构二选一。各项归约后再乘权重，数值大小不能直接解释为贡献大小。</div>
@@ -237,13 +237,13 @@
 <div class="cap note"><b>解释边界：</b>当前蒸馏更准确地说是“带 memory 的因果预测向普通因果预测对齐”。它不保证鼓励事实记忆；也不能仅凭 KL 下降推断 memory 在补足语言先验。是否帮助 QA，要由匹配设置的消融验证。熵加权只改变不同位置的相对权重，不会让 teacher 获得未知的正确答案。</div>
 <h2>04 · 哪些参数收到梯度？</h2>
 <div class="grid"><article class="card"><h3>问答与重构共用 writer</h3><p>QA 梯度经过 readout 和 memory KV 回到 writer；同篇文章的多条 QA 梯度经可微 <code>index_select</code> 累加。Token 重构更新各层 decoder、tied head 的小投影，并回传到 memory slots 与 LoRA。</p><p>蒸馏只沿 student 路径回传到共享 LoRA 和 memory writer。Teacher 概率在 <code>torch.no_grad()</code> 内计算；共享 LoRA 更新后，下一步的 teacher 分布仍可能变化。</p></article>
-<article class="card"><h3>冻结与训练的边界</h3><p>冻结：Qwen 原始参数和原始 embedding / 词表权重。训练：memory slots、共享 LoRA、QuestionResampler、开启的 MemoryDecoder 及 token head 小投影。</p><p>基线主干计算使用 bfloat16，可训练参数保持 float32。DDP 同步可训练参数的梯度；memory KV 保留在本 rank，指标另做标量归约。</p></article></div>
+<article class="card"><h3>冻结与训练的边界</h3><p>冻结：Qwen 原始参数和原始 embedding / 词表权重。训练：memory slots、共享 LoRA、QuestionResampler、开启的 Qwen memory-prefix forward 及 token head 小投影。</p><p>基线主干计算使用 bfloat16，可训练参数保持 float32。DDP 同步可训练参数的梯度；memory KV 保留在本 rank，指标另做标量归约。</p></article></div>
 <h2>05 · 四种 readout 模式</h2><div class="table-scroll"><table><thead><tr><th>模式</th><th>插入 Qwen 前的 readout 来源</th><th>本基线</th></tr></thead><tbody>
 <tr><td><code>memory_question</code></td><td>Resampler 读取 question embeddings + 最后层 memory</td><td class="on">启用，R = 8</td></tr>
 <tr><td><code>memory_only</code></td><td>Resampler 只读取最后层 memory</td><td>消融选项</td></tr>
 <tr><td><code>learned_prefix</code></td><td>所有样本共享的可学习 embeddings，不读取文章或问题</td><td>消融选项</td></tr>
 <tr><td><code>off</code></td><td>不创建 readout 模块，有效 R = 0</td><td>消融选项</td></tr>
 </tbody></table></div><p class="section-note">四种模式保留原 memory KV 通道。memory_only / learned_prefix 限制的是插入前的来源；进入 Qwen 后，这些位置仍可读取问题与 memory。readout_length = 0 也会关闭 readout。</p>
-<footer>源码依据：<a href="file:///data/lz/MemoryQwen/src/model.py">model.py</a> · <a href="file:///data/lz/MemoryQwen/src/resampler.py">resampler.py</a> · <a href="file:///data/lz/MemoryQwen/src/MemoryDecoder.py">MemoryDecoder.py</a> · <a href="file:///data/lz/MemoryQwen/src/losses.py">losses.py</a> · <a href="file:///data/lz/MemoryQwen/utils/config.py">config.py</a>。<br>
+<footer>源码依据：<a href="file:///data/lz/MemoryQwen/src/model.py">model.py</a> · <a href="file:///data/lz/MemoryQwen/src/resampler.py">resampler.py</a> · <a href="file:///data/lz/MemoryQwen/src/Qwen memory-prefix forward.py">Qwen memory-prefix forward.py</a> · <a href="file:///data/lz/MemoryQwen/src/losses.py">losses.py</a> · <a href="file:///data/lz/MemoryQwen/utils/config.py">config.py</a>。<br>
 图中数值绑定当前 baseline，不代表所有 checkpoint 的配置。1024 → 64 是满长度原文的位置数压缩比，不能直接等同于存储字节或端到端加速比。本文档为独立 HTML，无 CDN 或联网依赖。</footer>
 </main></body></html>

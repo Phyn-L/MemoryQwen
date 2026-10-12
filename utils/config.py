@@ -10,7 +10,6 @@ import yaml
 
 from .machines import fill_missing, machine_environ, resolve_machine
 
-
 # ``${VAR}`` or ``${VAR:-default}`` inside a configuration string.
 ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
@@ -78,50 +77,22 @@ class ModelConfig:
     lora_rank: int = 8
     lora_alpha: float = 16.0
     lora_dropout: float = 0.0
-    # LoRA implementation. "false" (default) uses the in-repo StaticLoRALinear,
-    # which disables autocast at the module boundary so float32 adapters really
-    # compute in float32. "true" uses PEFT instead; it is opt-in because it is a
-    # second implementation that needs its own autocast handling
-    # (see src/model.py:disable_autocast_for_peft_lora) and is not covered by the
-    # same tests. Leaving it unset keeps a run independent of whether peft is
-    # installed.
-    use_peft: bool = False
     target_modules: tuple[str, ...] = (
-        "q_proj", "k_proj", "v_proj", "o_proj",
-        "gate_proj", "up_proj", "down_proj",
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
     )
 
 
 @dataclass
 class MemoryConfig:
     memory_length: int = 8
-    decoder_hidden_size: int = 256
-    decoder_ffn_ratio: int = 2
-    decoder_heads: int = 8
-    token_recon_weight: float = 0.0
     qa_weight: float = 1.0
     recon_weight: float = 1.0
-    # How the shared token_recon unembedding is parameterised.
-    #   "linear" (default): a from-scratch [vocab, D] weight matrix -- the original
-    #                       behaviour, kept as the default so nothing changes silently.
-    #   "tied":             W = E @ adapter, with E the frozen (tied) input embedding of
-    #                       the backbone. Trains D*H ~= 0.5M instead of D*vocab ~= 39M
-    #                       and starts from the pretrained token geometry.
-    head_mode: str = "linear"
-    # Initialisation of the tied adapter (ignored in "linear" mode):
-    #   "auto"              -> "memory_projection" for tied, "random" otherwise
-    #   "random"            -> default nn.Linear init
-    #   "memory_projection" -> up-projection through the decoders' memory projection, so
-    #                          step-0 logits already score the tokens the memory points at
-    head_init: str = "auto"
-    # Memory-prefixed autoencoding objective (0 = off). The context is reconstructed
-    # through the *frozen* backbone with the memory's per-layer KV as a prefix, i.e.
-    # P(t_i | memory, t_<i), scored by the backbone's own (tied) unembedding. This is the
-    # objective the context-compression literature uses; the memory-only diagnostic
-    # (token_recon_weight > 0) stays available next to it.
-    causal_recon_weight: float = 0.0
-    # Context targets scored by the autoencoding objective; <= 0 scores every position.
-    causal_recon_positions: int = 0
     # Distil the *full-context* distribution into the memory-conditioned one:
     # T^2 * KL(p_teacher || p_student) where the teacher is the plain causal LM over the
     # context (free: the encoder pass's context rows) and the student is the memory-prefixed
@@ -141,19 +112,15 @@ class MemoryConfig:
     readout_length: int = 0
     readout_layers: int = 2
     readout_heads: int = 4
-    # Bottleneck width of the resampler (the same 256 the per-layer decoders use). A
-    # full-width cross-attention block would cost ~34M parameters per layer.
+    # Bottleneck width of the question-conditioned resampler.
     readout_hidden_size: int = 256
-    # token_recon: number of context positions scored per context per step. The shared
-    # vocabulary head is applied to num_layers * token_recon_positions rows, so this is
-    # the knob that bounds the auxiliary objective's cost. <= 0 means "all positions".
-    token_recon_positions: int = 256
     # Context encoder -> fixed memory writer.
     context_layer_indices: tuple[int, ...] = (-1,)
     memory_resampler_layers: int = 2
     memory_resampler_heads: int = 4
     memory_resampler_hidden_size: int = 256
     memory_resampler_ffn_ratio: int = 2
+    memory_resampler_output_mode: str = "layer0"
     # Source exposed to the optional question-conditioned reader.
     reader_memory_source: str = "memory_hidden"
 
@@ -174,7 +141,7 @@ class DataConfig:
     test_split: str = "test"
     max_context_tokens: int = 2048
     # Reject source contexts before truncation, independently of the encoder limit.
-    max_input_context_length: int = 8192
+    max_input_tokens: int = 40960
     train_tasks: str = "mix"
     # Recon loss fraction for constant mixed supervision.
     recon_ratio: float = 0.5
@@ -183,15 +150,15 @@ class DataConfig:
     recon_ratio_start: float = 0.5
     recon_ratio_end: float = 0.5
     recon_ratio_min: float = 0.1
-    recon_prompt: str = "Reconstruct the original context from memory."
-    max_conversation_tokens: int = 1024
-    max_answer_tokens: int = 128
+    max_question_tokens: int = 96
+    max_answer_tokens: int = 64
+    max_conversation_tokens: int = 768
     max_samples: int | None = None
     train_max_samples: int | None = None
     validation_max_samples: int | None = None
     filter_long_context: bool = True
     filter_no_qa: bool = True
-    tokenizer_filter_batch_size: int = 1024
+    tokenizer_filter_batch_size: int = 2048
     sortish_bucket_multiplier: int = 50
     cache_sortish_lengths: bool = True
     cache_offsets: bool = True
@@ -202,6 +169,9 @@ class DataConfig:
     # padding inserts pad positions between them, so the first answer token would be
     # supervised from a padding hidden state.  Set to "right" only to reproduce old runs.
     question_padding_side: str = "left"
+    num_workers: int = 8
+    pin_memory: bool = True
+    persistent_workers: bool = True
     # "append" writes EOS after the last answer token; the legacy "overwrite" mode
     # overwrites that token whenever the answer is the longest in the batch.
 
@@ -223,7 +193,6 @@ class SchedulerConfig:
 
 @dataclass
 class EvaluationConfig:
-    teacher_forced_every: int = 2000
     autoregressive_every: int = 4000
     max_new_tokens: int = 128
     qa_batch_size: int = 4
@@ -252,16 +221,20 @@ class CheckpointConfig:
 
 @dataclass
 class LoggingConfig:
-    wandb_project: str = "MemoryQwen"
+    swanlab_project: str = "MemoryQwen"
     # W&B name and checkpoint subdirectory; empty means model name + timestamp.
-    wandb_run_name: str | None = None
-    wandb_mode: str = "online"
-    wandb_run_id: str | None = None
+    swanlab_run_name: str | None = None
+    swanlab_mode: str = "online"
+    swanlab_run_id: str | None = None
     # Cadence of the training-loss scalars (``train/*``), in optimizer steps. The two
     # evaluation sections keep their own cadence, so this only controls how densely the
     # loss curves are sampled. 10 is the historical value; a single-epoch run can afford
     # to be denser (or sparser) without touching any other schedule.
     log_every: int = 10
+
+    @property
+    def wandb_run_name(self):
+        return self.swanlab_run_name
 
 
 @dataclass
@@ -276,7 +249,7 @@ class TrainConfig:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     # Which entry of ``utils/machines.py::MACHINES`` supplied the paths (None = the config's
-    # own defaults). Recorded so a run's wandb config and checkpoint say where it ran.
+    # own defaults). Recorded so a run's swanlab config and checkpoint say where it ran.
     machine: str | None = None
 
     @classmethod
@@ -285,20 +258,25 @@ class TrainConfig:
 
         ``machine`` (or ``machine:`` in the file, or ``MACHINE`` in the environment) selects
         an entry from ``utils/machines.py::MACHINES``; a machine that was named outright
-        supplies ``MODEL_ROOT``/``DATA_ROOT``/``WANDB_MODE`` for this load, while one only
+        supplies ``MODEL_ROOT``/``DATA_ROOT``/``SWANLAB_MODE`` for this load, while one only
         recognised from the hostname just fills in what the environment did not set.
         """
         path = Path(path)
         from utils.config_paths import resolve_config_path
+
         path = resolve_config_path(path)
         if path.suffix.lower() not in {".yaml", ".yml"}:
-            raise ValueError(f"configuration must be a YAML file (.yaml/.yml), got: {path}")
+            raise ValueError(
+                f"configuration must be a YAML file (.yaml/.yml), got: {path}"
+            )
         text = path.read_text(encoding="utf-8")
         raw = dict(yaml.safe_load(text) or {})
         return cls.from_dict(raw, machine=machine)
 
     @classmethod
-    def from_dict(cls, raw: Mapping[str, Any], machine: str | None = None) -> "TrainConfig":
+    def from_dict(
+        cls, raw: Mapping[str, Any], machine: str | None = None
+    ) -> "TrainConfig":
         unknown = set(raw) - set(cls.__dataclass_fields__)
         if unknown:
             raise ValueError(f"Unknown configuration sections: {sorted(unknown)}")
@@ -327,7 +305,9 @@ class TrainConfig:
             model_values["target_modules"] = tuple(model_values["target_modules"])
         memory_values = dict(values.get("memory", {}))
         if isinstance(memory_values.get("context_layer_indices"), list):
-            memory_values["context_layer_indices"] = tuple(memory_values["context_layer_indices"])
+            memory_values["context_layer_indices"] = tuple(
+                memory_values["context_layer_indices"]
+            )
         checkpoint_values = dict(values.get("checkpoint", {}))
         # Legacy checkpoints embed this removed scheduling field.
         checkpoint_values.pop("save_every_steps", None)
@@ -353,18 +333,33 @@ class TrainConfig:
             raise ValueError("model.attn_implementation must be sdpa or eager")
         if d.max_context_tokens <= 0:
             raise ValueError("data.max_context_tokens must be positive")
-        if not (d.conversation_file or d.train_conversation_file or d.validation_conversation_file or d.test_conversation_file):
-            raise ValueError("conversation data requires at least one conversation file")
-        if d.max_input_context_length <= 0:
-            raise ValueError("data.max_input_context_length must be positive")
+        if not (
+            d.conversation_file
+            or d.train_conversation_file
+            or d.validation_conversation_file
+            or d.test_conversation_file
+        ):
+            raise ValueError(
+                "conversation data requires at least one conversation file"
+            )
+        if d.max_input_tokens <= 0:
+            raise ValueError("data.max_input_tokens must be positive")
+        if d.max_input_tokens < d.max_context_tokens:
+            raise ValueError(
+                "data.max_input_tokens must be >= data.max_context_tokens"
+            )
         if d.tokenizer_filter_batch_size <= 0:
             raise ValueError("data.tokenizer_filter_batch_size must be positive")
+        if d.num_workers < 0:
+            raise ValueError("data.num_workers must be non-negative")
         if d.train_tasks not in {"mix", "qa", "recon"}:
             raise ValueError("data.train_tasks must be mix, qa or recon")
         if not 0 <= d.recon_ratio <= 1:
             raise ValueError("data.recon_ratio must be within [0, 1]")
         if d.recon_schedule not in {"decay", "front_loaded", "constant"}:
-            raise ValueError("data.recon_schedule must be decay, front_loaded or constant")
+            raise ValueError(
+                "data.recon_schedule must be decay, front_loaded or constant"
+            )
         if d.recon_schedule_curve not in {"linear", "cosine"}:
             raise ValueError("data.recon_schedule_curve must be linear or cosine")
         for name in ("recon_ratio_start", "recon_ratio_end", "recon_ratio_min"):
@@ -376,18 +371,29 @@ class TrainConfig:
         if d.train_tasks == "mix":
             if d.recon_schedule == "constant":
                 if not d.recon_ratio_min <= d.recon_ratio < 1:
-                    raise ValueError("constant mixed ratio must be >= recon_ratio_min and < 1")
+                    raise ValueError(
+                        "constant mixed ratio must be >= recon_ratio_min and < 1"
+                    )
             else:
-                if d.recon_ratio_start < d.recon_ratio_min or d.recon_ratio_end < d.recon_ratio_min:
-                    raise ValueError("recon schedule endpoints must be >= recon_ratio_min")
+                if (
+                    d.recon_ratio_start < d.recon_ratio_min
+                    or d.recon_ratio_end < d.recon_ratio_min
+                ):
+                    raise ValueError(
+                        "recon schedule endpoints must be >= recon_ratio_min"
+                    )
                 if d.recon_ratio_end > d.recon_ratio_start:
                     raise ValueError("Recon decay schedules require end <= start")
                 if d.recon_schedule == "front_loaded" and d.recon_ratio_start >= 1:
-                    raise ValueError("front_loaded mixed ratio must be < 1 to retain QA")
-        if not d.recon_prompt.strip():
-            raise ValueError("data.recon_prompt must be non-empty")
-        if d.max_conversation_tokens <= 0 or d.max_answer_tokens <= 0:
-            raise ValueError("conversation/answer token limits must be positive")
+                    raise ValueError(
+                        "front_loaded mixed ratio must be < 1 to retain QA"
+                    )
+        if (
+            d.max_question_tokens <= 0
+            or d.max_conversation_tokens <= 0
+            or d.max_answer_tokens <= 0
+        ):
+            raise ValueError("question/conversation/answer token limits must be positive")
         if d.sortish_bucket_multiplier <= 0:
             raise ValueError("sortish_bucket_multiplier must be positive")
         if d.qa_per_context <= 0:
@@ -395,13 +401,11 @@ class TrainConfig:
         if d.question_padding_side not in {"left", "right"}:
             raise ValueError("data.question_padding_side must be left or right")
         if self.model.trainable_dtype not in {"float32", "float16", "bfloat16"}:
-            raise ValueError("model.trainable_dtype must be float32, float16 or bfloat16")
+            raise ValueError(
+                "model.trainable_dtype must be float32, float16 or bfloat16"
+            )
         if self.model.lora_rank <= 0 or m.memory_length <= 0:
             raise ValueError("lora_rank and memory_length must be positive")
-        if m.decoder_hidden_size <= 0 or m.decoder_ffn_ratio <= 0 or m.decoder_heads <= 0:
-            raise ValueError("decoder_hidden_size, decoder_ffn_ratio and decoder_heads must be positive")
-        if m.decoder_hidden_size % m.decoder_heads:
-            raise ValueError("memory.decoder_hidden_size must be divisible by memory.decoder_heads")
         if not m.context_layer_indices:
             raise ValueError("memory.context_layer_indices must not be empty")
         if any(type(i) is not int for i in m.context_layer_indices):
@@ -413,42 +417,60 @@ class TrainConfig:
         if m.memory_resampler_hidden_size <= 0 or m.memory_resampler_ffn_ratio <= 0:
             raise ValueError("memory resampler width and FFN ratio must be positive")
         if m.memory_resampler_hidden_size % m.memory_resampler_heads:
-            raise ValueError("memory_resampler_hidden_size must be divisible by memory_resampler_heads")
-        if m.reader_memory_source not in {"memory_hidden", "memory_embedding", "layer_mean"}:
-            raise ValueError("memory.reader_memory_source must be memory_hidden, memory_embedding or layer_mean")
-        if m.token_recon_weight < 0:
-            raise ValueError("token_recon_weight must be non-negative")
-        if m.head_mode not in {"linear", "tied"}:
-            raise ValueError("memory.head_mode must be linear or tied")
-        if m.head_init not in {"auto", "random", "memory_projection"}:
-            raise ValueError("memory.head_init must be auto, random or memory_projection")
-        if m.causal_recon_weight < 0:
-            raise ValueError("memory.causal_recon_weight must be non-negative")
-        if m.causal_recon_positions < 0:
-            raise ValueError("memory.causal_recon_positions must be >= 0 (0 scores every position)")
+            raise ValueError(
+                "memory_resampler_hidden_size must be divisible by memory_resampler_heads"
+            )
+        if m.memory_resampler_output_mode not in {"layer0", "layerwise"}:
+            raise ValueError(
+                "memory.memory_resampler_output_mode must be layer0 or layerwise"
+            )
+        if m.reader_memory_source not in {
+            "memory_hidden",
+            "memory_embedding",
+            "layer_mean",
+        }:
+            raise ValueError(
+                "memory.reader_memory_source must be memory_hidden, memory_embedding or layer_mean"
+            )
         if m.distill_weight < 0:
             raise ValueError("memory.distill_weight must be non-negative")
         if m.distill_temperature <= 0:
             raise ValueError("memory.distill_temperature must be positive")
         if m.distill_positions < 0:
-            raise ValueError("memory.distill_positions must be >= 0 (0 scores every position)")
+            raise ValueError(
+                "memory.distill_positions must be >= 0 (0 scores every position)"
+            )
         if m.distill_topk < 0:
             raise ValueError("memory.distill_topk must be >= 0")
-        if m.readout_mode not in {"memory_question", "memory_only", "learned_prefix", "off"}:
+        if m.readout_mode not in {
+            "memory_question",
+            "memory_only",
+            "learned_prefix",
+            "off",
+        }:
             raise ValueError("invalid memory.readout_mode")
         if m.readout_length < 0:
-            raise ValueError("memory.readout_length must be >= 0 (0 disables the read-out)")
-        if m.readout_length > 0 and m.readout_mode in {"memory_question", "memory_only"}:
+            raise ValueError(
+                "memory.readout_length must be >= 0 (0 disables the read-out)"
+            )
+        if m.readout_length > 0 and m.readout_mode in {
+            "memory_question",
+            "memory_only",
+        }:
             if m.readout_layers <= 0:
-                raise ValueError("memory.readout_layers must be positive when the read-out is on")
+                raise ValueError(
+                    "memory.readout_layers must be positive when the read-out is on"
+                )
             if m.readout_heads <= 0:
-                raise ValueError("memory.readout_heads must be positive when the read-out is on")
+                raise ValueError(
+                    "memory.readout_heads must be positive when the read-out is on"
+                )
             if m.readout_hidden_size <= 0:
                 raise ValueError("memory.readout_hidden_size must be positive")
             if m.readout_hidden_size % m.readout_heads:
-                raise ValueError("memory.readout_hidden_size must be divisible by readout_heads")
-        if m.token_recon_positions < 0:
-            raise ValueError("memory.token_recon_positions must be >= 0 (0 scores every position)")
+                raise ValueError(
+                    "memory.readout_hidden_size must be divisible by readout_heads"
+                )
         if m.qa_weight < 0 or m.recon_weight < 0:
             raise ValueError("loss weights must be non-negative")
         qa_active = d.train_tasks in {"qa", "mix"}
@@ -462,8 +484,8 @@ class TrainConfig:
             raise ValueError("batch_size and epochs must be positive")
         if t.max_grad_norm <= 0:
             raise ValueError("training.max_grad_norm must be positive")
-        if self.evaluation.teacher_forced_every <= 0 or self.evaluation.autoregressive_every <= 0:
-            raise ValueError("evaluation intervals must be positive")
+        if self.evaluation.autoregressive_every <= 0:
+            raise ValueError("evaluation.autoregressive_every must be positive")
         if self.evaluation.qa_batch_size <= 0:
             raise ValueError("evaluation.qa_batch_size must be positive")
         if self.evaluation.autoregressive_max_qa <= 0:
@@ -474,7 +496,12 @@ class TrainConfig:
 
 def dtype_from_name(name: str):
     import torch
+
     try:
-        return {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}[name.lower()]
+        return {
+            "float32": torch.float32,
+            "float16": torch.float16,
+            "bfloat16": torch.bfloat16,
+        }[name.lower()]
     except KeyError as exc:
         raise ValueError(f"unsupported torch dtype: {name}") from exc

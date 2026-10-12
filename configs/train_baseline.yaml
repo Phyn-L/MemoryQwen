@@ -7,10 +7,12 @@ data:
   chat_template_enable_thinking: false
   filter_long_context: true
   filter_no_qa: true
+  max_context_tokens: 1536
+  max_question_tokens: 96
   max_answer_tokens: 64
-  max_context_tokens: 40960
-  max_input_context_length: 8192
-  tokenizer_filter_batch_size: 1024
+  max_conversation_tokens: 768
+  max_input_tokens: 40960
+  tokenizer_filter_batch_size: 2048
   train_tasks: mix
   recon_ratio: 0.5
   recon_schedule: constant
@@ -18,28 +20,21 @@ data:
   recon_ratio_start: 0.5
   recon_ratio_end: 0.5
   recon_ratio_min: 0.1
-  recon_prompt: "Reconstruct the original context from memory."
   qa_per_context: 4
-  root: ${DATA_ROOT:-/data/lz/contexts/aggregated}
   sortish_bucket_multiplier: 50
-  test_datasets:
-  - squad
   train_datasets: all
   train_max_samples: null
-  validation_datasets:
-  - squad
   validation_max_samples: 4096
 evaluation:
-  autoregressive_every: 400
-  autoregressive_max_qa: 1024
-  max_new_tokens: 32
-  qa_batch_size: 4
-  teacher_forced_every: 200
+  autoregressive_every: 5000
+  autoregressive_max_qa: 512
+  max_new_tokens: 64
+  qa_batch_size: 2
 logging:
-  wandb_run_name: null # Optional; defaults to model name + timestamp.
+  swanlab_run_name: null # Optional; defaults to model name + timestamp.
   log_every: 25
-  wandb_mode: offline
-  wandb_project: MemoryQwen
+  swanlab_mode: online
+  swanlab_project: MemoryQwen
 memory:
   # Fixed-length context writer
   memory_length: 64
@@ -48,34 +43,23 @@ memory:
   memory_resampler_heads: 4
   memory_resampler_hidden_size: 256
   memory_resampler_ffn_ratio: 2
+  memory_resampler_output_mode: layer0
   reader_memory_source: memory_hidden
 
   # Question-conditioned readout
-  readout_length: 8
+  readout_length: 0
   readout_hidden_size: 256
   readout_layers: 2
   readout_heads: 4
 
   # Reconstruction decoder and vocabulary head
-  decoder_hidden_size: 256
-  decoder_heads: 8
-  decoder_ffn_ratio: 2
-  head_mode: tied
-  head_init: auto
 
   # QA objective
   qa_weight: 1.0
   recon_weight: 1.0
 
   # Token reconstruction
-  token_recon_weight: 0.0
-  token_recon_positions: 128
 
-  # Causal reconstruction
-  causal_recon_weight: 0.0
-  causal_recon_positions: 128
-
-  # Distillation
   distill_weight: 0.0
   distill_positions: 128
   distill_temperature: 1.0
@@ -104,10 +88,10 @@ optimizer:
   weight_decay: 0.01
 scheduler:
   name: cosine
-  warmup_steps: 200
+  warmup_steps: 5000
 training:
-  batch_size: 1
+  batch_size: 2
   epochs: 1
   max_grad_norm: 1.0
   seed: 42
-  deterministic: false
+  deterministic: True

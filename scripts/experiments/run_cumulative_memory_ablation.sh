@@ -75,8 +75,8 @@ for name, overrides in runs.items():
     for section, values in overrides.items():
         config.setdefault(section, {}).update(values)
     config.setdefault("checkpoint", {})["output_dir"] = str(out_root / name)
-    config.setdefault("logging", {})["wandb_run_name"] = f"{out_root.name}_{name}"
-    config["logging"]["wandb_run_id"] = None
+    config.setdefault("logging", {})["swanlab_run_name"] = f"{out_root.name}_{name}"
+    config["logging"]["swanlab_run_id"] = None
     config["machine"] = os.environ["MACHINE"]
     TrainConfig.from_dict(config).validate()
     path = out_root / "configs" / f"{name}.yaml"

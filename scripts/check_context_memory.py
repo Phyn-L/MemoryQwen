@@ -17,7 +17,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.losses import qa_loss
-from src.model import MetaLoRA, load_model
+from src.model import ContextMemoryModel, load_model
 from utils.config import TrainConfig
 
 
@@ -49,7 +49,7 @@ def main():
             max_position_embeddings=40960, tie_word_embeddings=True,
         )
         qcfg._attn_implementation = "sdpa"
-        model = MetaLoRA(
+        model = ContextMemoryModel(
             Qwen3ForCausalLM(qcfg), rank=2, memory_length=8,
             context_layer_indices=(-1, -2), memory_resampler_hidden_size=32,
             readout_length=2, readout_hidden_size=32, 

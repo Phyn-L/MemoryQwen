@@ -163,8 +163,7 @@ here -- the current file is the one every recorded run used:
 
 以下定义取代本文历史 `reconstruction_loss`/`ae_loss` 字段：
 
-- `val_teacher_forced/memory_token_recon_loss`：MemoryDecoder 从 memory hidden states 和位置查询预测原文 token 的 CE。
-- `val_teacher_forced/prefix_kv_recon_loss`：原 AE，Qwen 使用 memory KV 和真实原文前缀预测下一 token 的 CE。
+- `val_teacher_forced/recon_loss`：Recon 行上的 context token CE，由 memory-conditioned Qwen 前向产生。
 - `val_teacher_forced/distill_loss`：同一 prefix-KV student 的 KL 蒸馏。
 
 各指标是未加权均值，关闭的项记 0；`loss` 按配置权重求和。辅助损失按 context 计数，QA 按问答行计数，分别跨进程汇总。训练使用相同目标实现和 `train/` 名称。详见 `configs/README.md`。

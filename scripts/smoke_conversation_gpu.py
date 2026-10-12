@@ -40,7 +40,8 @@ def _configure(path: str, source: Path, samples: int) -> TrainConfig:
     cfg.data.validation_conversation_file = str(source)
     cfg.data.test_conversation_file = str(source)
     cfg.data.max_context_tokens = min(cfg.data.max_context_tokens, 256)
-    cfg.data.max_input_context_length = min(cfg.data.max_input_context_length, 512)
+    cfg.data.max_input_tokens = min(cfg.data.max_input_tokens, 512)
+    cfg.data.max_question_tokens = min(cfg.data.max_question_tokens, 96)
     cfg.data.max_conversation_tokens = min(cfg.data.max_conversation_tokens, 128)
     cfg.data.max_answer_tokens = min(cfg.data.max_answer_tokens, 32)
     cfg.data.max_samples = samples
@@ -50,8 +51,6 @@ def _configure(path: str, source: Path, samples: int) -> TrainConfig:
     # of scanning a multi-gigabyte JSONL until a short context is found.
     cfg.data.filter_long_context = False
     cfg.data.train_tasks = "qa"
-    cfg.memory.token_recon_weight = 0.0
-    cfg.memory.causal_recon_weight = 0.0
     cfg.memory.distill_weight = 0.0
     cfg.memory.qa_weight = 1.0
     cfg.memory.recon_weight = 0.0

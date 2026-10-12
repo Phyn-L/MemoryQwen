@@ -4,15 +4,11 @@ Run with either ``python tests/test_lora_dtype.py`` or ``pytest tests``.
 
 What is asserted
 ----------------
-1. ``StaticLoRALinear`` (the default backend) really computes its LoRA delta in
+1. ``MetaLoRA`` (the default backend) really computes its LoRA delta in
    float32 even when the surrounding forward runs under bf16 autocast. The test
    is discriminating: it also checks that the same computation *without*
    ``no_autocast`` would be off by far more than the tolerance.
-2. ``MetaLoRA`` defaults to the static backend regardless of whether ``peft`` is
-   installed, and records which backend it chose.
-3. ``disable_autocast_for_peft_lora`` wraps PEFT-style layers (module exposing
-   ``lora_A``/``lora_B``), turns autocast off inside them, leaves their output
-   untouched, and is idempotent.
+2. ``ContextMemoryModel`` uses the hand-written MetaLoRA layers.
 """
 from __future__ import annotations
 
@@ -27,8 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.model import (  # noqa: E402
     MetaLoRA,
-    StaticLoRALinear,
-    disable_autocast_for_peft_lora,
+    ContextMemoryModel,
     is_trainable_parameter_name,
 )
 
@@ -38,7 +33,7 @@ TOL = 1e-6
 def _static_layer(dim=8, out=4, rank=2, alpha=4.0):
     torch.manual_seed(0)
     base = nn.Linear(dim, out, bias=False).to(torch.bfloat16)
-    layer = StaticLoRALinear(base, rank=rank, alpha=alpha, dropout=0.0, dtype=torch.float32)
+    layer = MetaLoRA(base, rank=rank, alpha=alpha, dropout=0.0, dtype=torch.float32)
     # lora_B is zero-initialised, so the delta would be exactly 0 and the dtype
     # contract untestable. Give both matrices real values.
     with torch.no_grad():
@@ -48,7 +43,7 @@ def _static_layer(dim=8, out=4, rank=2, alpha=4.0):
 
 
 def _reference_forward(base, layer, x):
-    """Exact contract of StaticLoRALinear.forward.
+    """Exact contract of MetaLoRA.forward.
 
     The base matmul runs in the backbone dtype, the LoRA delta is computed in the
     trainable dtype (float32), and only the finished delta is rounded back to the
@@ -77,8 +72,7 @@ def test_static_lora_delta_is_fp32_under_autocast():
     error = (got.float() - expected).abs().max().item()
     assert error < TOL, f"static LoRA did not follow the fp32 contract: max abs error {error}"
 
-    # Discriminating check: computing the delta under autocast (i.e. what the PEFT
-    # branch would do without the wrapper) rounds every intermediate to bf16.
+    # Discriminating check: computing the delta under autocast without the explicit dtype boundary rounds every intermediate to bf16.
     with torch.autocast("cpu", dtype=torch.bfloat16):
         rounded = (
             base(x.to(torch.bfloat16))
@@ -88,52 +82,6 @@ def test_static_lora_delta_is_fp32_under_autocast():
     assert discrimination > 1e-4, (
         f"test does not discriminate: autocast path differs by only {discrimination}"
     )
-
-
-def _cpu_autocast_enabled() -> bool:
-    """torch.is_autocast_enabled() defaults to the CUDA flag; we run on CPU here."""
-    try:
-        return bool(torch.is_autocast_enabled("cpu"))
-    except TypeError:  # older torch
-        return bool(torch.is_autocast_cpu_enabled())
-
-
-class _FakeLoraLayer(nn.Module):
-    """Stand-in for a PEFT LoRA layer: exposes lora_A/lora_B and reports autocast."""
-
-    def __init__(self, dim=8):
-        super().__init__()
-        torch.manual_seed(0)
-        self.lora_A = nn.ModuleDict({"default": nn.Linear(dim, 2, bias=False)})
-        self.lora_B = nn.ModuleDict({"default": nn.Linear(2, dim, bias=False)})
-        self.seen_autocast: list[bool] = []
-
-    def forward(self, x):
-        self.seen_autocast.append(_cpu_autocast_enabled())
-        return self.lora_A["default"](x)
-
-
-def test_disable_autocast_wrapper_wraps_and_disables():
-    layer = _FakeLoraLayer()
-    x = torch.randn(4, 8)
-
-    reference = layer(x)  # no autocast anywhere: the float32 result
-    with torch.autocast("cpu", dtype=torch.bfloat16):
-        layer(x)
-    assert layer.seen_autocast[-1] is True, "autocast should be visible before wrapping"
-
-    assert disable_autocast_for_peft_lora(layer) == 1
-    with torch.autocast("cpu", dtype=torch.bfloat16):
-        wrapped = layer(x)
-
-    assert layer.seen_autocast[-1] is False, "autocast was still enabled inside the wrapped forward"
-    assert torch.allclose(reference, wrapped, atol=TOL), "wrapper changed the result"
-
-
-def test_disable_autocast_wrapper_is_idempotent():
-    layer = _FakeLoraLayer()
-    assert disable_autocast_for_peft_lora(layer) == 1
-    assert disable_autocast_for_peft_lora(layer) == 0
 
 
 class _FakeQwen(nn.Module):
@@ -151,27 +99,22 @@ class _FakeQwen(nn.Module):
         return self.embed
 
 
-def _fake_metaloRA(use_peft=False):
-    return MetaLoRA(
+def _fake_metaloRA():
+    return ContextMemoryModel(
         _FakeQwen(),
         rank=2,
         alpha=4.0,
         memory_length=2,
-        decoder_hidden_size=8,
-        decoder_heads=2,
-        decoder_ffn_ratio=2,
-        target_modules=["q_proj"],
+                                target_modules=["q_proj"],
         max_context_tokens=8,
         trainable_dtype=torch.float32,
-        token_recon=True,
-        use_peft=use_peft,
-    )
+            )
 
 
-def test_metaloRA_defaults_to_static_backend():
+def test_manual_metaloRA_backend():
     model = _fake_metaloRA()
-    assert model.lora_backend == "static"
-    assert any(isinstance(module, StaticLoRALinear) for module in model.qwen.modules())
+    assert model.lora_backend == "manual"
+    assert any(isinstance(module, MetaLoRA) for module in model.qwen.modules())
 
 
 def test_trainable_parameters_are_fp32_and_flagged():
@@ -187,7 +130,7 @@ def test_trainable_parameters_are_fp32_and_flagged():
     assert all(is_trainable_parameter_name(name) for name in trainable)
     assert any("lora_A" in name for name in trainable)
     assert "context_resampler.latents" in trainable
-    assert any(name.startswith("decoders.") for name in trainable)
+    assert any(name.startswith("context_layer_logits") for name in trainable)
 
 
 def test_trainable_parameter_dtypes_counts_by_requires_grad():
@@ -198,22 +141,6 @@ def test_trainable_parameter_dtypes_counts_by_requires_grad():
     counts = model.trainable_parameter_dtypes()
     assert set(counts) == {"torch.float32"}, counts
     assert sum(counts.values()) == len([p for p in model.parameters() if p.requires_grad])
-
-
-def test_use_peft_true_without_peft_raises_or_uses_peft():
-    try:
-        import peft  # noqa: F401
-    except ImportError:
-        try:
-            _fake_metaloRA(use_peft=True)
-        except RuntimeError as error:
-            assert "peft" in str(error)
-        else:
-            raise AssertionError("use_peft=True without peft installed must raise, not fall back silently")
-    else:
-        from test_context_writer import tiny_model
-        model = tiny_model(use_peft=True)
-        assert model.lora_backend == "peft"
 
 
 if __name__ == "__main__":

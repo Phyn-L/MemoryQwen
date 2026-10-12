@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 import torch
@@ -38,8 +39,6 @@ LOSS_KEYS = (
     "qa_loss",
     "recon_loss",
     "ppl",
-    "token_recon_loss",
-    "causal_recon_loss",
     "distill_loss",
 )
 
@@ -72,6 +71,31 @@ def should_evaluate(step: int, every: int, total_steps: int) -> bool:
     return step % every == 0 or step >= total_steps
 
 
+def _gpu_peak_flops(device: torch.device) -> float | None:
+    """Peak dense BF16/FP16 FLOPs/s for GPUs with a known specification."""
+    if device.type != "cuda":
+        return None
+    name = torch.cuda.get_device_name(device).upper()
+    # Dense tensor-core peaks (without sparsity), in FLOPs/s.
+    peaks = (
+        (("H100", "H200"), 1_979e12),
+        (("A100",), 312e12),
+        (("RTX 4090",), 330e12),
+        (("RTX 5090",), 419e12),
+    )
+    return next((peak for names, peak in peaks if any(n in name for n in names)), None)
+
+
+def _gradient_norm(parameters) -> torch.Tensor:
+    norms = [
+        torch.linalg.vector_norm(parameter.grad.detach().float())
+        for parameter in parameters if parameter.grad is not None
+    ]
+    if not norms:
+        return torch.tensor(0.0)
+    return torch.linalg.vector_norm(torch.stack(norms))
+
+
 def eval_log_payloads(teacher_metrics=None, autoregressive_metrics=None):
     """Group evaluation scalars into their W&B sections.
 
@@ -80,7 +104,7 @@ def eval_log_payloads(teacher_metrics=None, autoregressive_metrics=None):
     when `teacher_metrics` is None the autoregressive pass computed them internally, but
     they are still that pass's numbers and must not be duplicated under the other section.
 
-    Training-side losses (including ``causal_recon_loss``/``distill_loss``) are logged separately as
+    Training-side losses (including ``distill_loss``) are logged separately as
     ``train/*`` every ``logging.log_every`` steps by the training loop, so they must not be
     folded in here.
     """
@@ -120,11 +144,11 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
     if resume:
         run_dir = Path(resume).resolve().parent
         cfg.checkpoint.output_dir = str(run_dir)
-        cfg.logging.wandb_run_name = cfg.logging.wandb_run_name or run_dir.name
+        cfg.logging.swanlab_run_name = cfg.logging.swanlab_run_name or run_dir.name
         return
     is_main = accelerator is None or accelerator.is_main_process
     run_name = (
-        (cfg.logging.wandb_run_name or new_run_name(cfg.model.name_or_path))
+        (cfg.logging.swanlab_run_name or new_run_name(cfg.model.name_or_path))
         if is_main
         else None
     )
@@ -133,7 +157,7 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
         names = [run_name]
         torch.distributed.broadcast_object_list(names, src=0)
         run_name = names[0]
-    cfg.logging.wandb_run_name = run_name
+    cfg.logging.swanlab_run_name = run_name
     # Both explicit and generated names live under the configured output root.
     cfg.checkpoint.output_dir = str(Path(cfg.checkpoint.output_dir) / run_name)
 
@@ -145,13 +169,13 @@ def main() -> None:
         "--machine",
         choices=machine_names(),
         default=None,
-        help="Take MODEL_ROOT / DATA_ROOT (and the machine's wandb mode) from "
+        help="Take MODEL_ROOT / DATA_ROOT (and the machine's swanlab mode) from "
         "utils/machines.py::MACHINES. Overrides the config's `machine:` field; can also "
         "come from the MACHINE environment variable or, failing that, the hostname.",
     )
     parser.add_argument("--resume")
     parser.add_argument("--init-from", help="Initialize model weights only; start a new optimizer, schedule and run.")
-    parser.add_argument("--wandb-run-id")
+    parser.add_argument("--swanlab-run-id")
     args = parser.parse_args()
 
     cfg = TrainConfig.from_file(args.config, machine=args.machine)
@@ -206,6 +230,9 @@ def main() -> None:
         batch_size=cfg.training.batch_size,
         sampler=sampler,
         collate_fn=train_collate,
+        num_workers=cfg.data.num_workers,
+        pin_memory=cfg.data.pin_memory,
+        persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
     )
     validation_dataset = make_context_dataset(
         cfg,
@@ -219,6 +246,9 @@ def main() -> None:
         batch_size=cfg.training.batch_size,
         shuffle=False,
         collate_fn=make_collate(cfg, tokenizer, sample_qa=False),
+        num_workers=cfg.data.num_workers,
+        pin_memory=cfg.data.pin_memory,
+        persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
     )
     # A second, deliberately *unprepared* loader over the same dataset. The autoregressive
     # budget (`evaluation.autoregressive_max_qa`) is global, and the evaluator slices it into
@@ -230,6 +260,9 @@ def main() -> None:
         batch_size=cfg.training.batch_size,
         shuffle=False,
         collate_fn=make_collate(cfg, tokenizer, sample_qa=False),
+        num_workers=cfg.data.num_workers,
+        pin_memory=cfg.data.pin_memory,
+        persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
     )
     evaluator = Evaluator(tokenizer, cfg)
     effective_loader_len = len(train_loader)
@@ -269,8 +302,8 @@ def main() -> None:
     step = 0
     if args.resume:
         step, saved_run_id = manager.load(args.resume, model, optimizer, scheduler)
-        if not cfg.logging.wandb_run_id:
-            cfg.logging.wandb_run_id = saved_run_id
+        if not cfg.logging.swanlab_run_id:
+            cfg.logging.swanlab_run_id = saved_run_id
         # The sampler is deterministic only for a fixed sharding; a different rank count
         # would make "skip the batches this run already saw" skip the wrong ones.
         ranks = 1 if accelerator is None else accelerator.num_processes
@@ -292,8 +325,8 @@ def main() -> None:
             flush=True,
         )
     finished = False
-    if args.wandb_run_id:
-        cfg.logging.wandb_run_id = args.wandb_run_id
+    if args.swanlab_run_id:
+        cfg.logging.swanlab_run_id = args.swanlab_run_id
 
     if accelerator is not None:
         # The scheduler is deliberately NOT prepared. `accelerator.prepare` wraps an
@@ -315,14 +348,14 @@ def main() -> None:
     run = None
     if accelerator is None or accelerator.is_main_process:
         try:
-            import wandb
+            import swanlab
 
-            run = wandb.init(
-                project=cfg.logging.wandb_project,
-                name=cfg.logging.wandb_run_name,
-                id=cfg.logging.wandb_run_id,
-                resume="allow" if cfg.logging.wandb_run_id else None,
-                mode=cfg.logging.wandb_mode,
+            run = swanlab.init(
+                project=cfg.logging.swanlab_project,
+                name=cfg.logging.swanlab_run_name,
+                id=cfg.logging.swanlab_run_id,
+                resume="allow" if cfg.logging.swanlab_run_id else None,
+                mode=cfg.logging.swanlab_mode,
                 config=cfg.to_dict(),
             )
         except ImportError:
@@ -345,6 +378,9 @@ def main() -> None:
                 finished = True
                 break
             ids = {k: v.to(device) for k, v in batch.items() if k != "records"}
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            step_started = time.perf_counter()
             base_model = (
                 accelerator.unwrap_model(model) if accelerator is not None else model
             )
@@ -361,6 +397,7 @@ def main() -> None:
                 context_ids=ids["context_ids"],
                 objective_config=cfg.memory,
                 loss_only=True,
+                task_ids=ids["task_ids"],
             )
             qa_weight, recon_weight, effective_ratio = scheduled_task_weights(step, total_steps, cfg.data)
             supervised, task_terms = supervision_objectives(
@@ -380,21 +417,42 @@ def main() -> None:
                 accelerator.backward(total)
             else:
                 total.backward()
-            torch.nn.utils.clip_grad_norm_(
-                model.parameters(),
-                cfg.training.max_grad_norm,
+            named_parameters = list(base_model.named_parameters())
+            resampler_grad_norm = _gradient_norm(
+                parameter for name, parameter in named_parameters
+                if name.startswith("context_resampler.") and "layer_gates" not in name
+            )
+            metalora_grad_norm = _gradient_norm(
+                parameter for name, parameter in named_parameters
+                if "lora_A" in name or "lora_B" in name
+            )
+            layer_gates_grad_norm = _gradient_norm(
+                parameter for name, parameter in named_parameters
+                if name == "context_resampler.layer_gates"
+            )
+            task_embedding_grad_norm = (
+                base_model.task_embeddings.grad.detach().float().norm(dim=1)
+                if base_model.task_embeddings.grad is not None
+                else torch.zeros(2, device=device)
+            )
+            step_grad_norm = torch.nn.utils.clip_grad_norm_(
+                model.parameters(), cfg.training.max_grad_norm,
             )
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            step_seconds = max(time.perf_counter() - step_started, 1e-9)
             step += 1
             progress.update(1)
             progress.set_postfix(
                 loss=f"{float(total.detach()):.4f}",
                 qa=f"{float(terms['qa_loss'].detach()):.4f}",
                 recon=f"{float(terms['recon_loss'].detach()):.4f}",
-                token_recon=f"{float(terms['token_recon_loss'].detach()):.4f}",
                 distill=f"{float(terms['distill_loss'].detach()):.4f}",
+                task_recon_grad=f"{float(task_embedding_grad_norm[0]):.3e}",
+                task_qa_grad=f"{float(task_embedding_grad_norm[1]):.3e}",
             )
 
             if run and step % cfg.logging.log_every == 0:
@@ -402,16 +460,45 @@ def main() -> None:
                 # the one training-side scalar that silently went wrong before (accelerate
                 # stepping it once per rank, see the prepare() comment), and without this
                 # key a distorted schedule is invisible in the run history.
-                run.log(
-                    {
-                        **{f"train/{k}": float(v.detach()) for k, v in terms.items()},
-                        "train/lr": float(scheduler.get_last_lr()[0]),
-                        "train/recon_rows": int(ids["task_ids"].eq(1).sum()),
-                        "train/qa_rows": int(ids["task_ids"].eq(0).sum()),
-                        "train/supervised_tokens": int(ids["labels"].ne(-100).sum()),
-                    },
-                    step=step,
+                supervised_tokens = int(ids["labels"].ne(-100).sum())
+                model_tokens = int(ids["context_mask"].sum())
+                model_tokens += int(ids["input_mask"].sum() + ids["target_mask"].sum())
+                model_tokens += int(
+                    ids["context_mask"].sum(dim=1).numel()
+                    * base_model.context_resampler.num_memory
                 )
+                payload = {
+                    **{f"train/{k}": float(v.detach()) for k, v in terms.items()},
+                    "train/lr": float(scheduler.get_last_lr()[0]),
+                    "train/grad_norm": float(step_grad_norm.detach()),
+                    "train/grad_norm/resampler": float(resampler_grad_norm),
+                    "train/grad_norm/metalora": float(metalora_grad_norm),
+                    "train/grad_norm/layer_gates": float(layer_gates_grad_norm),
+                    "train/grad_norm/task_recon": float(task_embedding_grad_norm[0]),
+                    "train/grad_norm/task_qa": float(task_embedding_grad_norm[1]),
+                    "train/step_seconds": step_seconds,
+                    "train/supervised_tokens_per_second": supervised_tokens / step_seconds,
+                    "train/model_tokens_per_second": model_tokens / step_seconds,
+                    "train/recon_rows": int(ids["task_ids"].eq(0).sum()),
+                    "train/qa_rows": int(ids["task_ids"].eq(1).sum()),
+                    "train/supervised_tokens": supervised_tokens,
+                }
+                if torch.cuda.is_available():
+                    payload["train/peak_cuda_memory_gib"] = (
+                        torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+                    )
+                    peak_flops = _gpu_peak_flops(device)
+                    if peak_flops:
+                        # Approximate dense-model MFU as 6 * total parameters * tokens.
+                        # Tokens include context, memory-prefix and QA forwards.
+                        model_params = sum(p.numel() for p in base_model.qwen.parameters())
+                        payload["train/mfu"] = min(
+                            1.0,
+                            6 * model_params * model_tokens
+                            / step_seconds / peak_flops,
+                        )
+                        payload["train/mfu_estimated"] = 1
+                run.log(payload, step=step)
             is_main = accelerator is None or accelerator.is_main_process
             # Validation runs on EVERY rank.  accelerator.prepare shards the validation
             # loader, so evaluating only on the main process would (a) score one shard
@@ -463,7 +550,7 @@ def main() -> None:
                     step,
                     cfg.to_dict(),
                     validation_f1=metrics["f1"],
-                    wandb_run_id=getattr(run, "id", None),
+                    swanlab_run_id=getattr(run, "id", None),
                     world_size=1 if accelerator is None else accelerator.num_processes,
                 )
         if finished:
@@ -480,7 +567,7 @@ def main() -> None:
             step,
             cfg.to_dict(),
             final=True,
-            wandb_run_id=getattr(run, "id", None),
+            swanlab_run_id=getattr(run, "id", None),
             world_size=1 if accelerator is None else accelerator.num_processes,
         )
     progress.close()

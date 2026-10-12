@@ -63,7 +63,7 @@ def benchmark(
     *,
     tokenizer=None,
     max_context_tokens: int = 4096,
-    max_input_context_length: int = 8192,
+    max_input_tokens: int = 40960,
     max_rows: int | None = None,
     filter_long_context: bool = True,
     filter_no_conversation: bool = True,
@@ -81,7 +81,7 @@ def benchmark(
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(path)
-    if max_context_tokens < 1 or max_input_context_length < 1:
+    if max_context_tokens < 1 or max_input_tokens < 1:
         raise ValueError("context limits must be positive")
     if tokenizer_filter_batch_size < 1:
         raise ValueError("tokenizer_filter_batch_size must be positive")
@@ -116,7 +116,7 @@ def benchmark(
             pending_contexts,
             add_special_tokens=False,
             truncation=True,
-            max_length=max_input_context_length + 1,
+            max_length=max_input_tokens + 1,
             padding=False,
         )
         input_ids = (
@@ -202,7 +202,7 @@ def benchmark(
         "file_size_bytes": total_bytes,
         "max_rows": max_rows,
         "max_context_tokens": max_context_tokens,
-        "max_input_context_length": max_input_context_length,
+        "max_input_tokens": max_input_tokens,
         "tokenizer_filter_batch_size": tokenizer_filter_batch_size,
         "filter_long_context": filter_long_context,
         "filter_no_conversation": filter_no_conversation,
@@ -264,7 +264,7 @@ def main() -> None:
     parser.add_argument("--path", type=Path, default=None)
     parser.add_argument("--model", default=None, help="Local tokenizer path.")
     parser.add_argument("--max-context-tokens", type=int, default=None)
-    parser.add_argument("--max-input-context-length", type=int, default=None)
+    parser.add_argument("--max-input-tokens", type=int, default=None)
     parser.add_argument("--tokenizer-filter-batch-size", type=int, default=1024)
     parser.add_argument("--max-rows", type=int, default=None)
     parser.add_argument("--no-long-context-filter", action="store_true")
@@ -287,17 +287,17 @@ def main() -> None:
     max_context_tokens = args.max_context_tokens
     if max_context_tokens is None:
         max_context_tokens = cfg.data.max_context_tokens if cfg is not None else 4096
-    max_input_context_length = args.max_input_context_length
-    if max_input_context_length is None:
-        max_input_context_length = (
-            cfg.data.max_input_context_length if cfg is not None else 8192
+    max_input_tokens = args.max_input_tokens
+    if max_input_tokens is None:
+        max_input_tokens = (
+            cfg.data.max_input_tokens if cfg is not None else 40960
         )
 
     result = benchmark(
         path,
         tokenizer=tokenizer,
         max_context_tokens=max_context_tokens,
-        max_input_context_length=max_input_context_length,
+        max_input_tokens=max_input_tokens,
         max_rows=args.max_rows,
         filter_long_context=filter_long_context,
         filter_no_conversation=not args.keep_no_assistant,

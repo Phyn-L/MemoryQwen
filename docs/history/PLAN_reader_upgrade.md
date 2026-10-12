@@ -25,7 +25,7 @@
 1. **reader 就是那个冻结的预训练 LLM**（ICAE 原文 "the untouched target LLM as the decoder"；500x 解码器零新增参数），memory 只负责携带"LLM 猜不出来的残差"，且重建是 **teacher-forced 条件**的 `P(t_i | memory, t_<i)`；
 2. memory 以**逐层 KV**（500x）或**序列前缀**（ICAE）注入冻结模型，走的是模型自己的注意力与词表头。
 
-我们现在的 reader 是：`MemoryDecoder`（每层 256 维瓶颈，只 attend memory）× 随机初始化的 `context_lm_head: 256→151936`，目标是在 **memory-only** 条件下复述全部 context token（采样 256 个位置）。即：**memory 侧的信息量不比论文少（28 层 × 2048/token ≈ 500x 的逐层 KV），但读出口要从零学一个语言模型头**。因此本轮全部改动集中在**读取侧与目标函数**，不改 writer 的骨架。
+我们现在的 reader 是：`layer0 memory embedding path`（每层 256 维瓶颈，只 attend memory）× 随机初始化的 `context_lm_head: 256→151936`，目标是在 **memory-only** 条件下复述全部 context token（采样 256 个位置）。即：**memory 侧的信息量不比论文少（28 层 × 2048/token ≈ 500x 的逐层 KV），但读出口要从零学一个语言模型头**。因此本轮全部改动集中在**读取侧与目标函数**，不改 writer 的骨架。
 
 ---
 
@@ -74,7 +74,7 @@ class VocabularyHead(nn.Module):
 
 - **必须物化**：`(h @ A.T) @ E.T` 每行 312M MACs，物化后每行 38.9M（与现在相同）；物化成本 `151936×2048×256 ≈ 1.6e11 FLOPs ≈ 3 ms/卡`，盈亏平衡点仅 292 行，而每步有 8.6 万行。
 - **初始化**（`head_init="memory_projection"`，tied 模式默认）：`A = decoders[0].memory_projection.weight.T`（[H,D]），此时 `logits = h @ W.T = (W_mem h) @ E.T`，即"预测与 memory 隐状态最对齐的 token"，比随机方向好得多。
-- 缓存生命周期：`MetaLoRA.forward()` 开头调 `self.context_lm_head.refresh()`；`torch.utils.checkpoint` 的反向重算会复用同一份物化结果（梯度仍正确）。
+- 缓存生命周期：`ContextMemoryModel.forward()` 开头调 `self.context_lm_head.refresh()`；`torch.utils.checkpoint` 的反向重算会复用同一份物化结果（梯度仍正确）。
 - 配置：`memory.head_mode: "linear" | "tied"`（默认 `"linear"`）、`memory.head_init: "auto" | "random" | "memory_projection"`（默认 `"auto"`：tied → `memory_projection`，linear → `random`）。`validate()` 校验取值。
 - 实现细节（改动时踩到并修掉的两个坑，均有测试钉住）：物化权重必须**提到 `torch.utils.checkpoint` 之外作为输入传入**，否则重算时缓存命中会让"保存的张量数"不同（`CheckpointError`）；`E` 是 bf16 而 adapter 是 fp32，相乘要先把 `E` 转到 adapter 的 dtype（保持 fp32 精度，代价是一次性的 ~1.2 GB 转置拷贝，分配器会复用）。
 - `is_trainable_parameter_name` 已含前缀 `context_lm_head.`，tied 模式的参数名是 `context_lm_head.adapter.weight`，**无需改规则**（并有测试断言这一点）。
@@ -96,7 +96,7 @@ class VocabularyHead(nn.Module):
 
 ### C2｜memory token 初始化 + 放开 memory↔memory 因果注意力
 
-**改什么**：`src/model.py::MetaLoRA.__init__` 末尾按配置初始化 `memory_tokens`；`build_block_causal_mask` 增加 `slot_attention` 参数；`utils/config.py` 增字段。
+**改什么**：`src/model.py::ContextMemoryModel.__init__` 末尾按配置初始化 `memory_tokens`；`build_block_causal_mask` 增加 `slot_attention` 参数；`utils/config.py` 增字段。
 
 **为什么**：
 1. `randn(M,H)*0.02` 的**量级**与 Qwen embedding init 相当，但**方向**是随机子空间，不在真实 token embedding 的流形上；用真实 embedding 初始化是零风险改进。

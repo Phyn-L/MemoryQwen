@@ -39,85 +39,6 @@ def _chunk_cross_entropy(hidden_chunk, labels_chunk, weight):
     return F.cross_entropy(logits, labels_chunk, ignore_index=-100, reduction="sum")
 
 
-def token_recon_loss(hidden, labels, head, mask=None, max_logits_rows=256):
-    """Context next-token prediction through the memory.
-
-    ``hidden`` is ``[B, num_layers, P, D]``: for every Qwen layer, the bottleneck
-    hidden state of the memory decoder at ``P`` sampled context positions.
-    ``labels`` is ``[B, P]`` with the context token id that each position must
-    predict (``-100`` where the position was padding and must be ignored).
-    ``head`` is the shared ``Linear(D, vocab_size)`` unembedding.
-
-    The loss is the mean over layers of the token cross entropy, i.e. nats per
-    context token. Unlike the embedding regression it has no "predict the mean
-    vector" optimum: the memory has to discriminate the actual token from the rest
-    of the vocabulary.
-
-    Logits are produced one layer (and at most ``max_logits_rows`` positions) at a
-    time. Materialising ``[B, num_layers, P, vocab_size]`` at once would need
-    gigabytes, and the head is cheap enough that chunking is nearly free.
-
-    Each chunk is wrapped in ``torch.utils.checkpoint`` when gradients are enabled.
-    Without it autograd keeps every chunk's logits alive for the backward pass --
-    ``num_layers * max_logits_rows * vocab_size`` floats, which is ~4.4 GB for the
-    Qwen3-1.7B config (28 x 256 x 151936 x 4 bytes) and dominated the measured peak.
-    Recomputing the head in the backward pass costs one extra head forward (~8% of the
-    backbone) and removes essentially all of that.
-    """
-    if hidden.ndim != 4:
-        raise ValueError("token_recon hidden must have shape [B, num_layers, P, D]")
-    if labels.shape != hidden.shape[:1] + hidden.shape[2:3]:
-        raise ValueError(f"token_recon labels {tuple(labels.shape)} do not match hidden {tuple(hidden.shape)}")
-    if mask is None:
-        mask = labels.ne(-100)
-    else:
-        mask = mask.bool() & labels.ne(-100)
-    labels = labels.masked_fill(~mask, -100)
-    # A plain nn.Linear exposes ``weight``; src.model.VocabularyHead in tied mode does
-    # not and reports the dtype its adapter computes in instead.
-    head_dtype = getattr(head, "compute_dtype", None) or head.weight.dtype
-    # Materialise the unembedding once per call, outside the checkpointed chunks: a tied
-    # head builds ``E @ adapter`` lazily, and doing that inside the checkpoint would make
-    # the recomputation save a different number of tensors than the forward.
-    weight = (
-        head.materialized_weight()
-        if hasattr(head, "materialized_weight") else head.weight
-    )
-    total = None
-    layers = hidden.size(1)
-    for layer in range(layers):
-        layer_hidden = hidden[:, layer]                       # [B, P, D]
-        flat_hidden = layer_hidden.reshape(-1, layer_hidden.size(-1)).to(head_dtype)
-        flat_labels = labels.reshape(-1)
-        rows = flat_hidden.size(0)
-        step = max(1, min(int(max_logits_rows), rows))
-        with no_autocast(hidden.device):
-            layer_sum = None
-            layer_count = 0
-            for start in range(0, rows, step):
-                chunk_hidden = flat_hidden[start:start + step]
-                chunk_labels = flat_labels[start:start + step]
-                count = chunk_labels.ne(-100).sum()
-                if int(count) == 0:
-                    continue
-                if torch.is_grad_enabled() and chunk_hidden.requires_grad:
-                    chunk_sum = torch.utils.checkpoint.checkpoint(
-                        _chunk_cross_entropy, chunk_hidden, chunk_labels, weight,
-                        use_reentrant=False,
-                    )
-                else:
-                    chunk_sum = _chunk_cross_entropy(chunk_hidden, chunk_labels, weight)
-                layer_sum = chunk_sum if layer_sum is None else layer_sum + chunk_sum
-                layer_count += int(count)
-            if layer_sum is None:
-                continue
-            layer_loss = layer_sum / layer_count
-        total = layer_loss if total is None else total + layer_loss
-    if total is None:
-        return hidden.sum() * 0.0
-    return total / layers
-
-
 def sample_positions(mask, count, generator=None):
     """Sample up to ``count`` True positions of ``mask`` ``[B, S]`` per row.
 
@@ -142,23 +63,18 @@ def sample_positions(mask, count, generator=None):
     keep = mask.gather(1, positions)
     return positions.masked_fill(~keep, -1), keep
 
-
 def sequence_lm_loss(hidden, labels, head, mask=None, positions=None, max_logits_rows=256):
-    """Next-token cross entropy over a whole sequence (the autoencoding objective).
+    """Next-token cross entropy over a whole sequence.
 
     ``hidden`` is ``[B, S, H]``: the backbone's own last hidden state for a sequence whose
     keys/values were prefixed by the memory. ``hidden[i]`` scores ``labels[i]`` **directly**
     -- this function does *not* shift, unlike :func:`qa_loss` -- so the caller shifts once
     and any ``positions`` it passes index the same aligned pair that is scored.
 
-    Unlike :func:`token_recon_loss` the vocabulary head is applied once (the sequence has one
-    hidden state per position, not one per layer), so scoring every position costs a single
-    head pass. ``positions`` gathers first, then chunks and checkpoints, so a dense
-    objective still respects the logits budget.
+    The vocabulary head is applied once over the sequence, with optional position sampling and
+    chunking to bound logits memory.
 
-    The head is materialised outside the checkpointed chunks for the same reason as in
-    :func:`token_recon_loss`: a lazily materialised weight would make the recomputation save
-    a different number of tensors than the forward.
+    The head is materialised outside checkpointed chunks so recomputation remains pure.
     """
     if hidden.ndim != 3:
         raise ValueError("sequence_lm hidden must have shape [B, S, H]")
@@ -212,14 +128,13 @@ def sequence_lm_loss(hidden, labels, head, mask=None, positions=None, max_logits
         return hidden.sum() * 0.0
     return total / count
 
-
 def kl_distill_loss(student_hidden, teacher_hidden, head, mask=None, temperature=1.0,
                     positions=None, max_logits_rows=256, topk=0, entropy_weight=False):
     """Distil the full-context distribution into the memory-conditioned one.
 
     ``teacher_hidden`` is the plain causal-LM state at the same token positions (the encoder
     pass's context rows, i.e. the full-context bypass), ``student_hidden`` is the
-    memory-conditioned state (:meth:`MetaLoRA.autoencode_with_memory`), and both are scored
+    memory-conditioned state (:meth:`ContextMemoryModel._distillation_student_hidden`), and both are scored
     by the same unembedding. The loss is ``T^2 * KL(p_teacher || p_student)`` -- forward KL,
     so the student is pushed to cover the teacher's mass -- averaged over the scored
     positions. The teacher never receives gradient.
@@ -300,23 +215,26 @@ def kl_distill_loss(student_hidden, teacher_hidden, head, mask=None, temperature
         return student_hidden.sum() * 0.0
     return total / weight_sum
 
-
 def memory_objectives(model, prefix, context_ids, context_mask, cfg):
     """Unweighted context-level losses; disabled branches do no decoder work."""
     zero = prefix.memory.sum() * 0.0
-    terms = {name: zero for name in ("token_recon_loss", "causal_recon_loss", "distill_loss")}
-    if cfg.token_recon_weight:
-        t = model.token_recon_terms(context_ids, context_mask, prefix.layer_memory, cfg.token_recon_positions)
-        terms["token_recon_loss"] = token_recon_loss(t.hidden, t.labels, model.token_recon_head, t.mask)
-    if cfg.causal_recon_weight or cfg.distill_weight:
-        hidden = model.autoencode_with_memory(prefix, model.qwen.get_input_embeddings()(context_ids), context_mask)[:, :-1]
+    terms = {"distill_loss": zero}
+    if cfg.distill_weight:
+        hidden = model._distillation_student_hidden(
+            prefix, model.qwen.get_input_embeddings()(context_ids), context_mask
+        )[:, :-1]
         mask = context_mask[:, 1:]
-        if cfg.causal_recon_weight:
-            positions = sample_positions(mask, cfg.causal_recon_positions)[0] if cfg.causal_recon_positions else None
-            terms["causal_recon_loss"] = sequence_lm_loss(hidden, context_ids[:, 1:], model.ae_head, mask, positions=positions)
-        if cfg.distill_weight:
-            positions = sample_positions(mask, cfg.distill_positions)[0] if cfg.distill_positions else None
-            terms["distill_loss"] = kl_distill_loss(hidden, prefix.context_hidden[:, :-1], model.ae_head, mask, cfg.distill_temperature, positions=positions, topk=cfg.distill_topk, entropy_weight=cfg.distill_entropy_weight)
+        positions = sample_positions(mask, cfg.distill_positions)[0] if cfg.distill_positions else None
+        terms["distill_loss"] = kl_distill_loss(
+            hidden,
+            prefix.context_hidden[:, :-1],
+            model.distill_head,
+            mask,
+            cfg.distill_temperature,
+            positions=positions,
+            topk=cfg.distill_topk,
+            entropy_weight=cfg.distill_entropy_weight,
+        )
     return terms
 
 
@@ -347,7 +265,7 @@ def scheduled_task_weights(step, total_steps, cfg):
 
 def supervision_objectives(row_losses, task_ids, cfg, qa_weight=None, recon_weight=None):
     """Per-task means with externally scheduled task weights."""
-    qa_mask, recon_mask = task_ids.eq(0), task_ids.eq(1)
+    recon_mask, qa_mask = task_ids.eq(0), task_ids.eq(1)
     qa_weight = cfg.qa_weight if qa_weight is None else qa_weight
     recon_weight = cfg.recon_weight if recon_weight is None else recon_weight
     zero = row_losses.sum() * 0

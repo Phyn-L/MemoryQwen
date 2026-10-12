@@ -14,12 +14,6 @@ NUM_PROCESSES=${NUM_PROCESSES:-}
 DRY_RUN=0
 
 RUNS=(
-    01token_recon128-distill03_false
-    02token_recon128-distill03_true
-    03token_recon128-distill01_false
-    04token_recon128-distill01_true
-    05token_recon256-distill03_false
-    06token_recon128-distill03_false_256
 )
 
 usage() {
@@ -71,24 +65,13 @@ base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
 # T/C use weight 1 as in phases 1/2. D uses 0.3 or the lighter 0.1.
 base.setdefault("memory", {}).update(
     qa_weight=1.0,
-    token_recon_weight=1.0,
-    causal_recon_weight=0.0,
     distill_weight=0.0,
     distill_entropy_weight=False,
-    token_recon_positions=128,
-    causal_recon_positions=128,
     distill_positions=128,
     distill_temperature=1.0,
     distill_topk=0,
 )
 runs = {
-    "01token_recon128-distill03_false": {"distill_weight": 0.3, "distill_entropy_weight": False},
-    "02token_recon128-distill03_true": {"distill_weight": 0.3, "distill_entropy_weight": True},
-    "03token_recon128-distill01_false":{"distill_weight": 0.1, "distill_entropy_weight": False},
-    "04token_recon128-distill01_true":{"distill_weight": 0.1, "distill_entropy_weight": True},
-    "05token_recon256-distill03_false":
-    {"token_recon_positions": 256, "distill_weight": 0.3, "distill_entropy_weight": False},
-    "06token_recon128-distill03_false_256": {"distill_weight": 0.3, "distill_entropy_weight": False, "distill_positions": 256},
 }
 
 for name, overrides in runs.items():
@@ -97,8 +80,8 @@ for name, overrides in runs.items():
     memory.update(overrides)
     config.setdefault("checkpoint", {})["output_dir"] = str(out_root / name)
     logging = config.setdefault("logging", {})
-    logging["wandb_run_name"] = f"{out_root.name}_{name}"
-    logging["wandb_run_id"] = None
+    logging["swanlab_run_name"] = f"{out_root.name}_{name}"
+    logging["swanlab_run_id"] = None
     config["machine"] = os.environ["MACHINE"]
 
     TrainConfig.from_dict(config).validate()

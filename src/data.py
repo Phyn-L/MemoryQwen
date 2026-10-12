@@ -68,12 +68,14 @@ class ContextRecord:
             if isinstance(item, ConversationMessage):
                 normalized.append(item)
             elif isinstance(item, dict):
-                normalized.append(ConversationMessage(
-                    str(item["role"]),
-                    str(item["content"]),
-                    tuple(str(value) for value in item.get("answers", ()) or ()),
-                    str(item.get("answer_letter", "")).strip().upper(),
-                ))
+                normalized.append(
+                    ConversationMessage(
+                        str(item["role"]),
+                        str(item["content"]),
+                        tuple(str(value) for value in item.get("answers", ()) or ()),
+                        str(item.get("answer_letter", "")).strip().upper(),
+                    )
+                )
             else:
                 raise TypeError(f"unsupported conversation item: {type(item)!r}")
         object.__setattr__(self, "conversations", tuple(normalized))
@@ -87,10 +89,16 @@ class ContextRecord:
                 pending_user = message
                 history.append(message)
             elif message.role == "assistant" and pending_user is not None:
-                turns.append(ConversationTurn(
-                    tuple(history), message.content, message.answers, message.answer_letter,
-                    self.dataset, self.context_id,
-                ))
+                turns.append(
+                    ConversationTurn(
+                        tuple(history),
+                        message.content,
+                        message.answers,
+                        message.answer_letter,
+                        self.dataset,
+                        self.context_id,
+                    )
+                )
                 history.append(message)
                 pending_user = None
             elif message.role == "system":
@@ -98,11 +106,20 @@ class ContextRecord:
         return tuple(turns)
 
 
-def render_conversation(tokenizer, messages: tuple[ConversationMessage, ...], *, enable_thinking: bool = False) -> str:
+def render_conversation(
+    tokenizer,
+    messages: tuple[ConversationMessage, ...],
+    *,
+    enable_thinking: bool = False,
+) -> str:
     """Render structured messages using the model's native chat template."""
     if not getattr(tokenizer, "apply_chat_template", None):
-        raise ValueError("conversation training requires a tokenizer with a chat template")
-    payload = [{"role": message.role, "content": message.content} for message in messages]
+        raise ValueError(
+            "conversation training requires a tokenizer with a chat template"
+        )
+    payload = [
+        {"role": message.role, "content": message.content} for message in messages
+    ]
     try:
         return tokenizer.apply_chat_template(
             payload,
@@ -111,7 +128,9 @@ def render_conversation(tokenizer, messages: tuple[ConversationMessage, ...], *,
             enable_thinking=enable_thinking,
         )
     except (TypeError, ValueError):
-        return tokenizer.apply_chat_template(payload, tokenize=False, add_generation_prompt=True)
+        return tokenizer.apply_chat_template(
+            payload, tokenize=False, add_generation_prompt=True
+        )
 
 
 def _iter_jsonl(path: Path):
@@ -128,7 +147,9 @@ def _iter_jsonl(path: Path):
 def _messages_from_row(row: dict[str, Any]) -> tuple[ConversationMessage, ...]:
     raw = row.get("conversations")
     if not isinstance(raw, list):
-        raise ValueError("conversation data rows must contain a list named 'conversations'")
+        raise ValueError(
+            "conversation data rows must contain a list named 'conversations'"
+        )
     messages = []
     for index, item in enumerate(raw):
         if not isinstance(item, dict):
@@ -142,25 +163,38 @@ def _messages_from_row(row: dict[str, Any]) -> tuple[ConversationMessage, ...]:
         answers = item.get("answers", ())
         if isinstance(answers, str):
             answers = (answers,)
-        messages.append(ConversationMessage(
-            role,
-            content,
-            tuple(str(value).strip() for value in answers if str(value).strip()),
-            str(item.get("answer_letter", "")).strip().upper(),
-        ))
+        messages.append(
+            ConversationMessage(
+                role,
+                content,
+                tuple(str(value).strip() for value in answers if str(value).strip()),
+                str(item.get("answer_letter", "")).strip().upper(),
+            )
+        )
     return tuple(messages)
 
 
 class ConversationDataset(Dataset):
     """Random-access JSONL dataset with a compact byte-offset index."""
 
-    CACHE_VERSION = 1
+    CACHE_VERSION = 2
 
-    def __init__(self, path: str | Path, tokenizer=None, max_context_tokens=2048,
-                 max_input_context_length=8192, max_samples=None,
-                 filter_long_context=True, filter_no_conversation=True,
-                 cache_dir: str | Path | None = None, allow_empty=False,
-                 tokenizer_filter_batch_size: int = 1024):
+    def __init__(
+        self,
+        path: str | Path,
+        tokenizer=None,
+        max_context_tokens=2048,
+        max_input_tokens=40960,
+        max_samples=None,
+        filter_long_context=True,
+        filter_no_conversation=True,
+        cache_dir: str | Path | None = None,
+        allow_empty=False,
+        tokenizer_filter_batch_size: int = 2048,
+        max_conversation_tokens: int = 768,
+        max_question_tokens: int = 96,
+        max_answer_tokens: int = 64,
+    ):
         self.path = Path(path)
         if self.path.suffix != ".jsonl":
             raise ValueError(f"conversation loader expects JSONL: {self.path}")
@@ -168,12 +202,21 @@ class ConversationDataset(Dataset):
             raise FileNotFoundError(self.path)
         if tokenizer_filter_batch_size <= 0:
             raise ValueError("tokenizer_filter_batch_size must be positive")
+        if max_question_tokens <= 0 or max_conversation_tokens <= 0 or max_answer_tokens <= 0:
+            raise ValueError("question, conversation and answer token limits must be positive")
         self.tokenizer_filter_batch_size = tokenizer_filter_batch_size
+        self.max_conversation_tokens = max_conversation_tokens
+        self.max_question_tokens = max_question_tokens
+        self.max_answer_tokens = max_answer_tokens
         self.cache_metadata = {
-            "path": str(self.path.resolve()), "size": self.path.stat().st_size,
+            "path": str(self.path.resolve()),
+            "size": self.path.stat().st_size,
             "mtime_ns": self.path.stat().st_mtime_ns,
             "max_context_tokens": max_context_tokens,
-            "max_input_context_length": max_input_context_length,
+            "max_input_tokens": max_input_tokens,
+            "max_conversation_tokens": max_conversation_tokens,
+            "max_question_tokens": max_question_tokens,
+            "max_answer_tokens": max_answer_tokens,
             "max_samples": max_samples,
             "filter_long_context": filter_long_context,
             "filter_no_conversation": filter_no_conversation,
@@ -181,7 +224,7 @@ class ConversationDataset(Dataset):
         self._offsets = self._load_or_build_offsets(
             tokenizer,
             max_context_tokens,
-            max_input_context_length,
+            max_input_tokens,
             max_samples,
             filter_long_context,
             filter_no_conversation,
@@ -217,7 +260,9 @@ class ConversationDataset(Dataset):
         except (OSError, TypeError, ValueError, json.JSONDecodeError):
             return None
 
-    def _save_offsets(self, path: Path, metadata: dict[str, Any], offsets: list[int]) -> None:
+    def _save_offsets(
+        self, path: Path, metadata: dict[str, Any], offsets: list[int]
+    ) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         temporary.write_text(
@@ -230,7 +275,7 @@ class ConversationDataset(Dataset):
         self,
         tokenizer,
         max_context_tokens,
-        max_input_context_length,
+        max_input_tokens,
         max_samples,
         filter_long_context,
         filter_no_conversation,
@@ -238,26 +283,21 @@ class ConversationDataset(Dataset):
         offsets = []
         pending_offsets = []
         pending_contexts = []
+        pending_questions: list[list[str]] = []
+        pending_answers: list[list[str]] = []
         batch_size = self.tokenizer_filter_batch_size
-
-        def accept_batch(batch_offsets, lengths) -> bool:
-            for offset, length in zip(batch_offsets, lengths):
-                if length == 0 or length > max_context_tokens:
-                    continue
-                offsets.append(offset)
-                if max_samples is not None and len(offsets) >= max_samples:
-                    return True
-            return False
 
         def flush_tokenizer_batch() -> bool:
             if not pending_offsets:
                 return False
-            if filter_long_context and tokenizer is not None:
+            if tokenizer is not None and filter_long_context:
                 encoded = tokenizer(
                     pending_contexts,
                     add_special_tokens=False,
                     truncation=True,
-                    max_length=max_input_context_length + 1,
+                    # Only one token beyond the training filter is needed to
+                    # distinguish <= max_context_tokens from overlong rows.
+                    max_length=max_context_tokens + 1,
                     padding=False,
                 )
                 input_ids = (
@@ -268,9 +308,81 @@ class ConversationDataset(Dataset):
                 lengths = [len(ids) for ids in input_ids]
             else:
                 lengths = [0] * len(pending_offsets)
-            reached_limit = accept_batch(pending_offsets, lengths)
+            context_accepted = [
+                (not filter_long_context) or (0 < length <= max_context_tokens)
+                for length in lengths
+            ]
+            accepted = context_accepted
+            if tokenizer is not None:
+                flat_questions = [text for row in pending_questions for text in row]
+                flat_answers = [text for row in pending_answers for text in row]
+                question_encoded = tokenizer(
+                    flat_questions,
+                    add_special_tokens=False,
+                    truncation=True,
+                    max_length=self.max_question_tokens + 1,
+                    padding=False,
+                )
+                question_ids = (
+                    question_encoded.input_ids
+                    if hasattr(question_encoded, "input_ids")
+                    else question_encoded["input_ids"]
+                )
+                answer_encoded = tokenizer(
+                    flat_answers,
+                    add_special_tokens=False,
+                    truncation=True,
+                    max_length=self.max_answer_tokens + 1,
+                    padding=False,
+                )
+                answer_ids = (
+                    answer_encoded.input_ids
+                    if hasattr(answer_encoded, "input_ids")
+                    else answer_encoded["input_ids"]
+                )
+                if len(question_ids) != len(flat_questions) or len(answer_ids) != len(
+                    flat_answers
+                ):
+                    raise ValueError(
+                        "tokenizer returned a different number of rows for QA filtering"
+                    )
+                accepted = []
+                cursor = 0
+                for keep, questions, answers in zip(
+                    context_accepted, pending_questions, pending_answers
+                ):
+                    row_keep = keep
+                    question_total = 0
+                    answer_total = 0
+                    for index in range(len(questions)):
+                        row_keep = row_keep and (
+                            0
+                            < len(question_ids[cursor + index])
+                            <= self.max_question_tokens
+                            and 0
+                            < len(answer_ids[cursor + index])
+                            <= self.max_answer_tokens
+                        )
+                        question_total += len(question_ids[cursor + index])
+                        answer_total += len(answer_ids[cursor + index])
+                    # The conversation budget applies uniformly to every row. For a
+                    # single-QA row this is naturally above the individual Q+A limit.
+                    row_keep = row_keep and question_total + answer_total <= self.max_conversation_tokens
+                    accepted.append(row_keep)
+                    cursor += len(questions)
+            accepted_offsets = [
+                offset for offset, keep in zip(pending_offsets, accepted) if keep
+            ]
+            reached_limit = False
+            for offset in accepted_offsets:
+                offsets.append(offset)
+                if max_samples is not None and len(offsets) >= max_samples:
+                    reached_limit = True
+                    break
             pending_offsets.clear()
             pending_contexts.clear()
+            pending_questions.clear()
+            pending_answers.clear()
             return reached_limit
 
         total_bytes = self.path.stat().st_size
@@ -301,9 +413,21 @@ class ConversationDataset(Dataset):
                         message.role == "assistant" for message in messages
                     ):
                         continue
-                    if filter_long_context and tokenizer is not None:
+                    if tokenizer is not None:
+                        turns = ContextRecord("", messages).turns()
+                        if not turns:
+                            continue
+                        if getattr(tokenizer, "apply_chat_template", None):
+                            question_texts = [
+                                render_conversation(tokenizer, turn.messages)
+                                for turn in turns
+                            ]
+                        else:
+                            question_texts = [turn.question for turn in turns]
                         pending_offsets.append(offset)
                         pending_contexts.append(context)
+                        pending_questions.append(question_texts)
+                        pending_answers.append([turn.answer for turn in turns])
                         if len(pending_offsets) >= batch_size:
                             if flush_tokenizer_batch():
                                 break
@@ -323,7 +447,7 @@ class ConversationDataset(Dataset):
         self,
         tokenizer,
         max_context_tokens,
-        max_input_context_length,
+        max_input_tokens,
         max_samples,
         filter_long_context,
         filter_no_conversation,
@@ -332,8 +456,12 @@ class ConversationDataset(Dataset):
         metadata = self._cache_metadata(tokenizer)
         if cache_dir is None:
             return self._build_offsets(
-                tokenizer, max_context_tokens, max_input_context_length, max_samples,
-                filter_long_context, filter_no_conversation,
+                tokenizer,
+                max_context_tokens,
+                max_input_tokens,
+                max_samples,
+                filter_long_context,
+                filter_no_conversation,
             )
         cache_dir.mkdir(parents=True, exist_ok=True)
         path = self._offset_cache_path(cache_dir, metadata)
@@ -341,8 +469,12 @@ class ConversationDataset(Dataset):
             offsets = self._load_offsets(path, metadata) if path.exists() else None
             if offsets is None:
                 offsets = self._build_offsets(
-                    tokenizer, max_context_tokens, max_input_context_length, max_samples,
-                    filter_long_context, filter_no_conversation,
+                    tokenizer,
+                    max_context_tokens,
+                    max_input_tokens,
+                    max_samples,
+                    filter_long_context,
+                    filter_no_conversation,
                 )
                 self._save_offsets(path, metadata, offsets)
                 if _progress_enabled():
@@ -384,7 +516,9 @@ class TrainingTaskDataset(Dataset):
             raise ValueError("invalid training task mixture")
         self.source, self.mode, self.recon_ratio = dataset, mode, recon_ratio
         self.cache_metadata = {
-            "source": dataset.cache_metadata, "mode": mode, "recon_ratio": recon_ratio,
+            "source": dataset.cache_metadata,
+            "mode": mode,
+            "recon_ratio": recon_ratio,
         }
 
     def __len__(self):
@@ -394,7 +528,14 @@ class TrainingTaskDataset(Dataset):
         if self.mode == "mix":
             context_index, task = divmod(index, 2)
             row = self.source[context_index]
-            return ContextRecord(row.context, row.conversations, row.dataset, row.context_id, row.context_token_length, "recon" if task else "qa")
+            return ContextRecord(
+                row.context,
+                row.conversations,
+                row.dataset,
+                row.context_id,
+                row.context_token_length,
+                "recon" if task else "qa",
+            )
         return self.source[index]
 
     def sample_indices(self, seed):
@@ -402,20 +543,43 @@ class TrainingTaskDataset(Dataset):
         if self.mode != "mix":
             return list(range(len(self.source)))
         rng = random.Random(seed)
-        n = len(self.source); recon = round(n * self.recon_ratio)
-        qa = list(range(0, 2 * n, 2)); rc = list(range(1, 2 * n, 2))
-        rng.shuffle(qa); rng.shuffle(rc)
-        return qa[:n - recon] + rc[:recon]
+        n = len(self.source)
+        recon = round(n * self.recon_ratio)
+        qa = list(range(0, 2 * n, 2))
+        rc = list(range(1, 2 * n, 2))
+        rng.shuffle(qa)
+        rng.shuffle(rc)
+        return qa[: n - recon] + rc[:recon]
 
 
 class SortishSampler(Sampler[int]):
     CACHE_VERSION = 5
 
-    def __init__(self, dataset, tokenizer, batch_size, bucket_multiplier=50, seed=42, chat_template_enable_thinking=False, cache_dir=None):
-        self.dataset, self.batch_size, self.seed, self.epoch = dataset, batch_size, seed, 0
+    def __init__(
+        self,
+        dataset,
+        tokenizer,
+        batch_size,
+        bucket_multiplier=50,
+        seed=42,
+        chat_template_enable_thinking=False,
+        cache_dir=None,
+    ):
+        self.dataset, self.batch_size, self.seed, self.epoch = (
+            dataset,
+            batch_size,
+            seed,
+            0,
+        )
         metadata = self._cache_metadata(tokenizer, chat_template_enable_thinking)
-        self.lengths = self._load_or_build_lengths(tokenizer, chat_template_enable_thinking, Path(cache_dir) if cache_dir else None, metadata)
-        self.bucket_multiplier = bucket_multiplier; self._rebuild()
+        self.lengths = self._load_or_build_lengths(
+            tokenizer,
+            chat_template_enable_thinking,
+            Path(cache_dir) if cache_dir else None,
+            metadata,
+        )
+        self.bucket_multiplier = bucket_multiplier
+        self._rebuild()
 
     def _cache_metadata(self, tokenizer, enable_thinking):
         payload = {
@@ -425,11 +589,16 @@ class SortishSampler(Sampler[int]):
             "tokenizer": cache_utils.tokenizer_fingerprint(tokenizer),
             "chat_template_enable_thinking": enable_thinking,
         }
-        payload["fingerprint"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest(); return payload
+        payload["fingerprint"] = hashlib.sha256(
+            json.dumps(payload, sort_keys=True).encode()
+        ).hexdigest()
+        return payload
 
     def _build_lengths(self, tokenizer, enable_thinking):
         lengths = []
-        batch_size = max(1, int(getattr(self.dataset, "tokenizer_filter_batch_size", 1024)))
+        batch_size = max(
+            1, int(getattr(self.dataset, "tokenizer_filter_batch_size", 1024))
+        )
         pending_contexts = []
         progress = tqdm(
             total=len(self.dataset),
@@ -491,22 +660,34 @@ class SortishSampler(Sampler[int]):
                     pass
             lengths = self._build_lengths(tokenizer, enable_thinking)
             temporary = path.with_suffix(".tmp")
-            temporary.write_text(
-                json.dumps({"metadata": metadata, "lengths": lengths})
-            )
+            temporary.write_text(json.dumps({"metadata": metadata, "lengths": lengths}))
             os.replace(temporary, path)
             return lengths
 
     def _rebuild(self):
         indices = range(len(self.lengths))
-        size = max(self.batch_size, self.batch_size * self.bucket_multiplier); order = sorted(indices, key=self.lengths.__getitem__); self.buckets = []
+        size = max(self.batch_size, self.batch_size * self.bucket_multiplier)
+        order = sorted(indices, key=self.lengths.__getitem__)
+        self.buckets = []
         for i in range(0, len(order), size):
-            bucket = order[i:i + size]; random.Random(self.seed + i + self.epoch).shuffle(bucket); self.buckets.extend(bucket[j:j + self.batch_size] for j in range(0, len(bucket), self.batch_size))
+            bucket = order[i : i + size]
+            random.Random(self.seed + i + self.epoch).shuffle(bucket)
+            self.buckets.extend(
+                bucket[j : j + self.batch_size]
+                for j in range(0, len(bucket), self.batch_size)
+            )
 
     def __iter__(self):
-        batches = list(self.buckets); random.Random(self.seed + self.epoch).shuffle(batches); return iter([i for batch in batches for i in batch])
-    def __len__(self): return sum(len(batch) for batch in self.buckets)
-    def set_epoch(self, epoch): self.epoch = epoch; self._rebuild()
+        batches = list(self.buckets)
+        random.Random(self.seed + self.epoch).shuffle(batches)
+        return iter([i for batch in batches for i in batch])
+
+    def __len__(self):
+        return sum(len(batch) for batch in self.buckets)
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+        self._rebuild()
 
 
 def _encode(tokenizer, texts, max_length, padding_side=None):
@@ -514,7 +695,14 @@ def _encode(tokenizer, texts, max_length, padding_side=None):
     if padding_side is not None:
         tokenizer.padding_side = padding_side
     try:
-        return tokenizer(texts, return_tensors="pt", padding=True, truncation=True, max_length=max_length, add_special_tokens=False)
+        return tokenizer(
+            texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=max_length,
+            add_special_tokens=False,
+        )
     finally:
         tokenizer.padding_side = previous
 
@@ -523,8 +711,8 @@ def collate_context_records(
     rows,
     tokenizer,
     max_context_tokens=2048,
-    max_conversation_tokens=1024,
-    max_answer_tokens=128,
+    max_question_tokens=96,
+    max_answer_tokens=64,
     append_eos=True,
     chat_template_enable_thinking=False,
     qa_per_context=4,
@@ -532,7 +720,6 @@ def collate_context_records(
     question_padding_side="left",
     training=False,
     train_tasks="mix",
-    recon_prompt="Reconstruct the original context from memory.",
 ):
     """Build memory-prefix QA batches from structured conversations.
 
@@ -552,25 +739,40 @@ def collate_context_records(
     for row_index, record in enumerate(rows):
         turns = list(record.turns())
         if training and train_tasks in {"qa", "mix"} and not turns:
-            raise ValueError("conversation training requires at least one assistant turn")
+            raise ValueError(
+                "conversation training requires at least one assistant turn"
+            )
         if training and train_tasks == "mix":
-            chosen = [random.choice(turns), ConversationTurn(
-                (ConversationMessage("user", recon_prompt),), record.context,
-                dataset=record.dataset, context_id=record.context_id,
-            )]
-            chosen_tasks = [0, 1]
+            chosen = [
+                random.choice(turns),
+                ConversationTurn(
+                    (),
+                    record.context,
+                    dataset=record.dataset,
+                    context_id=record.context_id,
+                ),
+            ]
+            chosen_tasks = [1, 0]  # 1=QA, 0=Recon
         elif training and train_tasks == "recon":
-            chosen = [ConversationTurn(
-                (ConversationMessage("user", recon_prompt),), record.context,
-                dataset=record.dataset, context_id=record.context_id,
-            )]
-            chosen_tasks = [1]
+            chosen = [
+                ConversationTurn(
+                    (),
+                    record.context,
+                    dataset=record.dataset,
+                    context_id=record.context_id,
+                )
+            ]
+            chosen_tasks = [0]
         elif training:
             chosen = [random.choice(turns)]
-            chosen_tasks = [0]
+            chosen_tasks = [1]
         else:
-            chosen = random.sample(turns, min(qa_per_context, len(turns))) if sample_qa else turns
-            chosen_tasks = [0] * len(chosen)
+            chosen = (
+                random.sample(turns, min(qa_per_context, len(turns)))
+                if sample_qa
+                else turns
+            )
+            chosen_tasks = [1] * len(chosen)
         selected.extend(chosen)
         mapping.extend([row_index] * len(chosen))
         task_ids.extend(chosen_tasks)
@@ -579,10 +781,10 @@ def collate_context_records(
 
     rendered = []
     for turn, task in zip(selected, task_ids):
-        if task:
-            messages = turn.messages
-        else:
-            messages = turn.messages
+        if task == 0:
+            rendered.append("")
+            continue
+        messages = turn.messages
         payload = [{"role": item.role, "content": item.content} for item in messages]
         try:
             text = tokenizer.apply_chat_template(
@@ -592,21 +794,38 @@ def collate_context_records(
                 enable_thinking=chat_template_enable_thinking,
             )
         except (TypeError, ValueError):
-            text = tokenizer.apply_chat_template(payload, tokenize=False, add_generation_prompt=True)
+            text = tokenizer.apply_chat_template(
+                payload, tokenize=False, add_generation_prompt=True
+            )
         rendered.append(text)
     # The template already contains role markers and the assistant generation marker.
-    previous_truncation = tokenizer.truncation_side
-    tokenizer.truncation_side = "left"
-    try:
-        q = _encode(tokenizer, rendered, max_conversation_tokens, padding_side=question_padding_side)
-    finally:
-        tokenizer.truncation_side = previous_truncation
+    qa_rendered = [text for text, task in zip(rendered, task_ids) if task == 1]
+    if qa_rendered:
+        previous_truncation = tokenizer.truncation_side
+        tokenizer.truncation_side = "left"
+        try:
+            qa_encoded = _encode(
+                tokenizer,
+                qa_rendered,
+                max_question_tokens,
+                padding_side=question_padding_side,
+            )
+        finally:
+            tokenizer.truncation_side = previous_truncation
+        q = torch.zeros((len(selected), qa_encoded.input_ids.size(1)), dtype=qa_encoded.input_ids.dtype)
+        q_mask = torch.zeros((len(selected), qa_encoded.attention_mask.size(1)), dtype=torch.bool)
+        qa_rows = torch.tensor([task == 1 for task in task_ids])
+        q[qa_rows] = qa_encoded.input_ids
+        q_mask[qa_rows] = qa_encoded.attention_mask.bool()
+    else:
+        q = torch.empty((len(selected), 0), dtype=c.input_ids.dtype)
+        q_mask = torch.empty((len(selected), 0), dtype=torch.bool)
 
     target_rows = [
         tokenizer(
             turn.answer,
             truncation=True,
-            max_length=max_context_tokens if task else max_answer_tokens,
+            max_length=max_context_tokens if task == 0 else max_answer_tokens,
             add_special_tokens=False,
         ).input_ids
         for turn, task in zip(selected, task_ids)
@@ -617,16 +836,22 @@ def collate_context_records(
         a = tokenizer.pad({"input_ids": target_rows}, padding=True, return_tensors="pt")
     finally:
         tokenizer.padding_side = previous
-    if append_eos and not all(task_ids) and getattr(tokenizer, "eos_token_id", None) is not None:
+    if (
+        append_eos
+        and any(task == 1 for task in task_ids)
+        and getattr(tokenizer, "eos_token_id", None) is not None
+    ):
         eos = int(tokenizer.eos_token_id)
         rows_n, width = a.input_ids.size(0), a.input_ids.size(1) + 1
-        ids = torch.full((rows_n, width), int(tokenizer.pad_token_id), dtype=a.input_ids.dtype)
+        ids = torch.full(
+            (rows_n, width), int(tokenizer.pad_token_id), dtype=a.input_ids.dtype
+        )
         mask = torch.zeros((rows_n, width), dtype=torch.long)
         for index in range(rows_n):
             valid = int(a.attention_mask[index].sum())
             ids[index, :valid] = a.input_ids[index, :valid]
             mask[index, :valid] = 1
-            if not task_ids[index]:
+            if task_ids[index] == 1:
                 ids[index, valid] = eos
                 mask[index, valid] = 1
         a["input_ids"] = ids
@@ -636,8 +861,8 @@ def collate_context_records(
     batch = {
         "context_ids": c.input_ids,
         "context_mask": c.attention_mask.bool(),
-        "input_ids": q.input_ids,
-        "input_mask": q.attention_mask.bool(),
+        "input_ids": q,
+        "input_mask": q_mask,
         "target_ids": a.input_ids,
         "target_mask": a.attention_mask.bool(),
         "labels": labels,

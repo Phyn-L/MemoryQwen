@@ -13,7 +13,6 @@ MACHINE=${MACHINE:-4090}
 NUM_PROCESSES=${NUM_PROCESSES:-}
 DRY_RUN=0
 
-RUNS=(00_full 01_no_distill 02_no_causal_recon 03_no_token_recon 04_qa_only)
 
 usage() {
   echo "Usage: $0 [--base-config PATH] [--output-root PATH] [--machine NAME] [--num-processes N] [--dry-run]"
@@ -63,11 +62,7 @@ base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
 runs = {
     "00_full": {},
     "01_no_distill": {"distill_weight": 0.0},
-    "02_no_causal_recon": {"causal_recon_weight": 0.0},
-    "03_no_token_recon": {"token_recon_weight": 0.0},
     "04_qa_only": {
-        "token_recon_weight": 0.0,
-        "causal_recon_weight": 0.0,
         "distill_weight": 0.0,
     },
 }
@@ -78,8 +73,8 @@ for name, overrides in runs.items():
     memory.update(overrides)
     config.setdefault("checkpoint", {})["output_dir"] = str(out_root / name)
     logging = config.setdefault("logging", {})
-    logging["wandb_run_name"] = f"{out_root.name}_{name}"
-    logging["wandb_run_id"] = None
+    logging["swanlab_run_name"] = f"{out_root.name}_{name}"
+    logging["swanlab_run_id"] = None
     config["machine"] = os.environ["MACHINE"]
 
     TrainConfig.from_dict(config).validate()

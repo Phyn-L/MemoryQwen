@@ -21,6 +21,9 @@ class _Tokenizer:
 
         return Encoded()
 
+    def apply_chat_template(self, messages, **kwargs):
+        return " ".join(item["content"] for item in messages)
+
 
 class _Backend:
     def to_str(self):
@@ -58,7 +61,7 @@ def test_conversation_offsets_are_cached_and_invalidated(tmp_path: Path):
         source,
         tokenizer=tokenizer,
         max_context_tokens=4,
-        max_input_context_length=8,
+        max_input_tokens=8,
         cache_dir=cache,
     )
     files_after_first = sorted(cache.glob("conversation_offsets-*.json"))
@@ -69,7 +72,7 @@ def test_conversation_offsets_are_cached_and_invalidated(tmp_path: Path):
         source,
         tokenizer=tokenizer,
         max_context_tokens=4,
-        max_input_context_length=8,
+        max_input_tokens=8,
         cache_dir=cache,
     )
     assert len(second) == len(first)
@@ -83,7 +86,7 @@ def test_conversation_offsets_are_cached_and_invalidated(tmp_path: Path):
         source,
         tokenizer=tokenizer,
         max_context_tokens=4,
-        max_input_context_length=8,
+        max_input_tokens=8,
         cache_dir=cache,
     )
     assert len(third) == 2
@@ -104,8 +107,37 @@ def test_batched_tokenizer_filter_respects_max_samples(tmp_path: Path):
         source,
         tokenizer=_Tokenizer(),
         max_context_tokens=4,
-        max_input_context_length=8,
+        max_input_tokens=8,
         max_samples=1,
+        tokenizer_filter_batch_size=2,
+    )
+
+    assert len(dataset) == 1
+
+
+def test_question_and_answer_lengths_are_filtered_before_caching(tmp_path: Path):
+    source = tmp_path / "conversation.jsonl"
+    rows = [
+        _row("short context"),
+        {"context": "short context", "conversations": [
+            {"role": "user", "content": "one two three four"},
+            {"role": "assistant", "content": "answer"},
+        ]},
+        {"context": "short context", "conversations": [
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "one two three four"},
+        ]},
+    ]
+    source.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    dataset = ConversationDataset(
+        source,
+        tokenizer=_Tokenizer(),
+        max_context_tokens=4,
+        max_input_tokens=8,
+        max_question_tokens=3,
+        max_conversation_tokens=8,
+        max_answer_tokens=3,
         tokenizer_filter_batch_size=2,
     )
 

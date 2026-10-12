@@ -28,10 +28,10 @@ data:
   recon_ratio_start: 0.5
   recon_ratio_end: 0.5
   recon_ratio_min: 0.1
-  max_input_context_length: 8192
+  max_input_tokens: 40960
 ```
 
-`train_tasks: qa` 和 `train_tasks: recon` 分别执行单任务训练；`mix` 同时构造两类监督，并按动态 `recon_schedule` / `recon_ratio_*` 加权。QA 输入来自 JSONL 的 `conversations`，由 Qwen 原生 chat template 渲染；Recon 使用 `data.recon_prompt`，不需要向 tokenizer 添加 special token。
+`train_tasks: qa` 和 `train_tasks: recon` 分别执行单任务训练；`mix` 同时构造两类监督，并按动态 `recon_schedule` / `recon_ratio_*` 加权。QA 输入来自 JSONL 的 `conversations`，由 Qwen 原生 chat template 渲染；Recon reader 不输入 question token，直接从 memory prefix 预测 context。
 
 两阶段训练使用 `--init-from`：
 
@@ -81,7 +81,7 @@ shot 数、生成长度、输入长度、dtype、seed、chat template、数据 s
 
 训练数据采用 `<DATA_ROOT>/ift_c1qa.jsonl` 或 `<DATA_ROOT>/ift_pwc.jsonl` 的 conversation schema：每行包含 context + conversations。PWC 保留多轮 user/assistant 历史；C1QA 通常每行一个 assistant turn。独立 ICL 评估仍使用其自身配置的数据源。
 
-两条路径均使用现有答案评分，不计算 supporting-fact/joint 指标。训练 memory 数据先按 `data.max_input_context_length` 过滤，再按 `data.max_context_tokens` 截断；ICL 的对应限制写在 YAML 的 `data.max_context_tokens`，默认 null。公平比较时需对齐这个限制与样本集合，不能只对齐 bs。
+两条路径均使用现有答案评分，不计算 supporting-fact/joint 指标。训练 memory 数据先按 `data.max_input_tokens` 的模型窗口检查，再按 `data.max_context_tokens` 截断；ICL 的对应限制写在 YAML 的 `data.max_context_tokens`，默认 null。公平比较时需对齐这个限制与样本集合，不能只对齐 bs。
 
 更多变体与旧名映射见[配置索引](../../configs/README.md)。原 A/B、8B、队列和 SQuAD 专用脚本暂作历史兼容工具；日常运行使用上述三个入口，不再新增专用变体 shell。旧脚本具有各自历史默认值，不等同于新预设。
 

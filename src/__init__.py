@@ -1,1 +1,1 @@
-"""Runtime package for Qwen + PEFT LoRA memory training."""
+"""Runtime package for Qwen + hand-written MetaLoRA memory training."""

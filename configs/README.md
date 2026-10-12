@@ -3,7 +3,7 @@
 配置直接采用新字段，不提供旧 YAML 字段迁移。机器通过 `--machine 4090/h200/a800` 选择；同一实验不再复制机器版本。
 
 - `train_baseline.yaml`：Qwen3-1.7B、模型窗口 40960、输入过滤上限 8192、memory 64、reader on、LoRA on。writer 默认使用最终层，也可用 `memory.context_layer_indices` 选择多个 block 输出并学习 softmax 混合。
-- `ablations/`：每个变量一个配置，文件名说明相对 baseline 的变化：`context_length`、`memory_length`、`multilayer`、`reader_embedding`、`reader_off`、`lora_off` 和 `token_recon`。
+- `ablations/`：每个变量一个配置，文件名说明相对 baseline 的变化：`context_length`、`memory_length`、`multilayer`、`reader_embedding`、`reader_off` 和 `lora_off`。
 - `test.yaml`：一个统一的 checkpoint 评估配置，默认 SQuAD validation。
 - `icl_zeroshot.yaml`：一个 zero-shot ICL 配置，可通过 CLI 切换数据集和模型。
 
@@ -21,9 +21,7 @@
 |---|---|---|
 | `recon_weight` | Recon 任务的 context token CE 权重 | 1 |
 | `data.train_tasks` / `data.recon_ratio` | `qa`、`recon` 或混合训练；混合时 Recon 样本比例 | `mix` / 0.5 |
-| `token_recon_weight` | MemoryDecoder + vocabulary head 从 memory/位置预测原文 token | 0 |
-| `causal_recon_weight` | Qwen 从 memory KV 和真实原文前缀预测下一 token；要求 `M + L <=` backbone window | 0 |
-| `causal_recon_positions` | prefix-KV CE 打分位置数；0 为全部 | — |
+| `data.num_workers` / `pin_memory` / `persistent_workers` | 训练与评估 DataLoader 的并行加载和 pinned memory 设置 | `8` / `true` / `true` |
 | `distill_weight` | prefix-KV student 的分布蒸馏；可独立于 prefix CE 开启 | 0 |
 
 训练任务通过 `data.train_tasks` 和动态 Recon 调度控制：
@@ -39,15 +37,14 @@ data:
   recon_ratio_min: 0.1
 ```
 
-`mix` 为每个 context 同时生成一条 QA 行和一条 Recon 行，比例调度只改变损失权重。Recon 使用
-`data.recon_prompt` 用于重建任务；QA 输入直接来自 conversation 消息，使用模型原生 chat template。
-不新增 tokenizer special token，避免新增词表参数和 checkpoint 兼容问题。需要先做 Recon
+`mix` 为每个 context 同时生成一条 QA 行和一条 Recon 行，比例调度只改变损失权重。Recon reader 使用 `task_embeddings[0]` 和 memory prefix 预测 context；QA 使用 `task_embeddings[1]`、memory 和 conversation 消息，并应用模型原生 chat template。
+task embedding 是两个可训练的连续向量（`0=Recon`、`1=QA`），不新增 tokenizer special token，也不改变词表。需要先做 Recon
 再做 QA 时，把第一阶段 checkpoint 传给 `scripts/train.py --init-from`，第二阶段设
 `train_tasks: qa`。
 
-baseline 默认使用 `mix` 训练，其中 QA 和 Recon 各占一半；`token_recon`、causal reconstruction 和蒸馏默认关闭。满 backbone window 的训练应关闭 causal reconstruction 和 distillation，因为它们还需要一次 `M + L` 的 prefix-KV pass。
+baseline 默认使用 `mix` 训练，其中 QA 和 Recon 各占一半；蒸馏默认关闭。蒸馏开启时会额外运行一次 memory-prefix context pass。
 
-训练与 teacher-forced 验证记录 QA、Recon、`token_recon_loss`、`causal_recon_loss` 和 `distill_loss`；`loss` 使用配置权重求和。
+训练与 teacher-forced 验证记录 QA、Recon 和 `distill_loss`；`loss` 使用配置权重求和。
 
 旧 checkpoint 内嵌的旧字段不会自动转换，不能直接用于此版本恢复训练。请保留原代码版本评测历史 checkpoint。
 

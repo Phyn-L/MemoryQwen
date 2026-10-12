@@ -5,8 +5,7 @@ import pytest
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.MemoryDecoder import MemoryDecoder
-from src.model import MetaLoRA, load_model
+from src.model import ContextMemoryModel, MetaLoRA, TASK_QA, TASK_RECON, load_model
 from utils.config import TrainConfig
 
 
@@ -24,7 +23,7 @@ def tiny_model(**kwargs):
         memory_resampler_heads=2, readout_hidden_size=16, readout_heads=2,
     )
     options.update(kwargs)
-    return MetaLoRA(Qwen3ForCausalLM(config), **options)
+    return ContextMemoryModel(Qwen3ForCausalLM(config), **options)
 
 
 def encode(model, length=17, batch=2):
@@ -142,14 +141,149 @@ def test_context_checkpointing_restores_state_after_forward_failure(monkeypatch)
     assert after == before
 
 
-def test_peft_writer_forward_backward():
-    pytest.importorskip("peft")
-    model = tiny_model(use_peft=True, context_gradient_checkpointing=True).train()
+def test_manual_lora_writer_forward_backward():
+    model = tiny_model(context_gradient_checkpointing=True).train()
     prefix = encode(model)
     prefix.memory.square().mean().backward()
     assert model.context_resampler.latents.grad.abs().sum() > 0
     assert any(p.grad is not None and p.grad.abs().sum() > 0
                for name, p in model.named_parameters() if "lora_B" in name)
+
+
+def test_reader_passes_disable_lora_and_restores_state():
+    model = tiny_model().eval()
+    adapter = next(module for module in model.qwen.modules()
+                   if module.__class__.__name__ == "MetaLoRA")
+    seen = []
+    handle = adapter.register_forward_pre_hook(
+        lambda module, _inputs: seen.append(module.enabled)
+    )
+    try:
+        prefix = encode(model, length=9, batch=1)
+        question = model.qwen.get_input_embeddings()(torch.randint(0, 64, (1, 2)))
+        answer = model.qwen.get_input_embeddings()(torch.randint(0, 64, (1, 2)))
+        model.forward_qa_with_prefix(
+            prefix, torch.zeros(1, dtype=torch.long), question,
+            torch.ones(1, 2, dtype=torch.bool), answer,
+            torch.ones(1, 2, dtype=torch.bool), torch.ones(1, 2, dtype=torch.long),
+        )
+    finally:
+        handle.remove()
+    assert True in seen
+    assert False in seen
+    assert adapter.enabled is True
+
+
+def test_each_lora_layer_is_enabled_only_for_encoder_and_disabled_for_reader():
+    model = tiny_model().eval()
+    adapters = {
+        name: module
+        for name, module in model.qwen.named_modules()
+        if isinstance(module, MetaLoRA)
+    }
+    assert adapters
+    seen = {name: [] for name in adapters}
+    handles = [
+        module.register_forward_pre_hook(
+            lambda current, _inputs, name=name: seen[name].append(current.enabled)
+        )
+        for name, module in adapters.items()
+    ]
+    try:
+        prefix = encode(model, length=9, batch=1)
+        question = model.qwen.get_input_embeddings()(torch.randint(0, 64, (1, 2)))
+        answer = model.qwen.get_input_embeddings()(torch.randint(0, 64, (1, 2)))
+        model.forward_qa_with_prefix(
+            prefix, torch.zeros(1, dtype=torch.long), question,
+            torch.ones(1, 2, dtype=torch.bool), answer,
+            torch.ones(1, 2, dtype=torch.bool), torch.ones(1, 2, dtype=torch.long),
+        )
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    for name, states in seen.items():
+        assert states, f"{name} was never called"
+        assert True in states, f"{name} was not enabled for context encoding"
+        assert False in states, f"{name} was not disabled for memory/reader forward"
+        assert adapters[name].enabled is True, f"{name} did not restore its state"
+
+
+def test_recon_and_qa_use_independent_task_embeddings():
+    model = tiny_model().eval()
+    assert model.task_embeddings.shape == (2, model.qwen_hidden_size)
+    assert model.task_embeddings.requires_grad
+    prefix = encode(model, length=9, batch=1)
+    question = model.qwen.get_input_embeddings()(torch.randint(0, 64, (1, 2)))
+    answer = model.qwen.get_input_embeddings()(torch.randint(0, 64, (1, 2)))
+    common = dict(
+        prefix=prefix, qa_context_indices=torch.zeros(1, dtype=torch.long),
+        question_embeds=question, question_mask=torch.ones(1, 2, dtype=torch.bool),
+        answer_embeds=answer, answer_mask=torch.ones(1, 2, dtype=torch.bool),
+        labels=torch.ones(1, 2, dtype=torch.long), loss_only=False,
+    )
+    recon = model.forward_qa_with_prefix(**common, task_ids=torch.zeros(1, dtype=torch.long))
+    qa = model.forward_qa_with_prefix(**common, task_ids=torch.ones(1, dtype=torch.long))
+    assert recon.labels.shape == qa.labels.shape == (1, 5)
+    assert not torch.allclose(recon.logits, qa.logits)
+    (recon.logits.float().square().mean() + qa.logits.float().square().mean()).backward()
+    assert model.task_embeddings.grad is not None
+
+
+def test_task_ids_select_recon_then_qa_embedding_in_reader():
+    model = tiny_model().eval()
+    prefix = encode(model, length=9, batch=2)
+    embedding = model.qwen.get_input_embeddings()
+    question = embedding(torch.randint(0, 64, (2, 2)))
+    answer = embedding(torch.randint(0, 64, (2, 2)))
+    seen = []
+    original = model.qwen.forward
+
+    def capture(*args, **kwargs):
+        seen.append(kwargs["inputs_embeds"][:, 0].detach())
+        return original(*args, **kwargs)
+
+    model.qwen.forward = capture
+    model.forward_qa_with_prefix(
+        prefix, torch.arange(2), question, torch.ones(2, 2, dtype=torch.bool),
+        answer, torch.ones(2, 2, dtype=torch.bool), torch.ones(2, 2, dtype=torch.long),
+        task_ids=torch.tensor([TASK_RECON, TASK_QA]),
+    )
+    assert len(seen) == 1
+    torch.testing.assert_close(seen[0][0], model.task_embeddings[TASK_RECON].to(model.dtype))
+    torch.testing.assert_close(seen[0][1], model.task_embeddings[TASK_QA].to(model.dtype))
+
+
+def test_context_resampler_depth_and_block_order_are_configurable():
+    model = tiny_model(memory_resampler_layers=3).eval()
+    resampler = model.context_resampler
+    assert resampler.num_layers == 3
+    assert len(resampler.blocks) == 3
+    assert all(block.self_attention is not None for block in resampler.blocks)
+    assert all(block.cross_attention is not None for block in resampler.blocks)
+    assert all(block.ffn is not None for block in resampler.blocks)
+
+
+def test_layerwise_memory_embeddings_and_gates_are_used():
+    model = tiny_model(memory_resampler_output_mode="layerwise").eval()
+    prefix = encode(model, length=9, batch=1)
+    depth = model.qwen.config.num_hidden_layers
+    assert prefix.layer_memory_embedding.shape == (1, depth, model.context_resampler.num_memory,
+                                                   model.qwen_hidden_size)
+    assert prefix.memory_embedding.shape == (1, model.context_resampler.num_memory,
+                                             model.qwen_hidden_size)
+    assert model.context_resampler.layer_gates.shape == (depth,)
+
+
+def test_layer0_memory_embedding_uses_qwen_forward_for_all_layers():
+    model = tiny_model().eval()
+    prefix = encode(model, length=9, batch=1)
+    assert prefix.memory_embedding.shape == (1, model.context_resampler.num_memory,
+                                             model.qwen_hidden_size)
+    assert prefix.layer_memory_embedding is None
+    assert model.context_resampler.output_mode == "layer0"
+    assert model.context_resampler.layer_embedding is None
+    assert prefix.memory_cache.get_seq_length() == model.context_resampler.num_memory
 
 
 def test_invalid_config_is_rejected_before_loading_tokenizer(monkeypatch):
@@ -162,21 +296,6 @@ def test_invalid_config_is_rejected_before_loading_tokenizer(monkeypatch):
     cfg = TrainConfig()
     cfg.memory.memory_resampler_layers = 0
     with pytest.raises(ValueError, match="resampler"):
-        load_model(cfg)
-
-
-def test_ae_config_window_is_validated_during_loading(monkeypatch):
-    from types import SimpleNamespace
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    monkeypatch.setattr(AutoTokenizer, "from_pretrained",
-                        lambda *a, **kw: SimpleNamespace(pad_token=None, eos_token="<eos>"))
-    monkeypatch.setattr(AutoModelForCausalLM, "from_pretrained",
-                        lambda *a, **kw: SimpleNamespace(config=SimpleNamespace(max_position_embeddings=64)))
-    cfg = TrainConfig()
-    cfg.data.max_context_tokens = 64
-    cfg.memory.causal_recon_weight = 1.0
-    with pytest.raises(ValueError, match="backbone window"):
         load_model(cfg)
 
 
@@ -196,13 +315,6 @@ def test_window_and_empty_context_validation():
         model.encode_context_prefix(torch.randn(2, 4, 32), torch.ones(2, 3, dtype=torch.bool))
     with pytest.raises(ValueError, match="window"):
         tiny_model(max_context_tokens=65)
-
-
-def test_reconstruction_queries_have_no_learned_position_capacity():
-    decoder = MemoryDecoder(32, 16, 2)
-    output = decoder.decode(torch.randn(2, 4, 32), torch.tensor([0, 2048, 40959]))
-    assert output.shape == (2, 3, 16) and torch.isfinite(output).all()
-    assert not torch.equal(output[:, 1], output[:, 2])
 
 
 def test_writer_config_roundtrip():

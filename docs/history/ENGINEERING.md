@@ -205,7 +205,7 @@ padding，这 M 行就没有任何 key。实测结论是**不会 NaN**，机制�
 
 ### 根因
 
-1. **配置项是死代码。** `load_model()` 构造 `MetaLoRA` 时只传了 `lora_*` / `memory_*` /
+1. **配置项是死代码。** `load_model()` 构造 `ContextMemoryModel` 时只传了 `lora_*` / `memory_*` /
    `target_modules` / `max_context_tokens`，没有任何一行读 `cfg.model.gradient_checkpointing`。
 2. **架构和 HF 的 gradient checkpointing 直接冲突。** HF 的 `Qwen3Model.forward` 里有
 
@@ -226,7 +226,7 @@ padding，这 M 行就没有任何 key。实测结论是**不会 NaN**，机制�
    reentrant checkpointing 下会出现 "None of the inputs have requires_grad=True"，
    梯度断在 checkpoint 段里。需要 `enable_input_require_grads()` 或对 `inputs_embeds`
    手动 `requires_grad_(True)`。
-   注意这里 embedding 是在 `MetaLoRA.forward` 外面算好再传进来的，
+   注意这里 embedding 是在 `ContextMemoryModel.forward` 外面算好再传进来的，
    所以 HF 的 `enable_input_require_grads()` 挂的 hook **根本不会被触发**。
 
 ### 结论：不改，保持 prefix KV 复用
@@ -248,7 +248,7 @@ padding，这 M 行就没有任何 key。实测结论是**不会 NaN**，机制�
 自己遍历 `self.qwen.model.layers`，对每层用 `torch.utils.checkpoint.checkpoint(..., use_reentrant=False)`
 并自己累积 `DynamicCache`。注意 HF 的 `Qwen3DecoderLayer` 在 `use_cache=True` 时返回
 `(hidden_states, present_key_value)`，所以 cache 是拿得到的；坑在于 checkpoint 的第二个
-返回值是 Cache 对象而不是张量。另外无论哪种方案，`inputs_embeds` 都在 `MetaLoRA.forward`
+返回值是 Cache 对象而不是张量。另外无论哪种方案，`inputs_embeds` 都在 `ContextMemoryModel.forward`
 外面算好，所以 HF 的 `enable_input_require_grads()` hook 不会被触发，需要自己
 `requires_grad_(True)`。
 
@@ -343,7 +343,7 @@ AR 结果另外镜像到 `val/primary/*`。
 ### 4.2 同一 context 的多个 QA 合并成一个 batch 做 prefill —— 已实现
 
 数据按 context 聚合，所以一个 context 的所有 QA 天然共享同一份 memory KV cache，
-本来就该一次 prefill 完。新增 `MetaLoRA.generate_answers_with_prefix(...,
+本来就该一次 prefill 完。新增 `ContextMemoryModel.generate_answers_with_prefix(...,
 group_by_context=True, max_rows_per_group=N)`：
 
 - 按 `qa_context_indices` 分组，同组用 `_select_cache` 把 memory cache 复制成 `[group, ...]`；
@@ -422,7 +422,7 @@ if not 0 < d.max_context_tokens <= 2048:
 ### 根因：这个上限其实是被 decoder 的位置表卡住的，不是 backbone
 
 - backbone 完全不受限：Qwen3-1.7B 的 `max_position_embeddings = 40960`，RoPE 可以外推。
-- 真正卡住的是 `MemoryDecoder`（`src/MemoryDecoder.py:30,39,55-56`）：
+- 真正卡住的是 `layer0 memory embedding path`（`src/layer0 memory embedding path.py:30,39,55-56`）：
 
   ```python
   def __init__(self, qwen_hidden_size, decoder_hidden_size, num_heads, ffn_ratio=2,
@@ -433,7 +433,7 @@ if not 0 < d.max_context_tokens <= 2048:
   query = self.position(positions)[None].expand(...)
   ```
 
-  `MetaLoRA` 把 `max_context_tokens=cfg.data.max_context_tokens` 直接传给了 28 个 decoder
+  `ContextMemoryModel` 把 `max_context_tokens=cfg.data.max_context_tokens` 直接传给了 28 个 decoder
   （`src/model.py` 的 `load_model`），所以**配置里的数据过滤阈值同时就是 decoder 位置表的大小**。
   `context_length > max_context_tokens` 时 `nn.Embedding` 直接越界报错。
 - 次要原因：`build_block_causal_mask` 物化 `[B,1,T,T]`（L=8192 时 B=1 就是 128 MB/次），
@@ -449,7 +449,7 @@ SQuAD dev 恰好全部 ≤ 2048（实测 2067/2067 保留，长度缓存里 p90=
 ### 结论：不改，这个上限是有意的成本控制
 
 把 `max_context_tokens` 定在 2048 同时达到两件事：① 把长 context 从训练/验证里剔除，
-省算力；② `MemoryDecoder` 的位置表 `nn.Embedding(2048, 256)` 不再变大 ——
+省算力；② `layer0 memory embedding path` 的位置表 `nn.Embedding(2048, 256)` 不再变大 ——
 28 层 × 2048 × 256 ≈ 15M 参数，加上 fp32 AdamW 的动量就是 ~180 MB，确实值得省。
 这两个目的是**同一个决策**，所以「解耦成两个字段」并不必要，`validate()` 里的硬上限
 正好充当这个策略的唯一真源。
@@ -483,7 +483,7 @@ SQuAD dev 恰好全部 ≤ 2048（实测 2067/2067 保留，长度缓存里 p90=
 
 ### 修法
 
-新增 `MetaLoRA._transformer_body`：从 `self.qwen` 往下剥掉任何带 `lm_head` 的包装
+新增 `ContextMemoryModel._transformer_body`：从 `self.qwen` 往下剥掉任何带 `lm_head` 的包装
 （PEFT 装了的话 transformer 会多一层），`encode_context_prefix` 改用它；
 `forward_qa_with_prefix` 和 generation 仍然用 `self.qwen`，因为它们要 `.logits`。
 
@@ -603,12 +603,12 @@ for row in qmask:
 
 以下是历史原文；其 PEFT、pooling 和损失概述不再作为当前方法说明。当前说明见[方法文档](../guides/METHOD.md)。
 
-# Qwen MetaLoRA Context Memory
+# Qwen ContextMemoryModel Context Memory
 
-This project trains a single Qwen backbone with ordinary PEFT MetaLoRA (static LoRA).
+This project trains a single Qwen backbone with ordinary PEFT ContextMemoryModel (static LoRA).
 Qwen itself encodes the context (there is no second memory encoder). Per-layer pooled
 Qwen context states are combined with a global learnable memory-token bank, and the resulting memory is
-inserted into the Qwen sequence as `[context, memory, question, answer]`. MetaLoRA is
+inserted into the Qwen sequence as `[context, memory, question, answer]`. ContextMemoryModel is
 implemented as ordinary PEFT LoRA (`lora_A/lora_B`) on the selected Qwen projections.
 Every Qwen layer has an independent memory decoder. It is trained either to reconstruct the
 original context input embeddings, or -- the default -- to predict the context tokens

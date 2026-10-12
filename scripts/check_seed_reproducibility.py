@@ -11,7 +11,7 @@ import torch
 
 def worker(args):
     from transformers import Qwen3Config, Qwen3ForCausalLM
-    from src.model import MetaLoRA, is_trainable_parameter_name
+    from src.model import ContextMemoryModel, is_trainable_parameter_name
     from src.losses import qa_loss, objective_total
     from utils.config import MemoryConfig
     from utils import seed_everything
@@ -24,17 +24,14 @@ def worker(args):
                         tie_word_embeddings=True)
     config._attn_implementation = 'sdpa'
     backbone = Qwen3ForCausalLM(config).to(dtype=getattr(torch, args.dtype))
-    model = MetaLoRA(backbone, rank=4, alpha=8, memory_length=8,
-                     decoder_hidden_size=32, decoder_heads=4, max_context_tokens=64,
-                     token_recon=True, ae_lm=True,
+    model = ContextMemoryModel(backbone, rank=4, alpha=8, memory_length=8,
+                     max_context_tokens=64, distillation=True,
                      dropout=0.1).to(args.device).train()
     for name, p in model.named_parameters():
         p.requires_grad_(is_trainable_parameter_name(name))
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=1e-3)
-    objective = MemoryConfig(token_recon_weight=1,
-                             causal_recon_weight=1, distill_weight=0.3,
-                             token_recon_positions=8, causal_recon_positions=8,
+    objective = MemoryConfig(distill_weight=0.3,
                              distill_positions=8, distill_entropy_weight=True)
     # Inputs stay identical even in the different-seed control.
     generator = torch.Generator().manual_seed(123)

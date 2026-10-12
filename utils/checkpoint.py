@@ -17,13 +17,13 @@ class CheckpointManager:
         self.loaded = {}
 
     def save(self, model, optimizer, scheduler, step, config, final=False,
-             wandb_run_id=None, world_size=1, validation_f1=None):
+             swanlab_run_id=None, world_size=1, validation_f1=None):
         path = self.output_dir / ("last.pt" if final else f"step-{step}.pt")
         path.parent.mkdir(parents=True, exist_ok=True)
         # Only trainable tensors are stored: the frozen Qwen backbone is ~1.7B parameters
         # that never change, so saving it would multiply checkpoint size by roughly ten.
         trainable = {n: p.detach().cpu() for n,p in model.named_parameters() if p.requires_grad}
-        state = {"model": trainable, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "step": step, "config": config, "wandb_run_id": wandb_run_id, "world_size": int(world_size), "rng": {"python": random.getstate(), "torch": torch.get_rng_state()}}
+        state = {"model": trainable, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "step": step, "config": config, "swanlab_run_id": swanlab_run_id, "world_size": int(world_size), "rng": {"python": random.getstate(), "torch": torch.get_rng_state()}}
         score = None if validation_f1 is None else float(validation_f1)
         improved = score is not None and math.isfinite(score) and (
             self.best_f1 is None or score > self.best_f1
@@ -81,8 +81,7 @@ class CheckpointManager:
         except RuntimeError as exc:
             raise RuntimeError(
                 f"checkpoint {path} does not fit this model: {exc}\n"
-                "A shape-defining config value (memory_length, lora_rank, "
-                "decoder_hidden_size/decoder_heads/decoder_ffn_ratio, target_modules) differs "
+                "A shape-defining config value (memory_length, lora_rank, target_modules) differs "
                 "from the run that produced it."
             ) from exc
 
@@ -90,7 +89,7 @@ class CheckpointManager:
             raise RuntimeError(
                 f"checkpoint {path} holds {len(unexpected)} tensors this model has no place for, "
                 f"e.g. {sorted(unexpected)[:8]}. The architecture or the objective changed "
-                "(for example token_recon_weight changed)."
+                "(for example the objective or model architecture changed)."
             )
 
         trainable = {name for name, p in model.named_parameters() if p.requires_grad}
@@ -118,4 +117,4 @@ class CheckpointManager:
             "world_size": int(state.get("world_size", 1) or 1),
             "config": state.get("config") or {},
         }
-        return self.loaded["step"], state.get("wandb_run_id")
+        return self.loaded["step"], state.get("swanlab_run_id")

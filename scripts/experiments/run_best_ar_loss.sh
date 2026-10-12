@@ -66,15 +66,13 @@ config = copy.deepcopy(yaml.safe_load(base_path.read_text(encoding="utf-8")))
 
 # Best observed AR configuration: QA + distribution distillation only.
 config.setdefault("memory", {}).update(
-    token_recon_weight=0.0,
-    causal_recon_weight=0.0,
     distill_weight=0.3,
     distill_entropy_weight=True,
 )
 config.setdefault("checkpoint", {})["output_dir"] = str(out_root / run_name)
 logging = config.setdefault("logging", {})
-logging["wandb_run_name"] = f"{out_root.name}_{run_name}"
-logging["wandb_run_id"] = None
+logging["swanlab_run_name"] = f"{out_root.name}_{run_name}"
+logging["swanlab_run_id"] = None
 config["machine"] = os.environ["MACHINE"]
 
 TrainConfig.from_dict(config).validate()

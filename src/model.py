@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import contextmanager
 from functools import partial
 import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint
-from .MemoryDecoder import MemoryDecoder
 from .dtypes import no_autocast
 from .resampler import ContextMemoryResampler, QuestionResampler, LearnedPrefix
 
@@ -23,27 +23,8 @@ class MetaLoRAOutput:
     memory: torch.Tensor
     layer_memory: torch.Tensor
     supervision_losses: torch.Tensor | None = None
-    # Context next-token prediction terms for the memory-only diagnostic.
-    token_recon_hidden: torch.Tensor | None = None
-    token_recon_labels: torch.LongTensor | None = None
-    token_recon_mask: torch.Tensor | None = None
-    # Memory-prefixed teacher-forced recon of the context (the autoencoding
-    # objective). Populated only when ``memory.causal_recon_weight`` is non-zero.
     objective_terms: dict | None = None
-    ae_hidden: torch.Tensor | None = None
-    ae_labels: torch.LongTensor | None = None
-    ae_mask: torch.Tensor | None = None
-    # The same positions scored by the *plain causal LM* (no memory): the distillation
-    # target, and the honest reference for "what does the memory actually add".
-    ae_teacher_hidden: torch.Tensor | None = None
 
-
-@dataclass
-class ContextLMTerms:
-    """Sampled context next-token prediction terms, shared by train and eval."""
-    hidden: torch.Tensor          # [B, num_layers, P, D] decoder hidden states
-    labels: torch.LongTensor      # [B, P] target context token ids (-100 = ignore)
-    mask: torch.Tensor            # [B, P] which of the P positions are real
 
 
 @dataclass
@@ -53,35 +34,36 @@ class ContextPrefix:
     memory_cache: object
     context_length: int
     memory_length: int
-    # Last-layer states of the *context* rows of the encoder pass. Those rows attend only
-    # to earlier context tokens, so they are the plain causal-LM distribution for the
-    # context -- i.e. the teacher a distillation objective needs, for free.
+    # Last-layer states of context rows, retained only when distillation is enabled.
     context_hidden: torch.Tensor | None = None
     memory_embedding: torch.Tensor | None = None
+    layer_memory_embedding: torch.Tensor | None = None
+
+
+TASK_RECON = 0
+TASK_QA = 1
 
 
 def is_trainable_parameter_name(name: str) -> bool:
     """Single source of truth for which parameters are trained.
 
-    Used both by :meth:`MetaLoRA.set_trainable_dtype` and by ``load_model`` so that a
+    Used both by :meth:`ContextMemoryModel.set_trainable_dtype` and by ``load_model`` so that a
     newly added trainable module cannot be forgotten in one of the two places.
     """
     return (
         "lora_A" in name
         or "lora_B" in name
-        or name.startswith(("decoders.", "token_recon_head.", "resampler."))
+        or name.startswith(("resampler.",))
         or name.startswith(("context_resampler.", "context_layer_logits"))
+        or name == "task_embeddings"
     )
 
 
 class TiedUnembedding(nn.Module):
     """Zero-parameter unembedding: score with the backbone's own (tied) embedding.
 
-    ``tie_word_embeddings`` makes the language-model head the input embedding matrix, and
-    that is exactly the read-out the context-compression papers use for their
-    autoencoding objective. Using it here introduces no parameters, so the autoencoding
-    loss trains only the memory slots / LoRA adapters and never a fresh classifier; the
-    memory-side ``token_recon_head`` stays dedicated to the memory-only probe objective.
+    ``tie_word_embeddings`` makes the language-model head the input embedding matrix.
+    Distillation reuses that frozen unembedding and introduces no trainable parameters.
     """
 
     def __init__(self, embedding_getter):
@@ -102,116 +84,19 @@ class TiedUnembedding(nn.Module):
             return F.linear(hidden, self.materialized_weight())
 
 
-class VocabularyHead(nn.Module):
-    """Shared unembedding for the context next-token objective.
 
-    ``mode="linear"`` (default) is the original behaviour: a from-scratch
-    ``[vocab, D]`` weight matrix trained by the loss. ``mode="tied"`` instead reuses
-    the backbone's own (frozen, tied) input embedding ``E`` and trains only a
-    ``D -> H`` adapter, so the classifier lives in the pretrained token geometry:
-
-        W = E @ adapter.weight            # [vocab, D]
-
-    This is the read-out the compression papers rely on ("score with the model's own
-    embedding"): a random 38.9M-parameter head is a cold start that has to learn the
-    whole vocabulary geometry from 256-dim bottleneck states, and its gradient noise
-    is what the context writer receives first.
-
-    ``W`` is materialised once per parameter version and cached: the naive two-step
-    form ``(h @ A.T) @ E.T`` costs ``H * vocab`` per row against ``D * vocab`` for the
-    materialised one (8x for Qwen3-1.7B), while the materialisation itself is one
-    ``vocab x H x D`` matmul (~3 ms) against ~86k scored rows per step -- the
-    break-even point is ~292 rows, so materialising always wins here. The cache key is
-    the adapter weight's version counter, so an optimizer step (an in-place update)
-    invalidates it automatically and a stale head can never score a later forward;
-    ``refresh()`` clears it explicitly. ``E`` is a frozen parameter of the backbone, so
-    only the adapter receives gradient.
-    """
-
-    def __init__(self, hidden_size, vocab_size, mode="linear", embedding_getter=None,
-                 backbone_hidden_size=None, init_adapter=None):
-        super().__init__()
-        if mode not in {"linear", "tied"}:
-            raise ValueError(f"VocabularyHead mode must be 'linear' or 'tied', got {mode!r}")
-        self.mode = mode
-        self.hidden_size = int(hidden_size)
-        self.vocab_size = int(vocab_size)
-        self._embedding_getter = embedding_getter
-        self._cached_weight = None
-        self._cache_key = None
-        if mode == "linear":
-            # Same shape and same init as the nn.Linear this replaces, so parameter
-            # names (token_recon_head.weight) and RNG consumption stay identical.
-            self.weight = nn.Parameter(torch.empty(self.vocab_size, self.hidden_size))
-            nn.init.kaiming_uniform_(self.weight, a=5 ** 0.5)
-        else:
-            if embedding_getter is None or backbone_hidden_size is None:
-                raise ValueError("tied mode needs embedding_getter and backbone_hidden_size")
-            self.adapter = nn.Linear(self.hidden_size, int(backbone_hidden_size), bias=False)
-            if init_adapter is not None:
-                expected = (int(backbone_hidden_size), self.hidden_size)
-                if tuple(init_adapter.shape) != expected:
-                    raise ValueError(f"init_adapter must be {expected}, got {tuple(init_adapter.shape)}")
-                with torch.no_grad():
-                    self.adapter.weight.copy_(init_adapter)
-
-    @property
-    def compute_dtype(self) -> torch.dtype:
-        """dtype a chunk of hidden states must be cast to before scoring."""
-        return self.weight.dtype if self.mode == "linear" else self.adapter.weight.dtype
-
-    def refresh(self):
-        """Drop the materialised weight; the next call rebuilds it."""
-        self._cached_weight = None
-        self._cache_key = None
-        return self
-
-    def materialized_weight(self) -> torch.Tensor:
-        if self.mode == "linear":
-            return self.weight
-        weight = self.adapter.weight
-        key = (weight._version, weight.data_ptr())
-        if self._cached_weight is None or self._cache_key != key:
-            # The backbone embedding is bfloat16 while the adapter is float32 (the
-            # trainable dtype), so the product needs one common dtype. Compute it in the
-            # adapter's dtype *with autocast disabled*: under accelerate's bf16 autocast a
-            # float32 matmul would silently come back bfloat16 and then meet the float32
-            # chunk in the loss. The bfloat16 -> float32 copy is a transient the caching
-            # allocator reuses (1.2 GB for Qwen3-1.7B, once per step).
-            embedding = self._embedding_getter()
-            with no_autocast(weight.device):
-                materialized = embedding.to(weight.dtype) @ weight
-            if torch.is_grad_enabled() and weight.requires_grad:
-                self._cached_weight = materialized
-                self._cache_key = key
-                return self._cached_weight
-            # Under torch.no_grad() -- which is where every evaluation runs -- the product
-            # carries no edge back to the adapter. Caching it under the *current* version
-            # would make the next training forward score with a weight the adapter is not
-            # part of, so the adapter would receive no gradient at all and DDP would abort
-            # that step with "Expected to have finished reduction in the prior iteration
-            # ... Parameter indices which did not receive grad: 757" (that index is this
-            # adapter). Return the tensor without touching the cache instead: the next
-            # grad-enabled forward materialises a connected weight again.
-            return materialized
-        return self._cached_weight
-
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        with no_autocast(hidden.device):
-            return F.linear(hidden, self.materialized_weight())
-
-
-class StaticLoRALinear(nn.Module):
-    """PEFT-compatible static LoRA fallback used when ``peft`` is unavailable.
+class MetaLoRA(nn.Module):
+    """A regular hand-written LoRA layer for context adaptation.
 
     The frozen base layer keeps the backbone dtype, while ``lora_A``/``lora_B`` may be
     float32 so that their AdamW state is not quantised to bfloat16. The two dtypes are
     reconciled at the module boundary: the LoRA branch computes in its own dtype with
     autocast disabled and the delta is cast back before it is added to the base output.
-    This is the same pattern PEFT uses (``previous_dtype = x.dtype`` ... cast back).
+    The adapter follows the usual LoRA computation while keeping the trainable branch in its configured dtype.
     """
     def __init__(self, base: nn.Linear, rank: int, alpha: float, dropout: float = 0.0, dtype: torch.dtype | None = None):
         super().__init__(); self.base = base; self.rank = rank; self.scaling = alpha / rank
+        self.enabled = True
         self.lora_A = nn.Parameter(base.weight.new_empty(rank, base.in_features, dtype=dtype))
         self.lora_B = nn.Parameter(base.weight.new_zeros(base.out_features, rank, dtype=dtype))
         self.dropout = nn.Dropout(dropout)
@@ -220,46 +105,12 @@ class StaticLoRALinear(nn.Module):
     def forward(self, x):
         base_dtype = self.base.weight.dtype
         base_out = self.base(x.to(base_dtype))
+        if not self.enabled:
+            return base_out
         with no_autocast(x.device):
             lora_x = self.dropout(x).to(self.lora_A.dtype)
             delta = self.scaling * (lora_x @ self.lora_A.t() @ self.lora_B.t())
         return base_out + delta.to(base_dtype)
-
-
-def disable_autocast_for_peft_lora(model: nn.Module) -> int:
-    """Run every PEFT LoRA layer's forward with autocast disabled.
-
-    ``StaticLoRALinear`` disables autocast at its own module boundary, which is what
-    keeps its float32 ``lora_A``/``lora_B`` matmuls in float32. PEFT does the dtype
-    casts itself but leaves autocast on, so under Accelerate's bf16 autocast its
-    float32 LoRA weights are silently downcast again -- the precision the float32
-    parameters exist for is lost.
-
-    Wrapping the layer is safe for the frozen base matmul: its weights are already
-    bf16, so with autocast off it runs in bf16, exactly as autocast would have run
-    it. Only the float32 LoRA branch changes behaviour.
-
-    Returns the number of wrapped modules (0 when no PEFT layer is present).
-    """
-    wrapped = 0
-    for module in model.modules():
-        if not (hasattr(module, "lora_A") and hasattr(module, "lora_B")):
-            continue
-        if getattr(module, "_autocast_disabled", False):
-            continue
-        original = module.forward
-
-        def forward_without_autocast(*args, __original=original, **kwargs):
-            device = args[0].device if args and torch.is_tensor(args[0]) else "cpu"
-            with no_autocast(device):
-                return __original(*args, **kwargs)
-
-        # Plain function, not a bound method: ``nn.Module.__call__`` reads
-        # ``self.forward`` and invokes it with the caller's arguments only.
-        module.forward = forward_without_autocast
-        module._autocast_disabled = True
-        wrapped += 1
-    return wrapped
 
 
 def build_continuation_mask(
@@ -309,29 +160,28 @@ def build_continuation_mask(
     return mask.masked_fill(~allowed[:, None], torch.finfo(dtype).min)
 
 
-class MetaLoRA(nn.Module):
-    """Qwen encoder/decoder with ordinary (static) PEFT LoRA and recon decoders.
+class ContextMemoryModel(nn.Module):
+    """Qwen encoder/decoder with hand-written MetaLoRA.
 
     Two dtypes coexist. The frozen Qwen backbone stays in its checkpoint dtype
     (``qwen_dtype``, bfloat16 for Qwen3) and every tensor that enters it is cast to
-    that dtype. The trainable pieces -- learned memory queries, ``lora_A``/``lora_B`` and
-    the recon decoders -- can be kept in ``trainable_dtype`` (float32 by
+    that dtype. The trainable pieces -- learned memory queries, task embeddings and
+    ``lora_A``/``lora_B`` -- can be kept in ``trainable_dtype`` (float32 by
     default) so that AdamW's moments and its ``param.add_(update, alpha=-lr)`` step
     are not quantised to bfloat16 resolution. The casts that reconcile the two dtypes
     live in the context resampler and short memory pass,
-    ``StaticLoRALinear``/``MemoryDecoder`` cast on entry and exit, and the losses
+    ``MetaLoRA`` casts on entry and exit, and the losses
     upcast before reducing.
     """
     def __init__(
         self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8,
-        decoder_hidden_size=256, decoder_heads=8, decoder_ffn_ratio=2,
         target_modules=None, dropout=0.0, max_context_tokens=None,
-        trainable_dtype=torch.float32, token_recon=False,
-        use_peft=False, head_mode="linear", head_init="auto", ae_lm=False,
+        trainable_dtype=torch.float32, distillation=False,
         readout_length=0, readout_layers=2, readout_heads=4, readout_hidden_size=256,
         readout_mode="memory_question", context_layer_indices=(-1,),
         memory_resampler_layers=2, memory_resampler_heads=4,
         memory_resampler_hidden_size=256, memory_resampler_ffn_ratio=2,
+        memory_resampler_output_mode="layer0",
         reader_memory_source="memory_hidden", context_gradient_checkpointing=False,
     ):
         super().__init__()
@@ -339,9 +189,9 @@ class MetaLoRA(nn.Module):
         self.target_modules = tuple(("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj") if target_modules is None else target_modules)
         self.trainable_dtype = trainable_dtype
         # Which LoRA implementation is active, recorded so a run is reproducible.
-        self.lora_backend = ("peft" if use_peft else "static") if self.target_modules else "none"
-        self.token_recon = bool(token_recon)
-        self.qwen = self._add_peft_lora(qwen, rank, alpha, dropout, bool(use_peft))
+        self.lora_backend = "manual" if self.target_modules else "none"
+        self.qwen = self._add_lora(qwen, rank, alpha, dropout)
+        qwen_dtype = self.qwen.get_input_embeddings().weight.dtype
         self.qwen_hidden_size = self.qwen.config.hidden_size
         self.max_context_tokens = int(self.qwen.config.max_position_embeddings)
         if max_context_tokens is not None and not 0 < max_context_tokens <= self.max_context_tokens:
@@ -362,50 +212,24 @@ class MetaLoRA(nn.Module):
             self.qwen_hidden_size, memory_length, memory_resampler_layers,
             memory_resampler_heads, memory_resampler_hidden_size,
             memory_resampler_ffn_ratio, dtype=trainable_dtype,
+            backbone_layers=depth,
+            output_mode=memory_resampler_output_mode,
         )
-        qwen_dtype = self.qwen.get_input_embeddings().weight.dtype
-        layers = int(self.qwen.config.num_hidden_layers)
-        self.decoders = nn.ModuleList([
-            MemoryDecoder(
-                self.qwen_hidden_size, decoder_hidden_size, decoder_heads,
-                decoder_ffn_ratio,
-            )
-            for _ in range(layers if self.token_recon else 0)
-        ])
-        # Shared unembedding for the context next-token objective. One head is shared
-        # by every layer decoder: a per-layer head would add
-        # num_layers * D * vocab_size = 28 * 256 * 151936 ~= 1.09B parameters, while a
-        # shared one costs D * vocab_size ~= 39M and still leaves each layer's decoder
-        # free to produce its own hidden state.
-        #
-        # ``head_mode="tied"`` replaces those 39M from-scratch weights with a 0.5M
-        # adapter into the backbone's own frozen embedding geometry (VocabularyHead).
-        # ``head_init="auto"`` initialises that adapter from the decoders' memory
-        # projection, so the first logits already mean "the token whose embedding the
-        # memory points at" instead of a random direction.
-        self.head_mode = head_mode
-        self.token_recon_head = (
-            VocabularyHead(
-                decoder_hidden_size,
-                int(self.qwen.get_input_embeddings().weight.size(0)),
-                mode=head_mode,
-                embedding_getter=lambda: self.qwen.get_input_embeddings().weight,
-                backbone_hidden_size=self.qwen_hidden_size,
-                init_adapter=self._head_adapter_init(head_init, decoder_hidden_size),
-            )
-            if self.token_recon else None
+        # Continuous task markers distinguish Recon and QA for the frozen reader.
+        self.task_embeddings = nn.Parameter(
+            torch.empty(2, self.qwen_hidden_size, dtype=trainable_dtype)
         )
+        nn.init.normal_(self.task_embeddings, mean=0.0, std=0.02)
         # Qwen's embedding weight is the single source of truth for the frozen
         # backbone dtype. It must not drag the trainable modules back to bfloat16,
         # so the trainable dtype is restored immediately afterwards.
         #
-        # ``ae_lm`` additionally arms the memory-prefixed autoencoding pass, which reads
-        # the context back out through the backbone's own (tied) unembedding. It carries
-        # no parameters of its own.
-        self.ae_lm = bool(ae_lm)
-        self.ae_head = (
+        # Distillation reuses a memory-prefixed context pass and the frozen tied
+        # unembedding; it carries no trainable parameters of its own.
+        self.distillation = bool(distillation)
+        self.distill_head = (
             TiedUnembedding(lambda: self.qwen.get_input_embeddings().weight)
-            if self.ae_lm else None
+            if self.distillation else None
         )
         # Per-question read-out over the (question-agnostic, cacheable) memory. Zero means
         # the historical behaviour: the answer attends only to the memory and the question.
@@ -435,8 +259,7 @@ class MetaLoRA(nn.Module):
 
         The backbone is untouched. Called automatically at the end of ``__init__`` so
         that the global ``self.to(dtype=qwen_dtype)`` cast does not flatten the
-        trainable parameters back to the backbone dtype. Works for both the PEFT path
-        and the ``StaticLoRALinear`` fallback because it matches on parameter names.
+        trainable parameters back to the backbone dtype. It matches the hand-written MetaLoRA parameters by name.
         """
         self.trainable_dtype = dtype
         for name, parameter in self.named_parameters():
@@ -451,130 +274,45 @@ class MetaLoRA(nn.Module):
                 dtypes[str(parameter.dtype)] = dtypes.get(str(parameter.dtype), 0) + 1
         return dtypes
 
-    def _add_peft_lora(self, qwen, rank, alpha, dropout, use_peft):
-        """Attach LoRA. Defaults to the static implementation, which is the audited one.
-
-        The PEFT branch is opt-in (``model.use_peft: true``) because it is a
-        different implementation of the same adapter: it needs
-        :func:`disable_autocast_for_peft_lora` to honour the float32 contract, and
-        the two paths are not covered by the same tests. Choosing it must be a
-        deliberate act, not a side effect of whether ``peft`` happens to be
-        installed -- ``peft`` is in the ``[train]`` extra, so following the README
-        install command used to flip the implementation silently.
-        """
+    def _add_lora(self, qwen, rank, alpha, dropout):
+        """Attach the hand-written MetaLoRA layers to the frozen backbone."""
         if not self.target_modules:
             for p in qwen.parameters():
                 p.requires_grad = False
             return qwen
-        if use_peft:
-            try:
-                from peft import LoraConfig, get_peft_model
-            except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover
-                raise RuntimeError(
-                    "model.use_peft=true but peft is not importable; install it "
-                    "(pip install peft) or leave model.use_peft unset"
-                ) from exc
-            cfg = LoraConfig(r=rank, lora_alpha=alpha, lora_dropout=dropout, bias="none", target_modules=list(self.target_modules), task_type="CAUSAL_LM")
-            model = get_peft_model(qwen, cfg)
-            for name, p in model.named_parameters():
-                # Same rule as everywhere else: is_trainable_parameter_name is the single
-                # source of truth, so adding a trainable module cannot miss this branch.
-                p.requires_grad = is_trainable_parameter_name(name)
-            disable_autocast_for_peft_lora(model)
-            return model
         for p in qwen.parameters():
             p.requires_grad = False
         for name, module in list(qwen.named_modules()):
             if not isinstance(module, nn.Linear) or not any(name.endswith(x) for x in self.target_modules): continue
             parent=qwen
             for part in name.split('.')[:-1]: parent=getattr(parent, part)
-            setattr(parent, name.split('.')[-1], StaticLoRALinear(module, rank, alpha, dropout, dtype=self.trainable_dtype))
+            setattr(parent, name.split('.')[-1], MetaLoRA(module, rank, alpha, dropout, dtype=self.trainable_dtype))
         return qwen
+
+    @contextmanager
+    def lora_enabled(self, enabled: bool):
+        """Temporarily enable or disable every MetaLoRA adapter.
+
+        The long context encoder keeps LoRA enabled by default. Reader passes that
+        consume the resampler output use ``lora_enabled(False)`` so they match the
+        original frozen Qwen used at inference.
+        """
+        adapters = [module for module in self.qwen.modules() if isinstance(module, MetaLoRA)]
+        previous = [module.enabled for module in adapters]
+        try:
+            for module in adapters:
+                module.enabled = bool(enabled)
+            yield self
+        finally:
+            for module, state in zip(adapters, previous):
+                module.enabled = state
 
     @property
     def dtype(self) -> torch.dtype:
         return self.qwen.get_input_embeddings().weight.dtype
 
-    def _head_adapter_init(self, head_init, decoder_hidden_size):
-        """Initial ``[H, D]`` adapter for a tied vocabulary head, or None for default.
-
-        ``memory_projection`` uses the decoders' own memory projection. The adapter maps
-        a decoder state back to the backbone width, so ``h @ W_mem`` is the up-projection
-        of that state; scoring it against the frozen embedding gives "the tokens whose
-        embeddings the memory already points at" at step 0. The head is shared by every
-        layer, so the mean projection over layers is the symmetric choice.
-        """
-        if head_init == "random":
-            return None
-        if head_init == "auto":
-            head_init = "memory_projection"
-        if head_init != "memory_projection":
-            raise ValueError(
-                f"memory.head_init must be auto, random or memory_projection, got {head_init!r}"
-            )
-        with torch.no_grad():
-            stacked = torch.stack(
-                [decoder.memory_projection.weight for decoder in self.decoders], dim=0
-            ).mean(dim=0)                       # [D, H]
-        if tuple(stacked.shape) != (decoder_hidden_size, self.qwen_hidden_size):
-            raise ValueError(
-                f"memory projection has shape {tuple(stacked.shape)}, expected "
-                f"({decoder_hidden_size}, {self.qwen_hidden_size})"
-            )
-        return stacked.t().detach().clone()     # [H, D]
-
     def _memory_prefix(self, layer_memory):
         return layer_memory[:, -1]  # final Qwen layer memory is the input prefix
-
-    def sample_context_targets(self, context_ids, context_mask, positions_per_context=None):
-        """Draw the context positions that the next-token objective will score.
-
-        A context position ``t`` is a valid target when ``t >= 1`` (query ``t - 1`` must
-        exist) and ``context_mask`` marks it as a real token. At most
-        ``positions_per_context`` of them are kept per context, sampled without
-        replacement; fewer are used for short contexts and the returned mask says
-        which rows are real.
-
-        Scoring all positions of a 2048-token context would apply the vocabulary head
-        to ``num_layers * 2048`` rows, which costs about as much as the whole Qwen
-        forward pass. Sampling a few hundred positions keeps the auxiliary objective
-        under ~10% overhead while still covering the context uniformly.
-        """
-        if context_ids.ndim != 2 or context_mask.shape != context_ids.shape:
-            raise ValueError("context_ids and context_mask must both be [B, L]")
-        device = context_ids.device
-        length = context_ids.size(1)
-        candidates = context_mask.bool().clone()
-        if length:
-            candidates[:, 0] = False          # no target before the first token
-        budget = length - 1 if not positions_per_context or positions_per_context <= 0 else int(positions_per_context)
-        budget = max(1, min(budget, max(1, length - 1)))
-        scores = torch.rand(
-            context_ids.size(0), length, device=device,
-        ).masked_fill(~candidates, float("-inf"))
-        positions = scores.topk(budget, dim=1).indices
-        keep = candidates.gather(1, positions)
-        positions = positions.masked_fill(~keep, 0)
-        return positions, keep
-
-    def token_recon_terms(self, context_ids, context_mask, layer_memory, positions_per_context=None):
-        """Build the context next-token prediction terms from the memory.
-
-        The query for target position ``t`` sits at ``t - 1``, so the decoder has to
-        produce token ``t`` from the memory and its own positional query alone -- it
-        never sees token ``t`` or any other context token. That is what forces context
-        content into the memory instead of into the decoder.
-        """
-        if layer_memory is None:
-            raise ValueError("token_recon requires the prefix layer_memory")
-        positions, keep = self.sample_context_targets(context_ids, context_mask, positions_per_context)
-        query_positions = (positions - 1).clamp_min(0)
-        labels = context_ids.gather(1, positions).masked_fill(~keep, -100)
-        hidden = torch.stack(
-            [decoder.decode(layer_memory[:, i], query_positions) for i, decoder in enumerate(self.decoders)],
-            dim=1,
-        )
-        return ContextLMTerms(hidden, labels, keep)
 
     @property
     def _transformer_body(self):
@@ -584,8 +322,7 @@ class MetaLoRA(nn.Module):
         but ``load_model`` builds a ``Qwen3ForCausalLM``, so calling ``self.qwen`` would
         additionally project every context position through the 2048 x 151936 vocabulary
         head: at context length 2048 that is a wasted matmul plus a ~0.6 GiB logits tensor
-        per row. When PEFT is installed the transformer sits one wrapper deeper, so peel
-        off anything that exposes an ``lm_head``.
+        per row. Peel off any language-model head wrapper before accessing decoder layers.
         """
         module = self.qwen
         for _ in range(4):
@@ -671,23 +408,57 @@ class MetaLoRA(nn.Module):
         # One standard causal Qwen pass over the context. The context KV is not cached.
         positions = torch.arange(context_embeds.size(1), device=context_embeds.device)
         positions = positions.unsqueeze(0).expand(context_embeds.size(0), -1)
-        context_hidden, context_last_hidden = self._encode_context_hidden(
-            context_embeds, context_mask, positions,
-        )
-        memory_embedding = self.context_resampler(context_hidden, context_mask).to(dtype=self.dtype)
-
+        with self.lora_enabled(True):
+            context_hidden, context_last_hidden = self._encode_context_hidden(
+                context_embeds, context_mask, positions,
+            )
+        encoded_memory = self.context_resampler(context_hidden, context_mask).to(dtype=self.dtype)
+        if self.context_resampler.output_mode == "layer0":
+            memory_embedding = encoded_memory
+            layer_memory_embedding = None
+        else:
+            layer_memory_embedding = encoded_memory
+            memory_embedding = layer_memory_embedding[:, 0]
         # Short Qwen pass over fixed-length memory embeddings produces the reusable KV.
         memory_positions = torch.arange(memory_embedding.size(1), device=memory_embedding.device)
         memory_positions = memory_positions.unsqueeze(0).expand(memory_embedding.size(0), -1)
         memory_mask = torch.ones(memory_embedding.size(0), memory_embedding.size(1), dtype=torch.bool, device=memory_embedding.device)
-        memory_out = self._transformer_body(
-            inputs_embeds=memory_embedding,
-            attention_mask=memory_mask,
-            position_ids=memory_positions,
-            output_hidden_states=True,
-            use_cache=True,
-            return_dict=True,
-        )
+        body = self._transformer_body
+        hooks = []
+        layers = getattr(body, "layers", None)
+        if layers is None:
+            raise RuntimeError("Qwen transformer body does not expose decoder layers")
+        if layer_memory_embedding is not None and layer_memory_embedding.size(1) != len(layers):
+            raise RuntimeError("layer-wise memory embedding count does not match Qwen layers")
+
+        def inject(layer_index):
+            def hook(_module, inputs):
+                hidden = inputs[0]
+                conditioned = hidden.clone()
+                conditioned[:, :memory_embedding.size(1)] = (
+                    hidden[:, :memory_embedding.size(1)]
+                    + self.context_resampler.layer_gates[layer_index]
+                    * layer_memory_embedding[:, layer_index]
+                )
+                return (conditioned, *inputs[1:])
+            return hook
+
+        if layer_memory_embedding is not None:
+            for index, layer in enumerate(layers):
+                hooks.append(layer.register_forward_pre_hook(inject(index)))
+        try:
+            with self.lora_enabled(False):
+                memory_out = body(
+                    inputs_embeds=memory_embedding,
+                    attention_mask=memory_mask,
+                    position_ids=memory_positions,
+                    output_hidden_states=True,
+                    use_cache=True,
+                    return_dict=True,
+                )
+        finally:
+            for hook in hooks:
+                hook.remove()
         layer_memory = torch.stack(memory_out.hidden_states[1:], dim=1)
         cache = memory_out.past_key_values
         if cache is None:
@@ -695,8 +466,9 @@ class MetaLoRA(nn.Module):
         return ContextPrefix(
             layer_memory, self._memory_prefix(layer_memory), cache,
             context_embeds.size(1), memory_embedding.size(1),
-            context_hidden=context_last_hidden if self.ae_lm else None,
+            context_hidden=context_last_hidden if self.distillation else None,
             memory_embedding=memory_embedding,
+            layer_memory_embedding=layer_memory_embedding,
         )
 
     @staticmethod
@@ -730,13 +502,14 @@ class MetaLoRA(nn.Module):
         return readout.to(dtype=self.dtype)
 
     def _qa_positions(self, prefix, question_mask, answer_length, readout_length, device):
-        """Absolute positions of ``[question, (read-out), answer]`` behind a memory prefix.
+        """Absolute positions of ``[task, question, (read-out), answer]`` after memory.
 
         The numbering is the one the generation path builds row by row
         (:meth:`generate_answers_with_prefix`), and it deliberately ignores left padding::
 
             start = memory_length
-            real question token i (0-based among the real ones) -> start + i
+            task                                                   -> start
+            real question token i (0-based among the real ones) -> start + 1 + i
             read-out slot j                                     -> start + valid + j
             answer token k                                      -> start + valid + readout_length + k
 
@@ -751,10 +524,11 @@ class MetaLoRA(nn.Module):
         question_mask = question_mask.bool()
         valid = question_mask.sum(dim=1)
         start = int(prefix.memory_length)
-        # cumsum-1 is the 0-based rank of each real token; padding slots get -1 and are
-        # parked at ``start`` (they are masked out of attention either way).
+        # cumsum-1 is the 0-based rank of each real token; padding slots are masked out.
         rank = question_mask.long().cumsum(dim=1) - 1
-        blocks = [torch.where(question_mask, start + rank, torch.full_like(rank, start))]
+        blocks = [
+            torch.where(question_mask, start + rank, torch.full_like(rank, start + 1)),
+        ]
         if readout_length:
             blocks.append(
                 start + valid.unsqueeze(1)
@@ -767,9 +541,23 @@ class MetaLoRA(nn.Module):
             )
         return torch.cat(blocks, dim=1).to(device)
 
-    def forward_qa_with_prefix(self, prefix, qa_context_indices, question_embeds, question_mask, answer_embeds, answer_mask, labels, loss_only=False):
+    def forward_qa_with_prefix(self, prefix, qa_context_indices, question_embeds, question_mask, answer_embeds, answer_mask, labels, loss_only=False, task_ids=None):
         question_embeds, answer_embeds = question_embeds.to(dtype=self.dtype), answer_embeds.to(dtype=self.dtype)
         indices = qa_context_indices.to(question_embeds.device, dtype=torch.long)
+        if task_ids is None:
+            task_ids = torch.full(
+                (question_embeds.size(0),), TASK_QA, dtype=torch.long,
+                device=question_embeds.device,
+            )
+        task_ids = task_ids.to(question_embeds.device, dtype=torch.long)
+        if task_ids.shape != (question_embeds.size(0),) or bool(
+            ((task_ids != TASK_RECON) & (task_ids != TASK_QA)).any()
+        ):
+            raise ValueError("task_ids must contain one value per row: TASK_RECON or TASK_QA")
+        task = self.task_embeddings.index_select(0, task_ids).to(dtype=self.dtype).unsqueeze(1)
+        question_embeds = torch.cat([task, question_embeds], dim=1)
+        task_mask = torch.ones((question_mask.size(0), 1), dtype=torch.bool, device=question_mask.device)
+        question_mask = torch.cat([task_mask, question_mask.bool()], dim=1)
         cache = self._select_cache(prefix.memory_cache, indices, self.qwen.config)
         readout = self._readout_embeddings(prefix, question_embeds, question_mask, indices)
         extra = 0 if readout is None else readout.size(1)
@@ -782,7 +570,8 @@ class MetaLoRA(nn.Module):
         if int(positions.max()) >= self.max_context_tokens:
             raise ValueError("memory + prompt + readout + target exceeds the backbone window")
         body = self._transformer_body if loss_only else self.qwen
-        out = body(inputs_embeds=sequence, attention_mask=mask, position_ids=positions, past_key_values=cache, use_cache=not loss_only, return_dict=True)
+        with self.lora_enabled(False):
+            out = body(inputs_embeds=sequence, attention_mask=mask, position_ids=positions, past_key_values=cache, use_cache=not loss_only, return_dict=True)
         ignored = torch.full((labels.size(0), question_embeds.size(1) + extra), -100, dtype=labels.dtype, device=labels.device)
         full_labels = torch.cat([ignored, labels], dim=1)
         row_losses = None
@@ -803,31 +592,12 @@ class MetaLoRA(nn.Module):
             supervision_losses=row_losses,
         )
 
-    def autoencode_with_memory(self, prefix, context_embeds, context_mask):
-        """Teacher-forced recon of the context through the memory prefix.
-
-        This is the autoencoding objective the context-compression literature uses (e.g.
-        500xCompressor eq. 1): the *frozen backbone* is the decoder, the per-layer key/value
-        pairs of the memory prefix it, and every context token is predicted from the memory
-        plus the teacher-forced prefix, ``P(t_i | memory, t_<i)``. The memory slots and the LoRA
-        adapters still receive gradient because the prefix is differentiable, but no
-        decoder has to be learned from scratch -- which is exactly what separates this from
-        the memory-only ``token_recon`` objective (where every token must be produced from
-        the memory alone).
-
-        The continuation mask is reused: its "question rows" rule is "read all memory, then
-        attend causally to yourself", which is precisely teacher forcing over the context.
-        Positions start after the memory, matching ``forward_qa_with_prefix``, so the memory
-        keys keep the positions they were encoded with and no RoPE surgery is needed.
-
-        Returns the last hidden state ``[B, L, H]``. The caller scores it with the
-        backbone's own (tied) unembedding through :func:`src.losses.sequence_lm_loss`, so
-        vocabulary-sized logits are never materialised for all positions at once.
-        """
+    def _distillation_student_hidden(self, prefix, context_embeds, context_mask):
+        """Run context tokens behind the reusable memory KV for distillation."""
         context_embeds = context_embeds.to(dtype=self.dtype)
         context_mask = context_mask.bool()
         if prefix.memory_length + context_embeds.size(1) > self.max_context_tokens:
-            raise ValueError("autoencoding needs memory_length + context_length within the backbone window")
+            raise ValueError("distillation needs memory_length + context_length within the backbone window")
         mask = torch.cat([
             context_mask.new_ones(context_mask.size(0), prefix.memory_length), context_mask,
         ], dim=1)
@@ -835,64 +605,47 @@ class MetaLoRA(nn.Module):
         positions = torch.arange(start, start + context_embeds.size(1), device=context_embeds.device)
         positions = positions.unsqueeze(0).expand(context_embeds.size(0), -1)
         # Qwen updates a supplied DynamicCache even with use_cache=False. Keep
-        # reconstruction's context tokens out of the reusable memory-only prefix.
+        # the context tokens out of the reusable memory-only prefix.
         indices = torch.arange(context_embeds.size(0), device=context_embeds.device)
         cache = self._select_cache(prefix.memory_cache, indices, self.qwen.config)
-        out = self._transformer_body(
-            inputs_embeds=context_embeds,
-            attention_mask=mask,
-            position_ids=positions,
-            past_key_values=cache,
-            use_cache=False,
-            return_dict=True,
-        )
+        with self.lora_enabled(False):
+            out = self._transformer_body(
+                inputs_embeds=context_embeds,
+                attention_mask=mask,
+                position_ids=positions,
+                past_key_values=cache,
+                use_cache=False,
+                return_dict=True,
+            )
         return out.last_hidden_state
 
-    def forward(self, context_embeds, context_mask, question_embeds, question_mask, answer_embeds, answer_mask, labels, qa_context_indices=None, context_ids=None, token_recon_positions=None, objective_config=None, loss_only=False):
+    def forward(self, context_embeds, context_mask, question_embeds, question_mask, answer_embeds, answer_mask, labels, qa_context_indices=None, context_ids=None, objective_config=None, loss_only=False, task_ids=None):
         """Training path.
 
-        ``context_ids`` supplies targets for the optional token and causal objectives.
+        ``context_ids`` supplies targets for the optional distillation objective.
         """
         prefix = self.encode_context_prefix(context_embeds, context_mask)
         indices = qa_context_indices if qa_context_indices is not None else torch.arange(question_embeds.size(0), device=question_embeds.device)
-        output = self.forward_qa_with_prefix(prefix, indices, question_embeds, question_mask, answer_embeds, answer_mask, labels, loss_only=loss_only)
+        output = self.forward_qa_with_prefix(prefix, indices, question_embeds, question_mask, answer_embeds, answer_mask, labels, loss_only=loss_only, task_ids=task_ids)
         if objective_config is not None:
             from .losses import memory_objectives
             output.objective_terms = memory_objectives(self, prefix, context_ids, context_mask, objective_config)
             return output
-        if self.token_recon:
-            if context_ids is None:
-                raise ValueError("token_recon needs context_ids, but forward() received none")
-            terms = self.token_recon_terms(
-                context_ids.to(context_embeds.device), context_mask.to(context_embeds.device),
-                prefix.layer_memory, token_recon_positions,
-            )
-            output.token_recon_hidden = terms.hidden
-            output.token_recon_labels = terms.labels
-            output.token_recon_mask = terms.mask
-        if self.ae_lm:
-            if context_ids is None:
-                raise ValueError("the autoencoding objective needs context_ids, but forward() received none")
-            context_ids = context_ids.to(context_embeds.device)
-            context_mask = context_mask.to(context_embeds.device).bool()
-            hidden = self.autoencode_with_memory(prefix, context_embeds, context_mask)
-            # Align prediction and target here, once: hidden[i] scores context_ids[i + 1].
-            # The first context token has no predecessor to be predicted from, so it is the
-            # only unscored position.
-            output.ae_hidden = hidden[:, :-1]
-            output.ae_labels = context_ids[:, 1:]
-            output.ae_mask = context_mask[:, 1:]
-            # The encoder pass already computed the plain causal-LM states for the same
-            # positions (its context rows attend only to earlier context), so the
-            # distillation target costs nothing extra. Sliced the same way as ae_hidden.
-            if prefix.context_hidden is not None:
-                output.ae_teacher_hidden = prefix.context_hidden[:, :-1]
         return output
 
     @torch.no_grad()
     def generate_answers_with_prefix(self, prefix, qa_context_indices, question_ids, question_mask,
                                      tokenizer, max_new_tokens=128, group_by_context=True,
                                      max_rows_per_group=4):
+        with self.lora_enabled(False):
+            return self._generate_answers_with_prefix(
+                prefix, qa_context_indices, question_ids, question_mask,
+                tokenizer, max_new_tokens, group_by_context, max_rows_per_group,
+            )
+
+    def _generate_answers_with_prefix(self, prefix, qa_context_indices, question_ids, question_mask,
+                                      tokenizer, max_new_tokens=128, group_by_context=True,
+                                      max_rows_per_group=4):
         """Greedy decoding for many QA rows that share one context prefix.
 
         Rows belonging to the same context share the same memory KV cache, so they are
@@ -941,13 +694,21 @@ class MetaLoRA(nn.Module):
                 columns = torch.arange(width, device=device).unsqueeze(0).expand(count, -1)
                 positions = start + (columns - padding[:, None])
                 positions = torch.where(q_mask, positions, torch.full_like(positions, start)).clamp_(min=0)
+                task = self.task_embeddings[TASK_QA].to(dtype=self.dtype).view(1, 1, -1).expand(count, -1, -1)
+                question = torch.cat([task, embedding(q_ids).to(dtype=self.dtype)], dim=1)
+                task_mask = torch.ones((count, 1), dtype=torch.bool, device=device)
+                q_mask = torch.cat([task_mask, q_mask], dim=1)
+                positions = torch.cat(
+                    [torch.full((count, 1), start, dtype=positions.dtype, device=device), positions + 1],
+                    dim=1,
+                )
+                valid = valid + 1
 
                 cache = self._select_cache(
                     prefix.memory_cache,
                     qa_context_indices[row_index].to(device, dtype=torch.long),
                     self.qwen.config,
                 )
-                question = embedding(q_ids).to(dtype=self.dtype)
                 readout = self._readout_embeddings(
                     prefix, question, q_mask,
                     qa_context_indices[row_index].to(device, dtype=torch.long),
@@ -1035,32 +796,25 @@ def load_model(cfg):
         cfg.model.name_or_path, dtype=dtype_from_name(cfg.model.torch_dtype),
         attn_implementation=cfg.model.attn_implementation, local_files_only=True,
     )
-    if cfg.memory.causal_recon_weight > 0 or cfg.memory.distill_weight > 0:
+    if cfg.memory.distill_weight > 0:
         window = int(qwen.config.max_position_embeddings)
         effective_context_tokens = min(
-            cfg.data.max_context_tokens, cfg.data.max_input_context_length,
+            cfg.data.max_context_tokens, cfg.data.max_input_tokens,
         )
         if cfg.memory.memory_length + effective_context_tokens > window:
             raise ValueError(
-                "causal reconstruction/distillation require "
+                "distillation requires "
                 f"memory_length + effective input context length <= backbone window ({window})"
             )
     qwen.config.use_cache=False
-    model=MetaLoRA(
+    model=ContextMemoryModel(
         qwen, rank=cfg.model.lora_rank, alpha=cfg.model.lora_alpha,
         memory_length=cfg.memory.memory_length,
-        decoder_hidden_size=cfg.memory.decoder_hidden_size,
-        decoder_heads=cfg.memory.decoder_heads,
-        decoder_ffn_ratio=cfg.memory.decoder_ffn_ratio,
         target_modules=cfg.model.target_modules, dropout=cfg.model.lora_dropout,
         max_context_tokens=cfg.data.max_context_tokens,
         trainable_dtype=dtype_from_name(cfg.model.trainable_dtype),
-        token_recon=cfg.memory.token_recon_weight > 0,
-        use_peft=cfg.model.use_peft,
-        head_mode=cfg.memory.head_mode,
-        head_init=cfg.memory.head_init,
         context_gradient_checkpointing=cfg.model.context_gradient_checkpointing,
-        ae_lm=cfg.memory.causal_recon_weight > 0 or cfg.memory.distill_weight > 0,
+        distillation=cfg.memory.distill_weight > 0,
         readout_length=cfg.memory.readout_length,
         readout_mode=cfg.memory.readout_mode,
         readout_layers=cfg.memory.readout_layers,
@@ -1071,20 +825,22 @@ def load_model(cfg):
         memory_resampler_heads=cfg.memory.memory_resampler_heads,
         memory_resampler_hidden_size=cfg.memory.memory_resampler_hidden_size,
         memory_resampler_ffn_ratio=cfg.memory.memory_resampler_ffn_ratio,
+        memory_resampler_output_mode=cfg.memory.memory_resampler_output_mode,
         reader_memory_source=cfg.memory.reader_memory_source,
     )
     for name,p in model.named_parameters():
-        p.requires_grad=is_trainable_parameter_name(name)
+        # Preserve module-level freezing (for example the inactive layer-0
+        # projection in ``layerwise`` resampler mode) while enforcing the global
+        # trainable-name policy.
+        p.requires_grad = p.requires_grad and is_trainable_parameter_name(name)
     return tok, model
 
 
 __all__ = [
-    "MetaLoRA", "MetaLoRAOutput",
-    "StaticLoRALinear", "MemoryDecoder", "ContextPrefix", "ContextLMTerms",
-    "VocabularyHead",
+    "ContextMemoryModel", "MetaLoRAOutput",
+    "MetaLoRA", "ContextPrefix",
     "TiedUnembedding",
     "ContextMemoryResampler", "QuestionResampler",
     "build_continuation_mask",
-    "is_trainable_parameter_name", "load_model",
-    "disable_autocast_for_peft_lora",
+    "is_trainable_parameter_name", "load_model", "TASK_RECON", "TASK_QA",
 ]

@@ -87,7 +87,7 @@ base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
 # TRAIN_MAX_SAMPLES=null for a full-corpus run after selecting a winner.
 base.setdefault("data", {}).update(
     max_context_tokens=1024,
-    max_input_context_length=8192,
+    max_input_tokens=40960,
     max_answer_tokens=64,
     train_tasks="mix",
     recon_ratio=0.5,
@@ -112,14 +112,11 @@ base.setdefault("evaluation", {}).update(
     qa_batch_size=4,
     max_new_tokens=32,
 )
-base.setdefault("evaluation", {}).pop("teacher_forced_every", None)
-base.setdefault("logging", {}).update(log_every=25, wandb_mode="offline")
+base.setdefault("logging", {}).update(log_every=25, swanlab_mode="offline")
 
 # These are legacy auxiliary branches.  Keep them off in every v2 arm so the
 # comparison measures the new writer and task mixture rather than a second loss.
 base.setdefault("memory", {}).update(
-    token_recon_weight=0.0,
-    causal_recon_weight=0.0,
     distill_weight=0.0,
     readout_length=8,
     context_layer_indices=[-1],
@@ -157,8 +154,8 @@ for name, overrides in runs.items():
     for section, values in overrides.items():
         config.setdefault(section, {}).update(values)
     config.setdefault("checkpoint", {})["output_dir"] = str(out_root)
-    config.setdefault("logging", {})["wandb_run_name"] = name
-    config["logging"]["wandb_run_id"] = None
+    config.setdefault("logging", {})["swanlab_run_name"] = name
+    config["logging"]["swanlab_run_id"] = None
     config["machine"] = os.environ["MACHINE"]
 
     TrainConfig.from_dict(config).validate()

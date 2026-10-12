@@ -7,7 +7,6 @@ export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
 # Qwen3-1.7B v2 writer ablations.  This script targets the current
 # context-forward + ContextMemoryResampler architecture.  Legacy reader modes,
-# token reconstruction/distillation objectives, and memory-length sweeps are kept
 # fixed and are intentionally not treated as v2 factors.
 BASE_CONFIG=${BASE_CONFIG:-configs/train_baseline.yaml}
 OUTPUT_ROOT=${OUTPUT_ROOT:-outputs/ab_v2_writer_qwen3_1_7b}
@@ -87,7 +86,9 @@ base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
 # a candidate to run one final full-corpus experiment.
 base.setdefault("data", {}).update(
     max_context_tokens=4096,
-    max_input_context_length=8192,
+    max_input_tokens=40960,
+    max_question_tokens=96,
+    max_conversation_tokens=768,
     max_answer_tokens=128,
     train_tasks="mix",
     recon_ratio=0.5,
@@ -112,14 +113,11 @@ base.setdefault("evaluation", {}).update(
     qa_batch_size=8,
     max_new_tokens=32,
 )
-base.setdefault("evaluation", {}).pop("teacher_forced_every", None)
-base.setdefault("logging", {}).update(log_every=25, wandb_mode="offline")
+base.setdefault("logging", {}).update(log_every=25, swanlab_mode="offline")
 
 # Keep the old auxiliary branches off in every v2 arm.  The only varied factors
 # below are the new context writer and the QA/Recon supervision mixture.
 base.setdefault("memory", {}).update(
-    token_recon_weight=0.0,
-    causal_recon_weight=0.0,
     distill_weight=0.0,
     readout_length=8,
     context_layer_indices=[-1],
@@ -149,8 +147,8 @@ for name, overrides in runs.items():
     for section, values in overrides.items():
         config.setdefault(section, {}).update(values)
     config.setdefault("checkpoint", {})["output_dir"] = str(out_root)
-    config.setdefault("logging", {})["wandb_run_name"] = name
-    config["logging"]["wandb_run_id"] = None
+    config.setdefault("logging", {})["swanlab_run_name"] = name
+    config["logging"]["swanlab_run_id"] = None
     config["machine"] = os.environ["MACHINE"]
 
     TrainConfig.from_dict(config).validate()

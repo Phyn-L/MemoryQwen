@@ -63,12 +63,8 @@ base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
 # Keep R=8 even for off: the model explicitly suppresses those positions.
 base.setdefault("memory", {}).update(
     qa_weight=1.0,
-    token_recon_weight=1.0,
-    causal_recon_weight=0.0,
     distill_weight=0.3,
     distill_entropy_weight=False,
-    token_recon_positions=128,
-    causal_recon_positions=128,
     distill_positions=256,
     distill_temperature=1.0,
     distill_topk=0,
@@ -88,8 +84,8 @@ for name, overrides in runs.items():
     memory.update(overrides)
     config.setdefault("checkpoint", {})["output_dir"] = str(out_root)
     logging = config.setdefault("logging", {})
-    logging["wandb_run_name"] = name
-    logging["wandb_run_id"] = None
+    logging["swanlab_run_name"] = name
+    logging["swanlab_run_id"] = None
     config["machine"] = os.environ["MACHINE"]
 
     TrainConfig.from_dict(config).validate()

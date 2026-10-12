@@ -68,12 +68,8 @@ base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
 # T/C use weight 1 as in phases 1/2. D uses 0.3 or the lighter 0.1.
 base.setdefault("memory", {}).update(
     qa_weight=1.0,
-    token_recon_weight=0.0,
-    causal_recon_weight=0.0,
     distill_weight=0.0,
     distill_entropy_weight=False,
-    token_recon_positions=128,
-    causal_recon_positions=128,
     distill_positions=128,
     distill_temperature=1.0,
     distill_topk=0,
@@ -90,8 +86,8 @@ for name, overrides in runs.items():
     memory.update(overrides)
     config.setdefault("checkpoint", {})["output_dir"] = str(out_root / name)
     logging = config.setdefault("logging", {})
-    logging["wandb_run_name"] = f"{out_root.name}_{name}"
-    logging["wandb_run_id"] = None
+    logging["swanlab_run_name"] = f"{out_root.name}_{name}"
+    logging["swanlab_run_id"] = None
     config["machine"] = os.environ["MACHINE"]
 
     TrainConfig.from_dict(config).validate()

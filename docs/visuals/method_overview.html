@@ -199,10 +199,10 @@
 
       <text class="ttl" x="14" y="300">③ 辅助目标（ON 臂） · 都从 layer_memory 出发</text>
       <rect class="bx bx-aux" x="14" y="312" width="150" height="52"/>
-      <text class="lb" x="26" y="333">28 × MemoryDecoder</text>
+      <text class="lb" x="26" y="333">Qwen memory-prefix forward</text>
       <text class="mn" x="26" y="351">256-d bottleneck</text>
       <rect class="bx bx-aux" x="196" y="312" width="176" height="52"/>
-      <text class="lb" x="208" y="333">memory-only 探针</text>
+      <text class="lb" x="208" y="333">causal reconstruction</text>
       <text class="mn" x="208" y="351">query@t−1 · CE → nats/token</text>
       <rect class="bx bx-aux" x="404" y="312" width="196" height="52"/>
       <text class="lb" x="416" y="333">autoencode_with_memory</text>
@@ -228,7 +228,7 @@
       <text class="lb" x="298" y="453">autoregressive：自己生成（头条）</text>
       <text class="mn" x="298" y="471">em / f1 / rouge_l / first_token_em</text>
       <rect class="bx bx-eval" x="558" y="432" width="250" height="52"/>
-      <text class="lb" x="570" y="453">memory-only 探针（诚实指标）</text>
+      <text class="lb" x="570" y="453">causal reconstruction</text>
       <text class="mn" x="570" y="471">reconstruction_loss = nats/token</text>
       <rect class="bx bx-eval" x="830" y="432" width="180" height="52"/>
       <text class="lb" x="842" y="453">GPU 显存实测</text>
@@ -328,7 +328,7 @@
       </tr>
     </tbody>
   </table>
-  <div class="note">诊断用的探针不是开关：<code>reconstruction_loss: context_lm</code> + <code>context_lm_positions</code> 在三份配置里都开着，
+  <div class="note">诊断用的探针不是开关：<code>reconstruction_loss: context_lm</code> + <code>causal_recon_positions</code> 在三份配置里都开着，
   它是唯一「memory 单独面对 context」的诚实指标（nats/token，起点 ≈ ln(vocab) ≈ 11.9）。OFF 臂并不等于「没有辅助目标」，而是「没有 B2/B1」。</div>
 </section>
 
@@ -338,7 +338,7 @@
     <div class="card">
       <h3>损失组合（ON 臂的权重）</h3>
       <pre>total = 1.0 · qa_loss            # 唯一直接对应任务的目标
-      + 1.0 · reconstruction_loss # memory-only 探针（context_lm，nats/token）
+      + 1.0 · reconstruction_loss # causal reconstruction（context_lm，nats/token）
       + 1.0 · ae_loss             # B2：主干当前缀解码器
       + 0.3 · distill_loss        # B1：KL(带 memory ‖ 不带 memory)
 
@@ -381,7 +381,7 @@ OFF 臂：ae_lm_weight=0, distill_weight=0，只剩 qa + 探针</pre>
         <td>自己 greedy 生成 32 token</td>
         <td><b>“完全靠自己，答案对不对”</b></td>
         <td><b>头条数字</b>（唯一能与 ICL baseline 比的）</td></tr>
-      <tr><td><b>memory-only 探针</b><br><span class="muted">val_teacher_forced/reconstruction_loss</span></td>
+      <tr><td><b>causal reconstruction</b><br><span class="muted">val_teacher_forced/reconstruction_loss</span></td>
         <td>memory 槽（无 context）</td>
         <td>“槽里到底装进去了多少原文”</td>
         <td>nats/token，起点 ≈11.9；只比趋势与两臂同点</td></tr>
@@ -496,7 +496,7 @@ DRYRUN=1 NUM_PROCESSES=8 bash scripts/run_ab.sh   # 只看命令</pre>
         <tbody>
           <tr><td class="mono">src/model.py :: encode_context_prefix</td><td>编码 + per-layer memory + KV cache</td></tr>
           <tr><td class="mono">src/model.py :: forward_qa_with_prefix</td><td>QA 分支（复用 memory KV）</td></tr>
-          <tr><td class="mono">src/model.py :: context_lm_terms</td><td>memory-only 探针</td></tr>
+          <tr><td class="mono">src/model.py :: autoencode_with_memory</td><td>causal reconstruction</td></tr>
           <tr><td class="mono">src/model.py :: autoencode_with_memory</td><td>B2 前缀自编码</td></tr>
           <tr><td class="mono">src/resampler.py</td><td>C3 问题期 readout</td></tr>
           <tr><td class="mono">src/losses.py</td><td>四个损失 + combine_losses</td></tr>

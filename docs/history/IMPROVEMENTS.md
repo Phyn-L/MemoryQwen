@@ -169,7 +169,7 @@ batch 内最长的答案 —— 这些样本的最后一个答案 token 被 EOS 
 ### 3.3 D3：`0.0044` 是过期代码路径的历史数字；TF 指标本身误导
 
 - `co5t73u7`（`0.0044` 那次）跑在 `7e2099e`，**早于 prefix-KV 重构**：旧的
-  `MetaLoRA.forward` 是 `[context, memory, question, answer]` 单次联合前向，
+  `ContextMemoryModel.forward` 是 `[context, memory, question, answer]` 单次联合前向，
   旧的 `generate_answer` 每一步都重算整个 context 编码且没有 KV cache。
   **当前代码 + 当前 checkpoint 重测 = official F1 0.3784。**
 - 我另外验证了 `evaluation.max_new_tokens`（32/64/128）对结果**完全没有影响**
@@ -205,7 +205,7 @@ batch 内最长的答案 —— 这些样本的最后一个答案 token 被 EOS 
 
 | # | 位置 | 问题 | 影响 |
 | --- | --- | --- | --- |
-| E1 | ~~`src/model.py:176`~~ **已修** | `self.to(dtype=qwen_dtype)` 原来把所有可训练参数都变成 bf16；现在新增 `model.trainable_dtype`（默认 `float32`）+ `MetaLoRA.set_trainable_dtype()`，并在 memory token 用作输入、LoRA 分支、decoder 入口/出口三处显式转换 | bf16 相对精度 ~2^-8，lr=1e-4 的 AdamW 更新会被量化：小模型实测一步后只有 **43/59** 个可训练张量发生变化，fp32 下是 **59/59** |
+| E1 | ~~`src/model.py:176`~~ **已修** | `self.to(dtype=qwen_dtype)` 原来把所有可训练参数都变成 bf16；现在新增 `model.trainable_dtype`（默认 `float32`）+ `ContextMemoryModel.set_trainable_dtype()`，并在 memory token 用作输入、LoRA 分支、decoder 入口/出口三处显式转换 | bf16 相对精度 ~2^-8，lr=1e-4 的 AdamW 更新会被量化：小模型实测一步后只有 **43/59** 个可训练张量发生变化，fp32 下是 **59/59** |
 | E2 | `utils/config.py:174` | `validate()` 硬性要求 `max_context_tokens <= 2048` | 永远用不到 ICL baseline 的 8192 窗口 |
 | E3 | ~~`scripts/train.py:81`~~ **已修** | 原来 `Accelerator(gradient_accumulation_steps=1)` 与 `cfg.training.grad_accumulation` 手动累加逻辑并存；现在 `grad_accumulation` 已从 config 与训练循环中移除，只保留 `Accelerator(gradient_accumulation_steps=1)` | 不再存在两套累加语义 |
 | E4 | `src/model.py:68-149` | `build_block_causal_mask` / `build_continuation_mask` 是 O(B·T²) 的 Python 双重循环，并且物化 `[B,1,T,T]` 的 dense additive mask | 每步都重建；T=2048 时单个 mask 就是 B×8MB；是 OOM 的主要来源之一 |
@@ -271,7 +271,7 @@ squad 只占 7.4%（`outputs/Qwen1.7B/dataset_cache/train-*/hf_dataset`）。
 
 13. **可训练参数保持 fp32**（backbone 仍 bf16）—— **已实现**，见 `model.trainable_dtype`。
     三个转换点：`memory_tokens.to(dtype=self.dtype)`（可微）、`StaticLoRALinear` 在 adapter
-    dtype 下算 delta 再转回、`MemoryDecoder` 入口转 fp32 出口返回 fp32，loss 端统一 upcast 到
+    dtype 下算 delta 再转回、`layer0 memory embedding path` 入口转 fp32 出口返回 fp32，loss 端统一 upcast 到
     fp32 归约。autocast 由 `src/dtypes.py:no_autocast` 在 adapter/decoder 内部关闭。参数规模
     约 8×10⁷，显存代价约 +0.8GB，需配合关掉重建 decoder / gradient checkpointing。
     旧的 bf16 checkpoint 仍可直接加载（`load_state_dict` 会转换）。
@@ -402,7 +402,7 @@ squad 只占 7.4%（`outputs/Qwen1.7B/dataset_cache/train-*/hf_dataset`）。
 
 ## 10. 修复清单补充
 
-- `model.trainable_dtype`（默认 `float32`）+ `MetaLoRA.set_trainable_dtype()` + `src/dtypes.py:no_autocast`。
+- `model.trainable_dtype`（默认 `float32`）+ `ContextMemoryModel.set_trainable_dtype()` + `src/dtypes.py:no_autocast`。
 - `qa_loss` / `reconstruction_loss` 统一在 float32 下归约。
 - `is_trainable_parameter_name()` 作为"哪些参数可训练"的唯一来源，`set_trainable_dtype` 与
   `load_model` 共用，避免新增模块时漏改一处。

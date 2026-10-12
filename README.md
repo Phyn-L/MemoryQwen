@@ -1,6 +1,6 @@
-# Qwen MetaLoRA Context Memory
+# Qwen ContextMemoryModel Context Memory
 
-使用同一 Qwen backbone 将一次 context forward 编码为固定长度 memory，再根据 question 生成答案。writer 收集配置层的 hidden states，用可学习的 softmax 层混合和 learned-query cross-attention 得到 `M` 个 memory embedding；短的 memory-only Qwen forward 将它们变成可复用的 per-layer KV。训练更新 LoRA、writer 和所启用的辅助模块；默认使用内置 StaticLoRA，可配置 PEFT。
+`ContextMemoryModel` 使用同一 Qwen backbone 将一次 context forward 编码为固定长度 memory，再根据 question 生成答案。writer 收集配置层的 hidden states，用可学习的 softmax 层混合和 learned-query cross-attention 得到 `M` 个 memory embedding；短的 Qwen memory-prefix forward 将它们变成可复用的 per-layer KV。LoRA 使用项目内置的手动 `MetaLoRA` 层，用于让 backbone 适应 context 编码任务，不依赖 PEFT。
 
 ## 三个运行命令
 
@@ -14,15 +14,26 @@ python -m utils.launcher test --machine 4090 --ckpt outputs/<run>/last.pt --data
 python -m utils.launcher icl --machine h200 --model Qwen3-8B --datasets hotpotqa --config configs/icl_zeroshot.yaml --bs 4
 ```
 
-当前 Qwen3-1.7B snapshot 的 backbone window 是 40960；baseline 的 memory 长度为 64，数据加载默认只保留不超过 8192 tokenizer tokens 的输入 context（`data.max_input_context_length`），再由 `max_context_tokens` 控制实际 batch 截断上限。writer 的 context 计算仍是一次完整的 causal forward，时间和显存随 context 长度增长；固定 memory 是有损压缩，冒烟测试只验证形状、梯度和窗口边界，不代表问答质量已经得到验证。
+当前 Qwen3-1.7B snapshot 的 backbone window 是 40960；baseline 的 memory 长度为 64，`data.max_input_tokens` 默认与 backbone window 一致，`max_context_tokens` 单独控制训练 batch 的 context 上限。writer 的 context 计算仍是一次完整的 causal forward，时间和显存随 context 长度增长；固定 memory 是有损压缩，冒烟测试只验证形状、梯度和窗口边界，不代表问答质量已经得到验证。
 
-训练数据可以按比例混合 QA 与 Recon。每个 context 都能构造一条 QA 监督和一条生成完整 context 的 Recon 监督，任务通过自然语言 prompt 区分，不新增 special token：
+resampler 默认使用 `memory_resampler_output_mode: layer0`：它输出 `[B, M, H]` 的第 0 层 memory embedding，随后由 Qwen 自己的逐层前向产生所有 memory hidden states 和 KV cache。需要实验 layer-wise residual conditioning 时，可切换为 `layerwise`，此时输出 `[B, L, M, H]`，并将第 `l` 层条件以门控残差加入第 `l` 个 Qwen block 的输入。
+
+训练数据可以按比例混合 QA 与 Recon。每个 context 都能构造一条 QA 监督和一条直接生成完整 context 的 Recon 监督：
 
 ```yaml
 data:
   train_tasks: mix
   recon_ratio: 0.5
 ```
+
+reader 在两种任务前都插入一个独立的连续 task embedding：
+
+```text
+Recon: [task_embeddings[0], memory] → frozen Qwen → context
+QA:    [task_embeddings[1], memory, question] → frozen Qwen → answer
+```
+
+两个向量是 `ContextMemoryModel.task_embeddings` 中的可训练参数，会随 checkpoint 保存；它们不是 tokenizer special token，也不会改变 Qwen 词表。训练 batch 的 `task_ids` 使用 `0=Recon`、`1=QA`。context 编码阶段启用 MetaLoRA，reader 的 Recon/QA forward 和生成阶段都关闭 MetaLoRA。
 
 如果要先训练 Recon 再训练 QA，第二阶段使用 `--init-from` 加载第一阶段模型参数；该选项会重新开始 optimizer、scheduler、step 和随机状态。
 

@@ -98,7 +98,7 @@ MemoryQwen/
 | `scripts/archive/test_icl_baseline.sh` | 原位 | 保持内容与接口 |
 | `scripts/train.py` | 原位 | 保持内容与接口 |
 | `scripts/train.sh` | 原位 | 保持内容与接口 |
-| `src/MemoryDecoder.py` | 原位 | 本轮不改大小写或导入路径 |
+| `src/layer0 memory embedding path.py` | 原位 | 本轮不改大小写或导入路径 |
 | `src/__init__.py` | 原位 | 保持内容与接口 |
 | `src/data.py` | 原位 | 保持内容与接口 |
 | `src/cache_utils.py` | 原位 | 保持 offset / sortish cache 工具 |

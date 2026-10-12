@@ -1,7 +1,7 @@
 """Reconstruction must not mutate a prefix reused by validation QA chunks."""
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
-from src.model import MetaLoRA
+from src.model import ContextMemoryModel
 
 
 def test_reconstruction_preserves_prefix():
@@ -11,9 +11,8 @@ def test_reconstruction_preserves_prefix():
     cfg = Qwen3Config(vocab_size=128, hidden_size=32, intermediate_size=64,
                       num_hidden_layers=2, num_attention_heads=4,
                       num_key_value_heads=2, head_dim=8)
-    model = MetaLoRA(Qwen3ForCausalLM(cfg).to(dtype=dtype), memory_length=4,
-                     rank=2, decoder_hidden_size=8, decoder_heads=2,
-                     max_context_tokens=12, ae_lm=True).to(device)
+    model = ContextMemoryModel(Qwen3ForCausalLM(cfg).to(dtype=dtype), memory_length=4,
+                     rank=2,                       max_context_tokens=12).to(device)
     embed = model.qwen.get_input_embeddings()
     context = torch.randint(2,128,(2,12),device=device)
     question = torch.randint(2,128,(4,5),device=device)
@@ -26,7 +25,7 @@ def test_reconstruction_preserves_prefix():
             saved = [(layer.keys.clone(), layer.values.clone()) for layer in prefix.memory_cache.layers]
             baseline = model.forward_qa_with_prefix(prefix, indices, embed(question), question.bool(),
                                                     embed(answer), answer.bool(), answer)
-            recon = model.autoencode_with_memory(prefix, embed(context), context.bool())
+            recon = model._distillation_student_hidden(prefix, embed(context), context.bool())
             assert prefix.memory_cache.get_seq_length() == 4
             for layer, (keys, values) in zip(prefix.memory_cache.layers, saved):
                 torch.testing.assert_close(layer.keys, keys)

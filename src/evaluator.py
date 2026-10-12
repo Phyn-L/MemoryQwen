@@ -156,7 +156,7 @@ class Evaluator:
         was_training = model.training
         model.eval()
         qa_sum = 0.0
-        auxiliary_sums = dict.fromkeys(("token_recon_loss", "causal_recon_loss", "distill_loss"), 0.0)
+        auxiliary_sums = dict.fromkeys(("distill_loss",), 0.0)
         totals = {key: 0.0 for key in METRIC_KEYS}
         samples = 0
         first_token_hits = 0
@@ -402,7 +402,7 @@ class Evaluator:
                 {
                     "ppl": teacher["ppl"],
                     "qa_loss": teacher["qa_loss"],
-                    **{key: teacher[key] for key in ("token_recon_loss", "causal_recon_loss", "distill_loss")},
+                    **{key: teacher[key] for key in ("distill_loss",)},
                 }
             )
         return result

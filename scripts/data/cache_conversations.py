@@ -34,7 +34,10 @@ def main() -> None:
         help="Which split to preprocess; train also builds sortish lengths.",
     )
     parser.add_argument("--max-context-tokens", type=int)
-    parser.add_argument("--max-input-context-length", type=int)
+    parser.add_argument("--max-input-tokens", type=int)
+    parser.add_argument("--max-conversation-tokens", type=int)
+    parser.add_argument("--max-question-tokens", type=int)
+    parser.add_argument("--max-answer-tokens", type=int)
     parser.add_argument("--tokenizer-filter-batch-size", type=int)
     parser.add_argument("--train-max-samples", type=int)
     parser.add_argument("--validation-max-samples", type=int)
@@ -43,8 +46,14 @@ def main() -> None:
     cfg = TrainConfig.from_file(args.config, machine=args.machine)
     if args.max_context_tokens is not None:
         cfg.data.max_context_tokens = args.max_context_tokens
-    if args.max_input_context_length is not None:
-        cfg.data.max_input_context_length = args.max_input_context_length
+    if args.max_input_tokens is not None:
+        cfg.data.max_input_tokens = args.max_input_tokens
+    if args.max_conversation_tokens is not None:
+        cfg.data.max_conversation_tokens = args.max_conversation_tokens
+    if args.max_question_tokens is not None:
+        cfg.data.max_question_tokens = args.max_question_tokens
+    if args.max_answer_tokens is not None:
+        cfg.data.max_answer_tokens = args.max_answer_tokens
     if args.tokenizer_filter_batch_size is not None:
         cfg.data.tokenizer_filter_batch_size = args.tokenizer_filter_batch_size
     if args.train_max_samples is not None:

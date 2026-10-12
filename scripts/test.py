@@ -70,8 +70,7 @@ def main():
     )
     parser.add_argument(
         "--allow-missing-trainable", action="store_true",
-        help="Load a checkpoint that does not cover every trainable tensor (for example an "
-             "older run without the token_recon head) instead of failing.",
+        help="Load a checkpoint that does not cover every trainable tensor instead of failing.",
     )
     parser.add_argument(
         "--teacher-forced",
@@ -117,8 +116,8 @@ def main():
     cfg.validate()
     checkpoint_path = Path(args.checkpoint).resolve()
     cfg.checkpoint.output_dir = str(checkpoint_path.parent)
-    if not cfg.logging.wandb_run_name:
-        cfg.logging.wandb_run_name = checkpoint_path.parent.name
+    if not cfg.logging.swanlab_run_name:
+        cfg.logging.swanlab_run_name = checkpoint_path.parent.name
     # Multi-GPU evaluation: `torchrun` (utils.launcher starts one worker per GPU)
     # gives every rank one card, and only the *loader* is sharded here. The evaluator
     # all-reduces its own accumulators (src/evaluator.py::_distributed_sum), so sharding the
@@ -151,6 +150,9 @@ def main():
     loader = DataLoader(
         ds, batch_size=cfg.training.batch_size, shuffle=False,
         collate_fn=make_collate(cfg, tokenizer, sample_qa=False),
+        num_workers=cfg.data.num_workers,
+        pin_memory=cfg.data.pin_memory,
+        persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
     )
     if accelerator is not None:
         loader = accelerator.prepare(loader)

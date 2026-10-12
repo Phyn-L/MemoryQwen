@@ -118,11 +118,11 @@ EM@best 与 RL@best 均与 AR F1 最优点同一步；TF best 独立取最大。
 |---|---|---:|---|
 | 05：T+C+D | 06：QA-only | +0.3863 | 完整无 embedding 组合只有小幅优势 |
 | 09：D(0.3)，entropy=true | 06 | +0.2081 | 单独蒸馏只有小幅优势 |
-| 07：T | 06 | −0.8899 | 单独 token reconstruction 未显示收益 |
+| 07：T | 06 | −0.8899 | 单独 historical token reconstruction ablation 未显示收益 |
 | 08：C | 06 | −1.4307 | 单独 causal reconstruction 未显示收益 |
 | 04：E | 06 | −2.6239 | QA 背景中 embedding reconstruction 较差；跨执行批次，需核实代码/数据一致性 |
 
-上述结果不支持“token reconstruction 总是有用”。它是否有效取决于其他损失、权重和蒸馏加权方式。04 的下降也不能直接外推到所有 E 背景；判断完整组合中 E 的边际贡献需要 matched 00 vs 05，本次 15-run 范围不含 00。
+上述结果不支持“historical token reconstruction ablation 总是有用”。它是否有效取决于其他损失、权重和蒸馏加权方式。04 的下降也不能直接外推到所有 E 背景；判断完整组合中 E 的边际贡献需要 matched 00 vs 05，本次 15-run 范围不含 00。
 
 ### 2. Phase 3：entropy 的收益取决于蒸馏权重与辅助项
 

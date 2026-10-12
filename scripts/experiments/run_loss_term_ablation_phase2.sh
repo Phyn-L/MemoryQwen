@@ -63,29 +63,19 @@ base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
 runs = {
     # Full auxiliary combination, with embedding reconstruction removed.
     "05_full_recon": {
-        "token_recon_weight": 1.0,
-        "causal_recon_weight": 1.0,
         "distill_weight": 0.3,
     },
     # True QA-only baseline: all auxiliary objectives are disabled.
     "06_qa_only_true": {
-        "token_recon_weight": 0.0,
-        "causal_recon_weight": 0.0,
         "distill_weight": 0.0,
     },
     "07_token_only": {
-        "token_recon_weight": 1.0,
-        "causal_recon_weight": 0.0,
         "distill_weight": 0.0,
     },
     "08_causal_only": {
-        "token_recon_weight": 0.0,
-        "causal_recon_weight": 1.0,
         "distill_weight": 0.0,
     },
     "09_distill_only": {
-        "token_recon_weight": 0.0,
-        "causal_recon_weight": 0.0,
         "distill_weight": 0.3,
     },
 }
@@ -96,8 +86,8 @@ for name, overrides in runs.items():
     memory.update(overrides)
     config.setdefault("checkpoint", {})["output_dir"] = str(out_root / name)
     logging = config.setdefault("logging", {})
-    logging["wandb_run_name"] = f"{out_root.name}_{name}"
-    logging["wandb_run_id"] = None
+    logging["swanlab_run_name"] = f"{out_root.name}_{name}"
+    logging["swanlab_run_id"] = None
     config["machine"] = os.environ["MACHINE"]
 
     TrainConfig.from_dict(config).validate()

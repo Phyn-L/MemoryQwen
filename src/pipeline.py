@@ -61,12 +61,15 @@ def make_context_dataset(cfg, split: str, tokenizer, limit=None, allow_empty: bo
         path,
         tokenizer=tokenizer,
         max_context_tokens=cfg.data.max_context_tokens,
-        max_input_context_length=cfg.data.max_input_context_length,
+        max_input_tokens=cfg.data.max_input_tokens,
         max_samples=limit,
         filter_long_context=cfg.data.filter_long_context,
         filter_no_conversation=cfg.data.filter_no_qa,
         cache_dir=cache_dir,
         tokenizer_filter_batch_size=cfg.data.tokenizer_filter_batch_size,
+        max_question_tokens=cfg.data.max_question_tokens,
+        max_conversation_tokens=cfg.data.max_conversation_tokens,
+        max_answer_tokens=cfg.data.max_answer_tokens,
         allow_empty=allow_empty,
     )
 
@@ -77,7 +80,7 @@ def make_collate(cfg, tokenizer, sample_qa: bool, training=False):
         return collate_fn(
             rows, tokenizer,
             max_context_tokens=cfg.data.max_context_tokens,
-            max_conversation_tokens=cfg.data.max_conversation_tokens,
+            max_question_tokens=cfg.data.max_question_tokens,
             max_answer_tokens=cfg.data.max_answer_tokens,
             append_eos=cfg.data.append_eos,
             chat_template_enable_thinking=cfg.data.chat_template_enable_thinking,
@@ -86,6 +89,5 @@ def make_collate(cfg, tokenizer, sample_qa: bool, training=False):
             question_padding_side=cfg.data.question_padding_side,
             training=training,
             train_tasks=cfg.data.train_tasks if training else "qa",
-            recon_prompt=cfg.data.recon_prompt,
         )
     return collate

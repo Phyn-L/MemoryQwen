@@ -40,7 +40,7 @@ def test_benchmark_reports_separate_parse_and_tokenizer_costs(tmp_path: Path):
         source,
         tokenizer=_Tokenizer(),
         max_context_tokens=4,
-        max_input_context_length=8,
+        max_input_tokens=8,
         show_progress=False,
     )
 
@@ -64,7 +64,7 @@ def test_benchmark_max_rows_is_exact(tmp_path: Path):
         source,
         tokenizer=_Tokenizer(),
         max_context_tokens=8,
-        max_input_context_length=8,
+        max_input_tokens=8,
         max_rows=2,
         show_progress=False,
     )
