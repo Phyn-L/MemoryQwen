@@ -80,7 +80,7 @@ data:
       hotpotqa(distractor): 256
       race: 256
 evaluation:
-  autoregressive_every: 1-00  # 自回归验证的训练步间隔
+  autoregressive_every: 1000  # 自回归验证的训练步间隔
   evaluation_max_samples: 1280  # 自回归评估的全局 validation QA 条数
   max_new_tokens: 64  # 自回归验证生成 token 上限
   qa_batch_size: 12  # QA 验证批大小
