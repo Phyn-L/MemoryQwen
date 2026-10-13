@@ -38,7 +38,7 @@ data:
   # DataLoader 设置
   loader:
     # 数据加载 worker 数量
-    num_workers: 8
+    num_workers: 2
     # 是否将 batch 放入 pinned memory
     pin_memory: true
     # worker 进程是否跨 epoch 保留

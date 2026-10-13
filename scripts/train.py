@@ -400,6 +400,7 @@ def main() -> None:
         total=total_steps,
         desc="Training",
         unit="step",
+        dynamic_ncols=True,
         disable=not (accelerator is None or accelerator.is_main_process),
         initial=step,
     )
@@ -495,11 +496,7 @@ def main() -> None:
             progress.update(1)
             progress.set_postfix(
                 loss=f"{float(total.detach()):.4f}",
-                qa=f"{float(terms['qa_loss'].detach()):.4f}",
-                recon=f"{float(terms['recon_loss'].detach()):.4f}",
-                distill=f"{float(terms['distill_loss'].detach()):.4f}",
-                task_recon_grad=f"{float(task_embedding_grad_norm[0]):.3e}",
-                task_qa_grad=f"{float(task_embedding_grad_norm[1]):.3e}",
+                ppl=f"{float(torch.exp(terms['qa_loss'].detach().float().clamp(max=20))):.4f}",
             )
 
             if run and step % cfg.logging.log_every == 0:
