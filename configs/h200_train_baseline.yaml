@@ -87,7 +87,7 @@ evaluation:
 logging:
   swanlab_run_name: null # Optional; defaults to model name + timestamp.
   log_every: 100  # 训练日志记录间隔（步）
-  swanlab_mode: online  # SwanLab 运行模式
+  swanlab_mode: offline  # SwanLab 运行模式
   swanlab_project: MemoryQwen  # SwanLab 项目名称
 memory:
   # Fixed-length context writer
