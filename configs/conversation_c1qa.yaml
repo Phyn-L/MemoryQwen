@@ -1,15 +1,10 @@
-# Conversation-format C1QA input.
+# Conversation 格式数据配置；未列出的字段继承训练基线。
+_base_: train_baseline.yaml
 data:
-  root: ${DATA_ROOT:-/data/lz/contexts}
-  conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_c1qa.jsonl
-  train_conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_c1qa.jsonl
-  validation_conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_c1qa.jsonl
-  test_conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_c1qa.jsonl
-  train_tasks: qa
-  max_context_tokens: 2048
-  max_question_tokens: 96
-  max_answer_tokens: 64
-  max_conversation_tokens: 768
-  max_input_tokens: 40960
-  tokenizer_filter_batch_size: 2048
-  validation_max_samples: 4096
+  files:
+    root: ${DATA_ROOT:-/data/lz/contexts}  # Conversation 数据根目录
+    conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_c1qa.jsonl  # 会话 JSONL 文件
+  limits:
+    max_context_tokens: 2048  # 覆盖 context token 上限
+  task:
+    train_tasks: qa  # 训练任务类型

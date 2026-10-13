@@ -117,7 +117,6 @@ def test_summary_uses_dataset_order_and_percentage_with_two_decimals(tmp_path):
                 json.dumps(
                     {
                         "autoregressive": dict(zip(("em", "f1", "rouge_l", "accuracy"), metrics)),
-                        "teacher_forced": None,
                     }
                 )
             )

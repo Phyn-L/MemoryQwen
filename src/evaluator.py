@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.distributed as dist
 from tqdm.auto import tqdm
 
 from utils.ddp import is_main_process
 
-from .losses import memory_objectives, objective_total, qa_loss
 from .metrics import METRIC_KEYS, answer_line, best_reference_metrics, normalize_answer
 from .icl_baseline import parse_race_prediction
+from .model import TASK_QA, TASK_RECON
 
 
 def _batch_value(batch, new_key, old_key):
@@ -119,161 +117,17 @@ class Evaluator:
                 return True
         return False
 
-    def _batch(self, model, prefix, batch, device, start=0, end=None):
-        end = end or _batch_value(batch, "input_ids", "question_ids").size(0)
-        ids = {
-            key: value.to(device)
-            for key, value in batch.items()
-            if key not in {"records"}
-        }
-        if "input_ids" not in ids and "question_ids" in ids:
-            ids["input_ids"], ids["input_mask"] = ids["question_ids"], ids["question_mask"]
-        if "target_ids" not in ids and "answer_ids" in ids:
-            ids["target_ids"], ids["target_mask"] = ids["answer_ids"], ids["answer_mask"]
-        qa_indices = ids["qa_context_indices"][start:end]
-        embed = model.qwen.get_input_embeddings()
-        output = model.forward_qa_with_prefix(
-            prefix,
-            qa_indices,
-            embed(ids["input_ids"][start:end]),
-            ids["input_mask"][start:end],
-            embed(ids["target_ids"][start:end]),
-            ids["target_mask"][start:end],
-            ids["labels"][start:end],
-        )
-        qa = qa_loss(output.logits, output.labels)
-        return output, qa, ids, qa_indices
-
-    def _chunks(self, batch):
-        size = self.cfg.evaluation.qa_batch_size
-        return range(0, _batch_value(batch, "input_ids", "question_ids").size(0), size)
-
-    def auxiliary_loss(self, model, prefix, ids):
-        return memory_objectives(model, prefix, ids["context_ids"], ids["context_mask"], self.cfg.memory)
-
     @torch.no_grad()
-    def teacher_forced(self, model, loader, device):
-        was_training = model.training
-        model.eval()
-        qa_sum = 0.0
-        auxiliary_sums = dict.fromkeys(("distill_loss",), 0.0)
-        totals = {key: 0.0 for key in METRIC_KEYS}
-        samples = 0
-        first_token_hits = 0
-        qa_weight = context_weight = 0
-        enabled = is_main_process()
-        ranks = _distributed_world_size()
-        desc = "Validation (teacher-forced)"
-        if ranks > 1:
-            # Only the main rank draws a bar (four interleaved bars in one log are unreadable),
-            # but the label has to say whose shard the ETA belongs to.
-            desc += f" [rank {_distributed_rank()}/{ranks}]"
-        progress = tqdm(
-            loader,
-            total=len(loader),
-            desc=desc,
-            unit="batch",
-            disable=not enabled,
-            leave=False,
-        )
-        for batch in progress:
-            ids = {
-                key: value.to(device)
-                for key, value in batch.items()
-                if key != "records"
-            }
-            if "input_ids" not in ids and "question_ids" in ids:
-                ids["input_ids"], ids["input_mask"] = ids["question_ids"], ids["question_mask"]
-            if "target_ids" not in ids and "answer_ids" in ids:
-                ids["target_ids"], ids["target_mask"] = ids["answer_ids"], ids["answer_mask"]
-            embed = model.qwen.get_input_embeddings()
-            prefix = model.encode_context_prefix(
-                embed(ids["context_ids"]), ids["context_mask"]
-            )
-            auxiliary = self.auxiliary_loss(model, prefix, ids)
-            contexts = ids["context_ids"].size(0)
-            for key, value in auxiliary.items():
-                auxiliary_sums[key] += float(value) * contexts
-            context_weight += contexts
-            for start in self._chunks(batch):
-                end = min(
-                    start + self.cfg.evaluation.qa_batch_size,
-                    _batch_value(batch, "input_ids", "question_ids").size(0),
-                )
-                output, qa, ids, _ = self._batch(
-                    model, prefix, batch, device, start, end
-                )
-                count = end - start
-                qa_sum += float(qa) * count
-                qa_weight += count
-                predictions = output.logits.argmax(-1)[:, :-1]
-                target = output.labels[:, 1:]
-                for i, record in enumerate(batch["records"][start:end]):
-                    active = target[i].ne(-100)
-                    if not bool(active.any()):
-                        samples += 1
-                        continue
-                    # Retrieval diagnostic: the first answer token is the only
-                    # answer position that must be produced from the memory alone
-                    # (every later token can copy the teacher-forced prefix it was fed).
-                    first_token_hits += int(
-                        self._first_token_hit(
-                            int(predictions[i][active][0].item()), record
-                        )
-                    )
-                    text = self.tokenizer.decode(
-                        predictions[i][active].tolist(), skip_special_tokens=True
-                    )
-                    # Same answer span the ICL baseline scores: its first line. See
-                    # src.metrics.answer_line for why this is not cosmetic.
-                    metrics = best_reference_metrics(answer_line(text), record.references)
-                    for key, value in metrics.items():
-                        totals[key] += value
-                    samples += 1
-            progress.set_postfix({"contexts": context_weight, "qa_rows": samples}, refresh=False)
-        progress.close()
-        model.train(was_training)
-        qa_sum, first_token_hits, qa_weight, context_weight, samples = (
-            _distributed_sum(
-                [qa_sum, first_token_hits, qa_weight, context_weight, samples],
-                device,
-            )
-        )
-        metric_totals = dict(
-            zip(METRIC_KEYS, _distributed_sum([totals[key] for key in METRIC_KEYS], device))
-        )
-        qa_value = qa_sum / max(1, qa_weight)
-        auxiliary_values = dict(zip(auxiliary_sums, (value / max(1, context_weight) for value in _distributed_sum(list(auxiliary_sums.values()), device))))
-        total_value = objective_total(qa_value, auxiliary_values, self.cfg.memory)
-        return {
-            "qa_loss": qa_value,
-            "ppl": math.exp(min(qa_value, 20)),
-            **auxiliary_values,
-            "loss": total_value,
-            **{key: value / max(1, samples) for key, value in metric_totals.items()},
-            # Not an answer-quality score: teacher forcing feeds the gold answer
-            # prefix, so every metric here mostly measures lexical continuation.
-            # Treat first_token_em as the retrieval signal and prefer the
-            # autoregressive numbers as the headline result.
-            "first_token_em": first_token_hits / max(1, samples),
-        }
-
-    @torch.no_grad()
-    def autoregressive(self, model, loader, device, include_teacher_metrics=True, max_qa=None,
+    def autoregressive(self, model, loader, device, max_qa=None, task_id=TASK_QA,
                        row_loader=None):
         """Headline evaluation: every answer token is produced by the model itself.
 
-        Unlike :meth:`teacher_forced` this never feeds the gold answer back, so these are
-        the numbers to quote. The metrics use the single official SQuAD normalizer from
-        ``src.metrics``, which is also what ``scripts/evaluation/test_icl_baseline.py`` scores with, so
-        the two numbers are directly comparable. ``include_teacher_metrics`` additionally
-        reports the teacher-forced ppl/qa_loss/recon_loss at the cost of a second
-        pass.
+        Metrics are computed from generated answers and gold references.
 
         ``max_qa`` caps how many QA rows the *whole* evaluation decodes: the budget is split
         into contiguous windows of the global row order (see :func:`row_window`), so the
         scored rows and the noise level stay the same when the rank count changes. Decoding
-        is orders of magnitude more expensive than one teacher-forced forward, and a rank
+        is expensive, and a rank
         that stays inside the evaluation longer than the NCCL watchdog timeout (10 minutes)
         makes every other rank abort, which is why the budget exists at all.
 
@@ -285,6 +139,8 @@ class Evaluator:
         was_training = model.training
         model.eval()
         sums = {key: 0.0 for key in METRIC_KEYS}
+        dataset_sums = {}
+        dataset_counts = {}
         race_correct = 0
         race_count = 0
         samples = 0
@@ -295,7 +151,7 @@ class Evaluator:
             window, row_source = (0, None), loader
         elif row_loader is None and world > 1:
             print(
-                f"[evaluator] WARNING: evaluation.autoregressive_max_qa={max_qa} is a global "
+                f"[evaluator] WARNING: evaluation.evaluation_max_samples={max_qa} is a global "
                 f"row budget but no unsharded row loader was supplied; falling back to "
                 f"{max_qa} rows per rank ({max_qa * world} rows total), which depends on the "
                 "rank count.",
@@ -306,7 +162,8 @@ class Evaluator:
             window = row_window(max_qa, rank, world)
             row_source = loader if row_loader is None else row_loader
         cursor = 0
-        desc = "Validation (autoregressive)"
+        task_name = "qa" if task_id == TASK_QA else "recon"
+        desc = f"Validation (autoregressive, {task_name} task)"
         if world > 1:
             desc += f" [rank {rank}/{world}]"
         progress = tqdm(
@@ -359,6 +216,7 @@ class Evaluator:
                 self.cfg.evaluation.max_new_tokens,
                 group_by_context=True,
                 max_rows_per_group=max(1, self.cfg.evaluation.qa_batch_size),
+                task_id=task_id,
             )
             for i, record in enumerate(records):
                 row = generated[i].tolist()
@@ -369,6 +227,8 @@ class Evaluator:
                 metrics = best_reference_metrics(prediction, record.references)
                 for key, value in metrics.items():
                     sums[key] += value
+                    dataset_sums.setdefault(record.dataset, dict.fromkeys(METRIC_KEYS, 0.0))[key] += value
+                dataset_counts[record.dataset] = dataset_counts.get(record.dataset, 0) + 1
                 if record.dataset == "race":
                     _, predicted_letter = parse_race_prediction(prediction)
                     race_correct += int(predicted_letter == record.answer_letter)
@@ -384,25 +244,39 @@ class Evaluator:
             zip(METRIC_KEYS, _distributed_sum([sums[key] for key in METRIC_KEYS], device))
         )
         result = {key: value / max(1, samples) for key, value in sums.items()}
+        dataset_names = sorted(dataset_sums)
+        if dist.is_available() and dist.is_initialized():
+            gathered = [None] * dist.get_world_size()
+            dist.all_gather_object(gathered, dataset_names)
+            dataset_names = sorted({name for names in gathered for name in names})
+        flat = []
+        for name in dataset_names:
+            flat.extend(dataset_sums.get(name, {}).get(key, 0.0) for key in METRIC_KEYS)
+            flat.append(dataset_counts.get(name, 0))
+        if flat:
+            reduced = _distributed_sum(flat, device)
+            offset = 0
+            for name in dataset_names:
+                count = max(1.0, reduced[offset + len(METRIC_KEYS)])
+                result[f"dataset/{name}/count"] = count
+                for index, key in enumerate(METRIC_KEYS):
+                    result[f"dataset/{name}/{key}"] = reduced[offset + index] / count
+                offset += len(METRIC_KEYS) + 1
         if race_count:
             result["accuracy"] = race_correct / race_count
-        # Same retrieval diagnostic as in teacher_forced, but measured on tokens the
-        # model actually produced.  This is the number to compare against
-        # teacher-forced first_token_em; a large gap between them means the model
-        # never learned to emit the answer from memory.
         result["first_token_em"] = first_token_hit / max(1, samples)
-        if include_teacher_metrics:
-            # Costs a second full pass over the *sharded* loader: the teacher-forced numbers
-            # come from its own all-reduce, so they must not be computed on the unsharded row
-            # loader (every rank would score every row and the reduce would count each row
-            # world_size times).  Callers that already run teacher_forced separately
-            # (scripts/test.py) should pass False.
-            teacher = self.teacher_forced(model, loader, device)
-            result.update(
-                {
-                    "ppl": teacher["ppl"],
-                    "qa_loss": teacher["qa_loss"],
-                    **{key: teacher[key] for key in ("distill_loss",)},
-                }
-            )
         return result
+
+    @torch.no_grad()
+    def compare_task_embeddings(self, model, loader, device, max_qa=None, row_loader=None):
+        """Evaluate identical QA rows with QA and Recon task embeddings."""
+        return {
+            "qa_task": self.autoregressive(
+                model, loader, device, max_qa=max_qa, task_id=TASK_QA,
+                row_loader=row_loader,
+            ),
+            "recon_task": self.autoregressive(
+                model, loader, device, max_qa=max_qa, task_id=TASK_RECON,
+                row_loader=row_loader,
+            ),
+        }

@@ -1,95 +1,32 @@
+# 消融配置；未列出的字段继承训练基线。
+_base_: ../train_baseline.yaml
 checkpoint:
-  output_dir: outputs/ablation_multilayer
+  output_dir: outputs/ablation_multilayer  # 输出目录
 data:
-  conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_c1qa.jsonl
-  cache_offsets: true
-  cache_sortish_lengths: true
-  chat_template_enable_thinking: false
-  filter_long_context: true
-  filter_no_qa: true
-  max_answer_tokens: 64
-  max_question_tokens: 96
-  max_conversation_tokens: 768
-  max_context_tokens: 2048
-  max_input_tokens: 40960
-  tokenizer_filter_batch_size: 2048
-  train_tasks: mix
-  recon_ratio: 0.5
-  recon_schedule: constant
-  recon_schedule_curve: linear
-  recon_ratio_start: 0.5
-  recon_ratio_end: 0.5
-  recon_ratio_min: 0.1
-  qa_per_context: 4
-  root: ${DATA_ROOT:-/data/lz/contexts/aggregated}
-  sortish_bucket_multiplier: 50
-  test_datasets:
-  - squad
-  train_datasets: all
-  train_max_samples: null
-  validation_datasets:
-  - squad
-  validation_max_samples: 4096
+  limits:
+    max_context_tokens: 2048  # 覆盖 context token 上限
+  task:
+    # 测试数据集覆盖项
+    test_datasets:  # 覆盖测试数据集
+    - squad
+    # 验证数据集覆盖项
+    validation_datasets:  # 覆盖验证数据集
+    - squad
 evaluation:
-  autoregressive_every: 400
-  autoregressive_max_qa: 1024
-  max_new_tokens: 32
-  qa_batch_size: 4
+  autoregressive_every: 400  # 自回归验证间隔
+  evaluation_max_samples: 1024  # 自回归验证 QA 上限
+  max_new_tokens: 32  # 生成 token 上限
+  qa_batch_size: 4  # QA 验证批大小
 logging:
-  swanlab_run_name: null
-  log_every: 25
-  swanlab_mode: offline
-  swanlab_project: MemoryQwen
+  swanlab_mode: offline  # SwanLab 运行模式
 memory:
-  memory_length: 64
-  context_layer_indices:
+  context_layer_indices:  # context 表示层索引
   - -1
   - -8
   - -16
-  memory_resampler_layers: 2
-  memory_resampler_heads: 4
-  memory_resampler_hidden_size: 256
-  memory_resampler_ffn_ratio: 2
-  memory_resampler_output_mode: layer0
-  reader_memory_source: memory_hidden
-  readout_length: 8
-  readout_hidden_size: 256
-  readout_layers: 2
-  readout_heads: 4
-  qa_weight: 1.0
-  recon_weight: 1.0
-  distill_weight: 0.0
-  distill_positions: 128
-  distill_temperature: 1.0
-  distill_topk: 0
-  distill_entropy_weight: true
-model:
-  attn_implementation: sdpa
-  context_gradient_checkpointing: true
-  lora_alpha: 16.0
-  lora_dropout: 0.0
-  lora_rank: 8
-  name_or_path: ${MODEL_ROOT:-/data/lz/hf_cache/hub}/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
-  target_modules:
-  - q_proj
-  - k_proj
-  - v_proj
-  - o_proj
-  - gate_proj
-  - up_proj
-  - down_proj
-  torch_dtype: bfloat16
-  trainable_dtype: float32
-optimizer:
-  lr: 0.0001
-  name: adamw
-  weight_decay: 0.01
+  readout_length: 8  # readout token 数
 scheduler:
-  name: cosine
-  warmup_steps: 200
+  warmup_steps: 200  # 预热步数
 training:
-  batch_size: 1
-  epochs: 1
-  max_grad_norm: 1.0
-  seed: 42
-  deterministic: false
+  batch_size: 1  # 训练批大小
+  deterministic: false  # 是否启用确定性算法

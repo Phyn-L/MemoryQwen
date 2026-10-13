@@ -1,6 +1,6 @@
 test:
-  split: validation
-  batch_size: 2
-  qa_batch_size: 4
-  max_new_tokens: 32
-  max_samples: null
+  split: validation  # 评估数据集划分
+  batch_size: 2  # 每批处理的 context 数
+  qa_batch_size: 4  # QA 验证批大小
+  max_new_tokens: 32  # 生成 token 上限
+  max_samples: null  # 最大评估样本数，null 表示不限制

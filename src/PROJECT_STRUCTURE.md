@@ -12,7 +12,7 @@
 | `model.py` | 冻结 Qwen 主干，写入 memory slot，输出第 0 层 memory embedding，并由 Qwen 前向构造各层 memory KV，执行 QA、Recon 和蒸馏前向。 |
 | `resampler.py` | 可选的 question-conditioned readout，把 memory 变成插入 QA 序列的 R 个 latent。 |
 | `losses.py` | QA CE、Recon CE 和 KL distillation 的实现与加权求和。 |
-| `evaluator.py` | teacher-forced 与 autoregressive 评估，并记录每个 loss/指标。 |
+| `evaluator.py` | autoregressive 生成式评估，记录答案指标及各数据集指标。 |
 | `metrics.py` | EM、F1、ROUGE-L 等答案指标。 |
 | `dtypes.py` | 关闭 autocast 等 dtype 辅助，保证 loss 用 float32 reduction。 |
 

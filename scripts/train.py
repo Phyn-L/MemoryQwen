@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import time
 from pathlib import Path
 
@@ -22,25 +24,11 @@ from src.pipeline import (
     new_run_name,
     resolve_split_limit,
 )
+from src.data_sampling import sample_validation_by_dataset
 from utils import CheckpointManager, build_optimizer, build_scheduler, seed_everything
 
-# W&B groups panels by the FIRST path component of a logged key, so the two evaluation
-# modes must lead the key to become two sections. Logging `val/teacher_forced/...` and
-# `val/autoregressive/...` instead puts both under a single crowded `val` section.
-TEACHER_FORCED_SECTION = "val_teacher_forced"
 AUTOREGRESSIVE_SECTION = "val_autoregressive"
-# Answer-quality metrics, reported with identical keys by both modes so the two sections
-# line up panel for panel.
-ANSWER_METRIC_KEYS = (*METRIC_KEYS, "first_token_em")
-# Loss-like scalars only exist on the teacher-forced pass (the autoregressive pass can run
-# one internally to obtain them, but they are still that pass's numbers).
-LOSS_KEYS = (
-    "loss",
-    "qa_loss",
-    "recon_loss",
-    "ppl",
-    "distill_loss",
-)
+ANSWER_METRIC_KEYS = (*METRIC_KEYS, "first_token_em", "accuracy")
 
 
 def resume_plan(step: int, steps_per_epoch: int, epochs: int) -> tuple[int, int]:
@@ -89,55 +77,41 @@ def _gpu_peak_flops(device: torch.device) -> float | None:
 def _gradient_norm(parameters) -> torch.Tensor:
     norms = [
         torch.linalg.vector_norm(parameter.grad.detach().float())
-        for parameter in parameters if parameter.grad is not None
+        for parameter in parameters
+        if parameter.grad is not None
     ]
     if not norms:
         return torch.tensor(0.0)
     return torch.linalg.vector_norm(torch.stack(norms))
 
 
-def eval_log_payloads(teacher_metrics=None, autoregressive_metrics=None):
-    """Group evaluation scalars into their W&B sections.
+def eval_log_payloads(task_metrics=None):
+    """Log generated-answer metrics, with a separate group per task embedding."""
+    if task_metrics is None:
+        return []
+    payload = {}
+    for task_name, metrics in task_metrics.items():
+        section = f"{AUTOREGRESSIVE_SECTION}_{task_name}"
+        for key, value in metrics.items():
+            if key in ANSWER_METRIC_KEYS:
+                payload[f"{section}/{key}"] = value
+            elif key.startswith("dataset/") and key.rsplit("/", 1)[-1] in {*METRIC_KEYS, "count"}:
+                dataset, metric = key.removeprefix("dataset/").rsplit("/", 1)
+                dataset = dataset.replace("/", "_").replace("(", "_").replace(")", "")
+                metric = {"em": "EM", "f1": "F1", "rouge_l": "ROUGE-L"}.get(metric, metric)
+                payload[f"{section}/{dataset}_{metric}"] = value
+    return [payload] if payload else []
 
-    Two sections, each carrying the same answer-quality keys, so the two evaluation modes
-    line up panel for panel. Loss-like scalars appear in the teacher-forced section only:
-    when `teacher_metrics` is None the autoregressive pass computed them internally, but
-    they are still that pass's numbers and must not be duplicated under the other section.
 
-    Training-side losses (including ``distill_loss``) are logged separately as
-    ``train/*`` every ``logging.log_every`` steps by the training loop, so they must not be
-    folded in here.
-    """
-    payloads = []
-    if teacher_metrics is not None:
-        payloads.append(
-            {
-                f"{TEACHER_FORCED_SECTION}/{key}": value
-                for key, value in teacher_metrics.items()
-            }
-        )
-    if autoregressive_metrics is not None:
-        payloads.append(
-            {
-                f"{AUTOREGRESSIVE_SECTION}/{key}": autoregressive_metrics[key]
-                for key in ANSWER_METRIC_KEYS
-                if key in autoregressive_metrics
-            }
-        )
-        if teacher_metrics is None:
-            loss_only = {
-                key: value
-                for key, value in autoregressive_metrics.items()
-                if key in LOSS_KEYS
-            }
-            if loss_only:
-                payloads.append(
-                    {
-                        f"{TEACHER_FORCED_SECTION}/{key}": value
-                        for key, value in loss_only.items()
-                    }
-                )
-    return payloads
+def _test_ids(path: Path) -> set[tuple[str, str]]:
+    result = set()
+    if path.exists():
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    row = json.loads(line)
+                    result.add((str(row.get("dataset", "")), str(row.get("id", ""))))
+    return result
 
 
 def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> None:
@@ -174,7 +148,10 @@ def main() -> None:
         "come from the MACHINE environment variable or, failing that, the hostname.",
     )
     parser.add_argument("--resume")
-    parser.add_argument("--init-from", help="Initialize model weights only; start a new optimizer, schedule and run.")
+    parser.add_argument(
+        "--init-from",
+        help="Initialize model weights only; start a new optimizer, schedule and run.",
+    )
     parser.add_argument("--swanlab-run-id")
     args = parser.parse_args()
 
@@ -182,7 +159,9 @@ def main() -> None:
     if args.init_from:
         cfg.checkpoint.init_from = str(Path(args.init_from).resolve())
     if args.resume and cfg.checkpoint.init_from:
-        parser.error("--resume and checkpoint.init_from/--init-from are mutually exclusive")
+        parser.error(
+            "--resume and checkpoint.init_from/--init-from are mutually exclusive"
+        )
     cfg.validate()
     seed_everything(cfg.training.seed, deterministic=cfg.training.deterministic)
     tokenizer, model = load_model(cfg)
@@ -203,8 +182,51 @@ def main() -> None:
         )
         device = accelerator.device
     except ImportError:
+        if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+            raise RuntimeError("Multi-GPU training requires accelerate")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model.to(device)
+
+    data_dir = Path(__file__).resolve().parents[1] / "data" / "1qa"
+    validation_source = Path(
+        cfg.data.validation_source_file or data_dir / "1qa-validation.jsonl"
+    )
+    validation_dir = Path(cfg.data.validation_output_dir or data_dir / "1qa-val")
+    sampled_validation = validation_dir / "1qa-val.jsonl"
+    validation_counts = None
+    datasets = tuple(cfg.data.validation_datasets or ())
+    default_per_dataset = (cfg.data.validation_max_samples or 1280) // max(
+        len(datasets) or 5, 1
+    )
+    sample_limits = cfg.data.validation_max_samples_per_dataset or {
+        dataset: default_per_dataset for dataset in datasets
+    }
+    if not sample_limits:
+        sample_limits = {"squad": 256, "msmarcov1.1": 256, "msmarcov2.1": 256,
+                         "hotpotqa(distractor)": 256, "race": 256}
+    validation_context_limit = cfg.data.validation_max_context_tokens
+    if validation_context_limit:
+        cfg.data.max_context_tokens = validation_context_limit
+    test_ids = _test_ids(data_dir / "1qa-test.jsonl")
+    if accelerator is None or accelerator.is_main_process:
+        sampled_validation, validation_counts = sample_validation_by_dataset(
+            validation_source,
+            validation_dir,
+            samples_per_dataset=sample_limits,
+            seed=cfg.training.seed,
+            excluded_ids=test_ids,
+            tokenizer=tokenizer,
+            data_config=cfg.data,
+            datasets=datasets or None,
+            num_workers=cfg.data.validation_sampling_workers,
+        )
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+    cfg.data.train_conversation_file = str(data_dir / "1qa-train.jsonl")
+    cfg.data.validation_conversation_file = str(sampled_validation)
+    cfg.data.conversation_file = cfg.data.train_conversation_file
+    model.to(device)
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
 
     _configure_run_paths(cfg, accelerator, args.resume)
     cache_dir = data_cache_dir()
@@ -250,8 +272,8 @@ def main() -> None:
         pin_memory=cfg.data.pin_memory,
         persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
     )
-    # A second, deliberately *unprepared* loader over the same dataset. The autoregressive
-    # budget (`evaluation.autoregressive_max_qa`) is global, and the evaluator slices it into
+    # A second, deliberately *unprepared* loader over the same dataset. The evaluation
+    # budget (`evaluation.evaluation_max_samples`) is global, and the evaluator slices it into
     # contiguous windows of the global row order; `accelerator.prepare` shards by batch, so
     # the prepared loader cannot express "rows 1024..2047 of the split". Skipping the
     # batches outside a window happens before any compute, so this costs iteration only.
@@ -296,7 +318,9 @@ def main() -> None:
     if cfg.checkpoint.init_from and not args.resume:
         # Use a separate manager so phase-one selection metadata and RNG do not leak.
         CheckpointManager(cfg.checkpoint.output_dir).load(
-            cfg.checkpoint.init_from, model, restore_rng=False,
+            cfg.checkpoint.init_from,
+            model,
+            restore_rng=False,
         )
 
     step = 0
@@ -399,18 +423,27 @@ def main() -> None:
                 loss_only=True,
                 task_ids=ids["task_ids"],
             )
-            qa_weight, recon_weight, effective_ratio = scheduled_task_weights(step, total_steps, cfg.data)
+            qa_weight, recon_weight, effective_ratio = scheduled_task_weights(
+                step, total_steps, cfg.data
+            )
             supervised, task_terms = supervision_objectives(
-                output.supervision_losses, ids["task_ids"], cfg.memory,
+                output.supervision_losses,
+                ids["task_ids"],
+                cfg.memory,
                 qa_weight=qa_weight * cfg.memory.qa_weight,
                 recon_weight=recon_weight * cfg.memory.recon_weight,
             )
             auxiliary_terms = output.objective_terms or {}
-            total = supervised + objective_total(supervised * 0, auxiliary_terms, cfg.memory)
+            total = supervised + objective_total(
+                supervised * 0, auxiliary_terms, cfg.memory
+            )
             terms = {
-                **auxiliary_terms, **task_terms, "loss": total,
+                **auxiliary_terms,
+                **task_terms,
+                "loss": total,
                 "qa_weight": total.detach() * 0 + qa_weight * cfg.memory.qa_weight,
-                "recon_weight": total.detach() * 0 + recon_weight * cfg.memory.recon_weight,
+                "recon_weight": total.detach() * 0
+                + recon_weight * cfg.memory.recon_weight,
                 "recon_ratio": total.detach() * 0 + effective_ratio,
             }
             if accelerator is not None:
@@ -419,15 +452,18 @@ def main() -> None:
                 total.backward()
             named_parameters = list(base_model.named_parameters())
             resampler_grad_norm = _gradient_norm(
-                parameter for name, parameter in named_parameters
+                parameter
+                for name, parameter in named_parameters
                 if name.startswith("context_resampler.") and "layer_gates" not in name
             )
             metalora_grad_norm = _gradient_norm(
-                parameter for name, parameter in named_parameters
+                parameter
+                for name, parameter in named_parameters
                 if "lora_A" in name or "lora_B" in name
             )
             layer_gates_grad_norm = _gradient_norm(
-                parameter for name, parameter in named_parameters
+                parameter
+                for name, parameter in named_parameters
                 if name == "context_resampler.layer_gates"
             )
             task_embedding_grad_norm = (
@@ -436,7 +472,8 @@ def main() -> None:
                 else torch.zeros(2, device=device)
             )
             step_grad_norm = torch.nn.utils.clip_grad_norm_(
-                model.parameters(), cfg.training.max_grad_norm,
+                model.parameters(),
+                cfg.training.max_grad_norm,
             )
             optimizer.step()
             scheduler.step()
@@ -460,7 +497,6 @@ def main() -> None:
                 # the one training-side scalar that silently went wrong before (accelerate
                 # stepping it once per rank, see the prepare() comment), and without this
                 # key a distorted schedule is invisible in the run history.
-                supervised_tokens = int(ids["labels"].ne(-100).sum())
                 model_tokens = int(ids["context_mask"].sum())
                 model_tokens += int(ids["input_mask"].sum() + ids["target_mask"].sum())
                 model_tokens += int(
@@ -468,36 +504,39 @@ def main() -> None:
                     * base_model.context_resampler.num_memory
                 )
                 payload = {
-                    **{f"train/{k}": float(v.detach()) for k, v in terms.items()},
+                    "loss/total": float(terms["loss"].detach()),
+                    "loss/qa": float(terms["qa_loss"].detach()),
+                    "loss/recon": float(terms["recon_loss"].detach()),
+                    "loss/distill": float(terms["distill_loss"].detach()),
                     "train/lr": float(scheduler.get_last_lr()[0]),
-                    "train/grad_norm": float(step_grad_norm.detach()),
-                    "train/grad_norm/resampler": float(resampler_grad_norm),
-                    "train/grad_norm/metalora": float(metalora_grad_norm),
-                    "train/grad_norm/layer_gates": float(layer_gates_grad_norm),
-                    "train/grad_norm/task_recon": float(task_embedding_grad_norm[0]),
-                    "train/grad_norm/task_qa": float(task_embedding_grad_norm[1]),
-                    "train/step_seconds": step_seconds,
-                    "train/supervised_tokens_per_second": supervised_tokens / step_seconds,
-                    "train/model_tokens_per_second": model_tokens / step_seconds,
-                    "train/recon_rows": int(ids["task_ids"].eq(0).sum()),
-                    "train/qa_rows": int(ids["task_ids"].eq(1).sum()),
-                    "train/supervised_tokens": supervised_tokens,
+                    "loss/ppl": float(torch.exp(terms["qa_loss"].detach().float().clamp(max=20))),
+                    "loss/qa_ppl": float(torch.exp(terms["qa_loss"].detach().float().clamp(max=20))),
+                    "loss/recon_ppl": float(torch.exp(terms["recon_loss"].detach().float().clamp(max=20))),
+                    "grad_norm/total": float(step_grad_norm.detach()),
+                    "grad_norm/resampler": float(resampler_grad_norm),
+                    "grad_norm/metalora": float(metalora_grad_norm),
+                    "grad_norm/layer_gates": float(layer_gates_grad_norm),
+                    "grad_norm/task_recon": float(task_embedding_grad_norm[0]),
+                    "grad_norm/task_qa": float(task_embedding_grad_norm[1]),
+                    "data/qa_probability": float(1.0 - effective_ratio),
+                    "data/recon_probability": float(effective_ratio),
                 }
                 if torch.cuda.is_available():
                     payload["train/peak_cuda_memory_gib"] = (
-                        torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+                        torch.cuda.max_memory_allocated(device) / (1024**3)
                     )
                     peak_flops = _gpu_peak_flops(device)
                     if peak_flops:
                         # Approximate dense-model MFU as 6 * total parameters * tokens.
                         # Tokens include context, memory-prefix and QA forwards.
-                        model_params = sum(p.numel() for p in base_model.qwen.parameters())
-                        payload["train/mfu"] = min(
-                            1.0,
-                            6 * model_params * model_tokens
-                            / step_seconds / peak_flops,
+                        model_params = sum(
+                            p.numel() for p in base_model.qwen.parameters()
                         )
-                        payload["train/mfu_estimated"] = 1
+                        payload["train/MFU"] = min(
+                            1.0,
+                            6 * model_params * model_tokens / step_seconds / peak_flops,
+                        )
+                        payload["train/MFU_estimated"] = 1
                 run.log(payload, step=step)
             is_main = accelerator is None or accelerator.is_main_process
             # Validation runs on EVERY rank.  accelerator.prepare shards the validation
@@ -510,24 +549,21 @@ def main() -> None:
             if len(validation_loader) and should_evaluate(
                 step, cfg.evaluation.autoregressive_every, total_steps
             ):
-                metrics = evaluator.autoregressive(
+                metrics = evaluator.compare_task_embeddings(
                     base_model,
                     validation_loader,
                     device,
-                    include_teacher_metrics=False,
-                    max_qa=cfg.evaluation.autoregressive_max_qa,
+                    max_qa=cfg.evaluation.evaluation_max_samples,
                     row_loader=validation_row_loader,
                 )
             if run and is_main:
-                for payload in eval_log_payloads(None, metrics):
+                for payload in eval_log_payloads(metrics):
                     run.log(payload, step=step)
             if accelerator is not None:
                 # Resynchronise explicitly so a rank whose shard finished early cannot
                 # race ahead into the next training step.
                 accelerator.wait_for_everyone()
-            if (
-                metrics is not None
-            ) and torch.cuda.is_available():
+            if (metrics is not None) and torch.cuda.is_available():
                 # An evaluation allocates a very different tensor mix from a training step
                 # (whole contexts through every decoder, a full validation loader), and the
                 # allocator keeps those blocks cached afterwards. On the H200 that residue
@@ -549,7 +585,7 @@ def main() -> None:
                     scheduler,
                     step,
                     cfg.to_dict(),
-                    validation_f1=metrics["f1"],
+                    validation_f1=metrics["qa_task"]["f1"],
                     swanlab_run_id=getattr(run, "id", None),
                     world_size=1 if accelerator is None else accelerator.num_processes,
                 )
@@ -573,6 +609,8 @@ def main() -> None:
     progress.close()
     if run:
         run.finish()
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

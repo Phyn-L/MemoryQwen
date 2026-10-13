@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import random
+from collections import deque
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,90 @@ from tqdm.auto import tqdm
 from utils.ddp import is_main_process
 
 from . import cache_utils
+
+
+_FILTER_WORKER_TOKENIZER = None
+_FILTER_WORKER_OPTIONS = None
+_SORTISH_WORKER_TOKENIZER = None
+
+
+def _init_filter_worker(tokenizer, options):
+    global _FILTER_WORKER_TOKENIZER, _FILTER_WORKER_OPTIONS
+    _FILTER_WORKER_TOKENIZER = tokenizer
+    _FILTER_WORKER_OPTIONS = options
+
+
+def _filter_row_batch(rows):
+    tokenizer = _FILTER_WORKER_TOKENIZER
+    max_context_tokens, filter_long_context, filter_no_conversation, max_conversation_tokens, max_question_tokens, max_answer_tokens = _FILTER_WORKER_OPTIONS
+    accepted = []
+    for raw in rows:
+        context = str(raw.get("context", "")).strip()
+        if not context:
+            continue
+        messages = _messages_from_row(raw)
+        if filter_no_conversation and not any(m.role == "assistant" for m in messages):
+            continue
+        turns = ContextRecord("", messages).turns()
+        if not turns:
+            continue
+        if tokenizer is not None:
+            if filter_long_context:
+                length = len(tokenizer(context, add_special_tokens=False,
+                                       truncation=True, max_length=max_context_tokens + 1).input_ids)
+                if not 0 < length <= max_context_tokens:
+                    continue
+            questions = [render_conversation(tokenizer, t.messages) if getattr(tokenizer, "apply_chat_template", None) else t.question for t in turns]
+            qids = tokenizer(questions, add_special_tokens=False, truncation=True, max_length=max_question_tokens + 1).input_ids
+            aids = tokenizer([t.answer for t in turns], add_special_tokens=False, truncation=True, max_length=max_answer_tokens + 1).input_ids
+            if any(not 0 < len(q) <= max_question_tokens or not 0 < len(a) <= max_answer_tokens for q, a in zip(qids, aids)):
+                continue
+            if sum(map(len, qids)) + sum(map(len, aids)) > max_conversation_tokens:
+                continue
+        accepted.append(raw)
+    return accepted
+
+
+def _init_sortish_worker(tokenizer):
+    global _SORTISH_WORKER_TOKENIZER
+    _SORTISH_WORKER_TOKENIZER = tokenizer
+
+
+def _sortish_length_batch(contexts):
+    encoded = _SORTISH_WORKER_TOKENIZER(
+        contexts,
+        add_special_tokens=False,
+        truncation=False,
+        padding=False,
+    )
+    input_ids = (
+        encoded.input_ids
+        if hasattr(encoded, "input_ids")
+        else encoded["input_ids"]
+    )
+    if len(input_ids) != len(contexts):
+        raise ValueError(
+            "tokenizer returned a different number of rows for sortish lengths"
+        )
+    return [len(ids) for ids in input_ids]
+
+
+def _bounded_process_map(executor, function, items, max_pending):
+    """Yield ordered results while keeping only a small number of tasks in flight."""
+    iterator = iter(items)
+    pending = deque()
+    for _ in range(max_pending):
+        try:
+            pending.append(executor.submit(function, next(iterator)))
+        except StopIteration:
+            break
+    while pending:
+        future = pending.popleft()
+        yield future.result()
+        try:
+            pending.append(executor.submit(function, next(iterator)))
+        except StopIteration:
+            continue
 
 
 def _progress_enabled() -> bool:
@@ -171,341 +257,212 @@ def _messages_from_row(row: dict[str, Any]) -> tuple[ConversationMessage, ...]:
                 str(item.get("answer_letter", "")).strip().upper(),
             )
         )
+    # The new 1QA corpus keeps alternative references and RACE's answer letter
+    # at row level. Preserve message-level metadata when it is already present.
+    if len([message for message in messages if message.role == "assistant"]) == 1:
+        references = row.get("answers") or ()
+        if isinstance(references, str):
+            references = (references,)
+        references = tuple(str(value).strip() for value in references if str(value).strip())
+        letter = str((row.get("metadata") or {}).get("answer_letter", "")).strip().upper()
+        for index, message in enumerate(messages):
+            if message.role == "assistant":
+                messages[index] = ConversationMessage(
+                    message.role, message.content, message.answers or references,
+                    message.answer_letter or letter,
+                )
+                break
     return tuple(messages)
 
 
 class ConversationDataset(Dataset):
-    """Random-access JSONL dataset with a compact byte-offset index."""
+    """Materialized conversation dataset backed by a filtered JSONL cache."""
 
-    CACHE_VERSION = 2
+    CACHE_VERSION = 3
 
-    def __init__(
-        self,
-        path: str | Path,
-        tokenizer=None,
-        max_context_tokens=2048,
-        max_input_tokens=40960,
-        max_samples=None,
-        filter_long_context=True,
-        filter_no_conversation=True,
-        cache_dir: str | Path | None = None,
-        allow_empty=False,
-        tokenizer_filter_batch_size: int = 2048,
-        max_conversation_tokens: int = 768,
-        max_question_tokens: int = 96,
-        max_answer_tokens: int = 64,
-    ):
-        self.path = Path(path)
-        if self.path.suffix != ".jsonl":
-            raise ValueError(f"conversation loader expects JSONL: {self.path}")
-        if not self.path.exists():
-            raise FileNotFoundError(self.path)
-        if tokenizer_filter_batch_size <= 0:
-            raise ValueError("tokenizer_filter_batch_size must be positive")
-        if max_question_tokens <= 0 or max_conversation_tokens <= 0 or max_answer_tokens <= 0:
-            raise ValueError("question, conversation and answer token limits must be positive")
-        self.tokenizer_filter_batch_size = tokenizer_filter_batch_size
-        self.max_conversation_tokens = max_conversation_tokens
-        self.max_question_tokens = max_question_tokens
-        self.max_answer_tokens = max_answer_tokens
+    def __init__(self, path: str | Path, tokenizer=None, max_context_tokens=2048,
+                 max_input_tokens=40960, max_samples=None, filter_long_context=True,
+                 filter_no_conversation=True, cache_dir: str | Path | None = None,
+                 allow_empty=False, tokenizer_filter_batch_size=2048,
+                 max_conversation_tokens=768, max_question_tokens=96,
+                 max_answer_tokens=64, num_workers=0):
+        self.source_path = Path(path)
+        if num_workers < 0:
+            raise ValueError("num_workers must be non-negative")
+        if self.source_path.suffix != '.jsonl':
+            raise ValueError(f'conversation loader expects JSONL: {self.source_path}')
+        if not self.source_path.exists():
+            raise FileNotFoundError(self.source_path)
         self.cache_metadata = {
-            "path": str(self.path.resolve()),
-            "size": self.path.stat().st_size,
-            "mtime_ns": self.path.stat().st_mtime_ns,
-            "max_context_tokens": max_context_tokens,
-            "max_input_tokens": max_input_tokens,
-            "max_conversation_tokens": max_conversation_tokens,
-            "max_question_tokens": max_question_tokens,
-            "max_answer_tokens": max_answer_tokens,
-            "max_samples": max_samples,
-            "filter_long_context": filter_long_context,
-            "filter_no_conversation": filter_no_conversation,
+            'version': self.CACHE_VERSION,
+            'path': str(self.source_path.resolve()),
+            'size': self.source_path.stat().st_size,
+            'mtime_ns': self.source_path.stat().st_mtime_ns,
+            'max_context_tokens': max_context_tokens,
+            'max_input_tokens': max_input_tokens,
+            'max_conversation_tokens': max_conversation_tokens,
+            'max_question_tokens': max_question_tokens,
+            'max_answer_tokens': max_answer_tokens,
+            'max_samples': max_samples,
+            'filter_long_context': filter_long_context,
+            'filter_no_conversation': filter_no_conversation,
+            'tokenizer': cache_utils.tokenizer_fingerprint(tokenizer),
         }
-        self._offsets = self._load_or_build_offsets(
-            tokenizer,
-            max_context_tokens,
-            max_input_tokens,
-            max_samples,
-            filter_long_context,
-            filter_no_conversation,
-            Path(cache_dir) if cache_dir else None,
-        )
-        if not self._offsets and not allow_empty:
-            raise RuntimeError(f"No usable conversation rows found in {self.path}")
-        self._handle = None
+        fingerprint = cache_utils.compute_fingerprint(self.cache_metadata)
+        cache_path = (Path(cache_dir) / f'conversation_filtered-{fingerprint}.jsonl'
+                      if cache_dir else None)
+        if cache_path and cache_path.exists():
+            self._rows = self._read_rows(cache_path)
+        else:
+            self._rows = self._filter_rows(
+                tokenizer, max_context_tokens, max_samples, filter_long_context,
+                filter_no_conversation, tokenizer_filter_batch_size,
+                max_conversation_tokens, max_question_tokens, max_answer_tokens,
+                num_workers)
+            if cache_path:
+                self._write_rows(cache_path, self._rows)
+                if _progress_enabled():
+                    print(f'Saved filtered conversation data: {cache_path} '
+                          f'(contexts={len(self._rows)})', flush=True)
+        if not self._rows and not allow_empty:
+            raise RuntimeError(f'No usable conversation rows found in {self.source_path}')
 
-    def _cache_metadata(self, tokenizer) -> dict[str, Any]:
-        metadata = {
-            "version": self.CACHE_VERSION,
-            **self.cache_metadata,
-            "tokenizer": cache_utils.tokenizer_fingerprint(tokenizer),
-        }
-        metadata["fingerprint"] = cache_utils.compute_fingerprint(metadata)
-        return metadata
+    @staticmethod
+    def _read_rows(path):
+        with path.open(encoding='utf-8') as handle:
+            return [json.loads(line) for line in handle if line.strip()]
 
-    def _offset_cache_path(self, cache_dir: Path, metadata: dict[str, Any]) -> Path:
-        return cache_dir / f"conversation_offsets-{metadata['fingerprint']}.json"
-
-    def _load_offsets(self, path: Path, metadata: dict[str, Any]) -> list[int] | None:
-        try:
-            cached = json.loads(path.read_text(encoding="utf-8"))
-            if cached.get("metadata", {}).get("fingerprint") != metadata["fingerprint"]:
-                return None
-            offsets = cached.get("offsets")
-            if not isinstance(offsets, list) or any(
-                type(offset) is not int or offset < 0 for offset in offsets
-            ):
-                return None
-            return offsets
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
-            return None
-
-    def _save_offsets(
-        self, path: Path, metadata: dict[str, Any], offsets: list[int]
-    ) -> None:
+    @staticmethod
+    def _write_rows(path, rows):
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-        temporary.write_text(
-            json.dumps({"metadata": metadata, "offsets": offsets}),
-            encoding="utf-8",
-        )
+        temporary = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+        with temporary.open('w', encoding='utf-8') as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False) + '\n')
         os.replace(temporary, path)
 
-    def _build_offsets(
-        self,
-        tokenizer,
-        max_context_tokens,
-        max_input_tokens,
-        max_samples,
-        filter_long_context,
-        filter_no_conversation,
-    ) -> list[int]:
-        offsets = []
-        pending_offsets = []
-        pending_contexts = []
-        pending_questions: list[list[str]] = []
-        pending_answers: list[list[str]] = []
-        batch_size = self.tokenizer_filter_batch_size
-
-        def flush_tokenizer_batch() -> bool:
-            if not pending_offsets:
-                return False
-            if tokenizer is not None and filter_long_context:
-                encoded = tokenizer(
-                    pending_contexts,
-                    add_special_tokens=False,
-                    truncation=True,
-                    # Only one token beyond the training filter is needed to
-                    # distinguish <= max_context_tokens from overlong rows.
-                    max_length=max_context_tokens + 1,
-                    padding=False,
-                )
-                input_ids = (
-                    encoded.input_ids
-                    if hasattr(encoded, "input_ids")
-                    else encoded["input_ids"]
-                )
-                lengths = [len(ids) for ids in input_ids]
-            else:
-                lengths = [0] * len(pending_offsets)
-            context_accepted = [
-                (not filter_long_context) or (0 < length <= max_context_tokens)
-                for length in lengths
-            ]
-            accepted = context_accepted
-            if tokenizer is not None:
-                flat_questions = [text for row in pending_questions for text in row]
-                flat_answers = [text for row in pending_answers for text in row]
-                question_encoded = tokenizer(
-                    flat_questions,
-                    add_special_tokens=False,
-                    truncation=True,
-                    max_length=self.max_question_tokens + 1,
-                    padding=False,
-                )
-                question_ids = (
-                    question_encoded.input_ids
-                    if hasattr(question_encoded, "input_ids")
-                    else question_encoded["input_ids"]
-                )
-                answer_encoded = tokenizer(
-                    flat_answers,
-                    add_special_tokens=False,
-                    truncation=True,
-                    max_length=self.max_answer_tokens + 1,
-                    padding=False,
-                )
-                answer_ids = (
-                    answer_encoded.input_ids
-                    if hasattr(answer_encoded, "input_ids")
-                    else answer_encoded["input_ids"]
-                )
-                if len(question_ids) != len(flat_questions) or len(answer_ids) != len(
-                    flat_answers
-                ):
-                    raise ValueError(
-                        "tokenizer returned a different number of rows for QA filtering"
-                    )
-                accepted = []
-                cursor = 0
-                for keep, questions, answers in zip(
-                    context_accepted, pending_questions, pending_answers
-                ):
-                    row_keep = keep
-                    question_total = 0
-                    answer_total = 0
-                    for index in range(len(questions)):
-                        row_keep = row_keep and (
-                            0
-                            < len(question_ids[cursor + index])
-                            <= self.max_question_tokens
-                            and 0
-                            < len(answer_ids[cursor + index])
-                            <= self.max_answer_tokens
-                        )
-                        question_total += len(question_ids[cursor + index])
-                        answer_total += len(answer_ids[cursor + index])
-                    # The conversation budget applies uniformly to every row. For a
-                    # single-QA row this is naturally above the individual Q+A limit.
-                    row_keep = row_keep and question_total + answer_total <= self.max_conversation_tokens
-                    accepted.append(row_keep)
-                    cursor += len(questions)
-            accepted_offsets = [
-                offset for offset, keep in zip(pending_offsets, accepted) if keep
-            ]
-            reached_limit = False
-            for offset in accepted_offsets:
-                offsets.append(offset)
-                if max_samples is not None and len(offsets) >= max_samples:
-                    reached_limit = True
-                    break
-            pending_offsets.clear()
-            pending_contexts.clear()
-            pending_questions.clear()
-            pending_answers.clear()
-            return reached_limit
-
-        total_bytes = self.path.stat().st_size
+    def _filter_rows(self, tokenizer, max_context_tokens, max_samples,
+                     filter_long_context, filter_no_conversation, batch_size,
+                     max_conversation_tokens, max_question_tokens, max_answer_tokens,
+                     num_workers):
+        if num_workers > 1:
+            return self._filter_rows_parallel(
+                tokenizer, max_context_tokens, max_samples, filter_long_context,
+                filter_no_conversation, batch_size, max_conversation_tokens,
+                max_question_tokens, max_answer_tokens, num_workers
+            )
+        rows = []
         progress = tqdm(
-            total=total_bytes,
-            desc="Indexing conversation data",
+            total=max_samples,
+            desc=f"Filtering {self.source_path.name}",
+            unit="context",
+            disable=not _progress_enabled(),
+        )
+        scan_progress = tqdm(
+            total=self.source_path.stat().st_size,
+            desc=f"Reading {self.source_path.name}",
             unit="B",
             unit_scale=True,
             disable=not _progress_enabled(),
         )
+        with self.source_path.open(encoding='utf-8') as handle:
+            for line in handle:
+                scan_progress.update(len(line.encode("utf-8")))
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                context = str(row.get('context', '')).strip()
+                if not context:
+                    continue
+                messages = _messages_from_row(row)
+                if filter_no_conversation and not any(m.role == 'assistant' for m in messages):
+                    continue
+                turns = ContextRecord('', messages).turns()
+                if not turns:
+                    continue
+                if tokenizer is not None:
+                    if filter_long_context:
+                        length = len(tokenizer(context, add_special_tokens=False,
+                                               truncation=True, max_length=max_context_tokens + 1).input_ids)
+                        if not 0 < length <= max_context_tokens:
+                            continue
+                    questions = [render_conversation(tokenizer, t.messages) if getattr(tokenizer, 'apply_chat_template', None) else t.question for t in turns]
+                    qids = tokenizer(questions, add_special_tokens=False, truncation=True, max_length=max_question_tokens + 1).input_ids
+                    aids = tokenizer([t.answer for t in turns], add_special_tokens=False, truncation=True, max_length=max_answer_tokens + 1).input_ids
+                    if any(not 0 < len(q) <= max_question_tokens or not 0 < len(a) <= max_answer_tokens for q, a in zip(qids, aids)):
+                        continue
+                    if sum(map(len, qids)) + sum(map(len, aids)) > max_conversation_tokens:
+                        continue
+                rows.append(row)
+                if max_samples is not None and len(rows) >= max_samples:
+                    break
+        progress.close()
+        scan_progress.close()
+        return rows
 
-        try:
-            with self.path.open("rb") as handle:
-                while True:
-                    offset = handle.tell()
-                    line = handle.readline()
-                    progress.update(handle.tell() - offset)
-                    if not line:
-                        break
+    def _filter_rows_parallel(self, tokenizer, max_context_tokens, max_samples,
+                              filter_long_context, filter_no_conversation, batch_size,
+                              max_conversation_tokens, max_question_tokens,
+                              max_answer_tokens, num_workers):
+        options = (
+            max_context_tokens, filter_long_context, filter_no_conversation,
+            max_conversation_tokens, max_question_tokens, max_answer_tokens,
+        )
+        chunk_size = max(32, batch_size)
+        rows = []
+        progress = tqdm(
+            total=max_samples,
+            desc=f"Filtering {self.source_path.name}",
+            unit="context",
+            disable=not _progress_enabled(),
+        )
+        scan_progress = tqdm(
+            total=self.source_path.stat().st_size,
+            desc=f"Reading {self.source_path.name}",
+            unit="B",
+            unit_scale=True,
+            disable=not _progress_enabled(),
+        )
+        def iter_chunks():
+            with self.source_path.open(encoding="utf-8") as handle:
+                chunk = []
+                for line in handle:
+                    scan_progress.update(len(line.encode("utf-8")))
                     if not line.strip():
                         continue
-                    row = json.loads(line)
-                    context = str(row.get("context", "")).strip()
-                    if not context:
-                        continue
-                    messages = _messages_from_row(row)
-                    if filter_no_conversation and not any(
-                        message.role == "assistant" for message in messages
-                    ):
-                        continue
-                    if tokenizer is not None:
-                        turns = ContextRecord("", messages).turns()
-                        if not turns:
-                            continue
-                        if getattr(tokenizer, "apply_chat_template", None):
-                            question_texts = [
-                                render_conversation(tokenizer, turn.messages)
-                                for turn in turns
-                            ]
-                        else:
-                            question_texts = [turn.question for turn in turns]
-                        pending_offsets.append(offset)
-                        pending_contexts.append(context)
-                        pending_questions.append(question_texts)
-                        pending_answers.append([turn.answer for turn in turns])
-                        if len(pending_offsets) >= batch_size:
-                            if flush_tokenizer_batch():
-                                break
-                    else:
-                        offsets.append(offset)
-                    if max_samples is not None and len(offsets) >= max_samples:
-                        break
-                if pending_offsets:
-                    flush_tokenizer_batch()
+                    chunk.append(json.loads(line))
+                    if len(chunk) >= chunk_size:
+                        yield chunk
+                        chunk = []
+                if chunk:
+                    yield chunk
+
+        try:
+            with ProcessPoolExecutor(
+                max_workers=num_workers,
+                initializer=_init_filter_worker,
+                initargs=(tokenizer, options),
+            ) as executor:
+                for accepted in _bounded_process_map(
+                    executor, _filter_row_batch, iter_chunks(), num_workers * 2
+                ):
+                    rows.extend(accepted)
+                    progress.update(len(accepted))
+                    if max_samples is not None and len(rows) >= max_samples:
+                        return rows[:max_samples]
         finally:
             progress.close()
-        if max_samples is not None:
-            offsets = offsets[:max_samples]
-        return offsets
-
-    def _load_or_build_offsets(
-        self,
-        tokenizer,
-        max_context_tokens,
-        max_input_tokens,
-        max_samples,
-        filter_long_context,
-        filter_no_conversation,
-        cache_dir: Path | None,
-    ) -> list[int]:
-        metadata = self._cache_metadata(tokenizer)
-        if cache_dir is None:
-            return self._build_offsets(
-                tokenizer,
-                max_context_tokens,
-                max_input_tokens,
-                max_samples,
-                filter_long_context,
-                filter_no_conversation,
-            )
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        path = self._offset_cache_path(cache_dir, metadata)
-        with cache_utils.file_lock(path.with_suffix(".lock")):
-            offsets = self._load_offsets(path, metadata) if path.exists() else None
-            if offsets is None:
-                offsets = self._build_offsets(
-                    tokenizer,
-                    max_context_tokens,
-                    max_input_tokens,
-                    max_samples,
-                    filter_long_context,
-                    filter_no_conversation,
-                )
-                self._save_offsets(path, metadata, offsets)
-                if _progress_enabled():
-                    print(
-                        f"Saved conversation index cache: {path} "
-                        f"(contexts={len(offsets)})",
-                        flush=True,
-                    )
-            elif _progress_enabled():
-                print(
-                    f"Reusing conversation index cache: {path} "
-                    f"(contexts={len(offsets)})",
-                    flush=True,
-                )
-            return offsets
+            scan_progress.close()
+        return rows
 
     def __len__(self):
-        return len(self._offsets)
+        return len(self._rows)
 
     def __getitem__(self, index):
-        if self._handle is None:
-            self._handle = self.path.open("rb")
-        self._handle.seek(self._offsets[index])
-        row = json.loads(self._handle.readline())
-        messages = _messages_from_row(row)
-        return ContextRecord(
-            str(row["context"]).strip(),
-            messages,
-            self.path.stem,
-            str(row.get("context_id", row.get("id", ""))),
-        )
+        row = self._rows[index]
+        return ContextRecord(str(row['context']).strip(), _messages_from_row(row),
+                             str(row.get('dataset', self.source_path.stem)),
+                             str(row.get('context_id', row.get('id', ''))))
 
 
 class TrainingTaskDataset(Dataset):
@@ -564,7 +521,10 @@ class SortishSampler(Sampler[int]):
         seed=42,
         chat_template_enable_thinking=False,
         cache_dir=None,
+        num_workers=0,
     ):
+        if num_workers < 0:
+            raise ValueError("num_workers must be non-negative")
         self.dataset, self.batch_size, self.seed, self.epoch = (
             dataset,
             batch_size,
@@ -577,6 +537,7 @@ class SortishSampler(Sampler[int]):
             chat_template_enable_thinking,
             Path(cache_dir) if cache_dir else None,
             metadata,
+            num_workers,
         )
         self.bucket_multiplier = bucket_multiplier
         self._rebuild()
@@ -594,7 +555,7 @@ class SortishSampler(Sampler[int]):
         ).hexdigest()
         return payload
 
-    def _build_lengths(self, tokenizer, enable_thinking):
+    def _build_lengths(self, tokenizer, enable_thinking, num_workers=0):
         lengths = []
         batch_size = max(
             1, int(getattr(self.dataset, "tokenizer_filter_batch_size", 1024))
@@ -607,11 +568,9 @@ class SortishSampler(Sampler[int]):
             disable=not _progress_enabled(),
         )
 
-        def flush() -> None:
-            if not pending_contexts:
-                return
+        def encode_batch(contexts):
             encoded = tokenizer(
-                pending_contexts,
+                contexts,
                 add_special_tokens=False,
                 truncation=False,
                 padding=False,
@@ -621,27 +580,56 @@ class SortishSampler(Sampler[int]):
                 if hasattr(encoded, "input_ids")
                 else encoded["input_ids"]
             )
-            if len(input_ids) != len(pending_contexts):
+            if len(input_ids) != len(contexts):
                 raise ValueError(
                     "tokenizer returned a different number of rows for sortish lengths"
                 )
-            lengths.extend(len(ids) for ids in input_ids)
+            return [len(ids) for ids in input_ids]
+
+        def flush() -> None:
+            if not pending_contexts:
+                return
+            lengths.extend(encode_batch(pending_contexts))
             progress.update(len(pending_contexts))
             pending_contexts.clear()
 
         try:
-            for record in self.dataset:
-                pending_contexts.append(record.context)
-                if len(pending_contexts) >= batch_size:
-                    flush()
-            flush()
+            if num_workers <= 1:
+                for record in self.dataset:
+                    pending_contexts.append(record.context)
+                    if len(pending_contexts) >= batch_size:
+                        flush()
+                flush()
+            else:
+                def batches():
+                    batch = []
+                    for record in self.dataset:
+                        batch.append(record.context)
+                        if len(batch) >= batch_size:
+                            yield batch
+                            batch = []
+                    if batch:
+                        yield batch
+
+                with ProcessPoolExecutor(
+                    max_workers=num_workers,
+                    initializer=_init_sortish_worker,
+                    initargs=(tokenizer,),
+                ) as executor:
+                    for batch_lengths in _bounded_process_map(
+                        executor, _sortish_length_batch, batches(), num_workers * 2
+                    ):
+                        lengths.extend(batch_lengths)
+                        progress.update(len(batch_lengths))
         finally:
             progress.close()
         return lengths
 
-    def _load_or_build_lengths(self, tokenizer, enable_thinking, cache_dir, metadata):
+    def _load_or_build_lengths(
+        self, tokenizer, enable_thinking, cache_dir, metadata, num_workers=0
+    ):
         if cache_dir is None:
-            return self._build_lengths(tokenizer, enable_thinking)
+            return self._build_lengths(tokenizer, enable_thinking, num_workers)
         cache_dir.mkdir(parents=True, exist_ok=True)
         path = cache_dir / f"sortish_lengths-{metadata['fingerprint']}.json"
         with cache_utils.file_lock(path.with_suffix(".lock")):
@@ -658,7 +646,7 @@ class SortishSampler(Sampler[int]):
                         return lengths
                 except (OSError, ValueError, TypeError, json.JSONDecodeError):
                     pass
-            lengths = self._build_lengths(tokenizer, enable_thinking)
+            lengths = self._build_lengths(tokenizer, enable_thinking, num_workers)
             temporary = path.with_suffix(".tmp")
             temporary.write_text(json.dumps({"metadata": metadata, "lengths": lengths}))
             os.replace(temporary, path)

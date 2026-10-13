@@ -14,6 +14,64 @@ from .machines import fill_missing, machine_environ, resolve_machine
 ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 
+def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge nested configuration mappings; scalar and list values are replaced."""
+    merged = dict(base)
+    for key, value in override.items():
+        if (
+            isinstance(merged.get(key), Mapping)
+            and isinstance(value, Mapping)
+        ):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _load_yaml_with_base(path: Path, stack: tuple[Path, ...] = ()) -> dict[str, Any]:
+    """Load YAML and recursively merge the optional relative ``_base_`` config."""
+    path = path.resolve()
+    if path in stack:
+        chain = " -> ".join(str(item) for item in (*stack, path))
+        raise ValueError(f"configuration inheritance cycle: {chain}")
+    raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, Mapping):
+        raise ValueError(f"configuration must be a YAML mapping: {path}")
+    base_spec = raw.pop("_base_", None)
+    if base_spec is None:
+        return dict(raw)
+    base_paths = [base_spec] if isinstance(base_spec, str) else base_spec
+    if not isinstance(base_paths, list) or not all(
+        isinstance(item, str) for item in base_paths
+    ):
+        raise ValueError(f"_base_ must be a path or list of paths: {path}")
+    merged: dict[str, Any] = {}
+    for base in base_paths:
+        base_path = (path.parent / base).resolve()
+        merged = _deep_merge(merged, _load_yaml_with_base(base_path, (*stack, path)))
+    return _deep_merge(merged, raw)
+
+
+def _flatten_data_groups(data: Mapping[str, Any]) -> dict[str, Any]:
+    """Accept grouped YAML data settings while keeping the flat DataConfig API."""
+    flattened: dict[str, Any] = {}
+    for key, value in data.items():
+        if key == "validation_max_samples_per_dataset" and isinstance(value, Mapping):
+            flattened[key] = dict(value)
+            continue
+        if isinstance(value, Mapping):
+            nested = _flatten_data_groups(value)
+            duplicate = set(flattened).intersection(nested)
+            if duplicate:
+                raise ValueError(f"duplicate data fields after grouping: {sorted(duplicate)}")
+            flattened.update(nested)
+        else:
+            if key in flattened:
+                raise ValueError(f"duplicate data field: {key}")
+            flattened[key] = value
+    return flattened
+
+
 def expand_env(value: str, overrides: Mapping[str, str] | None = None) -> str:
     """Expand ``${VAR}`` and ``${VAR:-default}`` references in one configuration string.
 
@@ -156,6 +214,11 @@ class DataConfig:
     max_samples: int | None = None
     train_max_samples: int | None = None
     validation_max_samples: int | None = None
+    validation_source_file: str | None = None
+    validation_output_dir: str | None = None
+    validation_max_context_tokens: int | None = None
+    validation_max_samples_per_dataset: dict[str, int] | None = None
+    validation_sampling_workers: int = 4
     filter_long_context: bool = True
     filter_no_qa: bool = True
     tokenizer_filter_batch_size: int = 2048
@@ -201,7 +264,7 @@ class EvaluationConfig:
     # rather than a per-rank one, so changing the GPU count changes neither the scored rows
     # nor the noise level; per-rank work still shrinks as ranks grow, which is what keeps the
     # evaluation inside the NCCL watchdog timeout (10 minutes).
-    autoregressive_max_qa: int = 1024
+    evaluation_max_samples: int = 1280
 
 
 @dataclass
@@ -269,8 +332,7 @@ class TrainConfig:
             raise ValueError(
                 f"configuration must be a YAML file (.yaml/.yml), got: {path}"
             )
-        text = path.read_text(encoding="utf-8")
-        raw = dict(yaml.safe_load(text) or {})
+        raw = _load_yaml_with_base(path)
         return cls.from_dict(raw, machine=machine)
 
     @classmethod
@@ -286,7 +348,7 @@ class TrainConfig:
             overrides = fill_missing(overrides, os.environ)
         values = expand_env_values(raw, overrides)
         values = dict(values)
-        data_values = dict(values.get("data", {}))
+        data_values = _flatten_data_groups(values.get("data", {}))
         # Conversation files are the only supported training source. Keep the default
         # machine-aware so a legacy YAML without an explicit path still resolves to the
         # current JSONL location.
@@ -488,8 +550,8 @@ class TrainConfig:
             raise ValueError("evaluation.autoregressive_every must be positive")
         if self.evaluation.qa_batch_size <= 0:
             raise ValueError("evaluation.qa_batch_size must be positive")
-        if self.evaluation.autoregressive_max_qa <= 0:
-            raise ValueError("evaluation.autoregressive_max_qa must be positive")
+        if self.evaluation.evaluation_max_samples <= 0:
+            raise ValueError("evaluation.evaluation_max_samples must be positive")
         if self.logging.log_every <= 0:
             raise ValueError("logging.log_every must be positive")
 

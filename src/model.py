@@ -636,16 +636,17 @@ class ContextMemoryModel(nn.Module):
     @torch.no_grad()
     def generate_answers_with_prefix(self, prefix, qa_context_indices, question_ids, question_mask,
                                      tokenizer, max_new_tokens=128, group_by_context=True,
-                                     max_rows_per_group=4):
+                                     max_rows_per_group=4, task_id=TASK_QA):
         with self.lora_enabled(False):
             return self._generate_answers_with_prefix(
                 prefix, qa_context_indices, question_ids, question_mask,
                 tokenizer, max_new_tokens, group_by_context, max_rows_per_group,
+                task_id,
             )
 
     def _generate_answers_with_prefix(self, prefix, qa_context_indices, question_ids, question_mask,
                                       tokenizer, max_new_tokens=128, group_by_context=True,
-                                      max_rows_per_group=4):
+                                      max_rows_per_group=4, task_id=TASK_QA):
         """Greedy decoding for many QA rows that share one context prefix.
 
         Rows belonging to the same context share the same memory KV cache, so they are
@@ -694,7 +695,7 @@ class ContextMemoryModel(nn.Module):
                 columns = torch.arange(width, device=device).unsqueeze(0).expand(count, -1)
                 positions = start + (columns - padding[:, None])
                 positions = torch.where(q_mask, positions, torch.full_like(positions, start)).clamp_(min=0)
-                task = self.task_embeddings[TASK_QA].to(dtype=self.dtype).view(1, 1, -1).expand(count, -1, -1)
+                task = self.task_embeddings[task_id].to(dtype=self.dtype).view(1, 1, -1).expand(count, -1, -1)
                 question = torch.cat([task, embedding(q_ids).to(dtype=self.dtype)], dim=1)
                 task_mask = torch.ones((count, 1), dtype=torch.bool, device=device)
                 q_mask = torch.cat([task_mask, q_mask], dim=1)

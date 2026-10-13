@@ -44,7 +44,7 @@ task embedding 是两个可训练的连续向量（`0=Recon`、`1=QA`），不�
 
 baseline 默认使用 `mix` 训练，其中 QA 和 Recon 各占一半；蒸馏默认关闭。蒸馏开启时会额外运行一次 memory-prefix context pass。
 
-训练与 teacher-forced 验证记录 QA、Recon 和 `distill_loss`；`loss` 使用配置权重求和。
+训练记录 QA、Recon 和 `distill_loss`；`loss` 使用配置权重求和。验证仅通过 autoregressive 生成答案计算指标。
 
 旧 checkpoint 内嵌的旧字段不会自动转换，不能直接用于此版本恢复训练。请保留原代码版本评测历史 checkpoint。
 

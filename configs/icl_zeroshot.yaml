@@ -1,20 +1,20 @@
 model:
-  name: Qwen3-1.7B
-  dtype: bfloat16
+  name: Qwen3-1.7B  # 用于 ICL 评估的模型名称
+  dtype: bfloat16  # 模型权重数据类型
 data:
-  root: ${DATA_ROOT:-/data/lz/contexts/aggregated}
+  root: ${DATA_ROOT:-/data/lz/contexts/aggregated}  # 聚合数据集根目录
   datasets:
-  - squad
-  split: validation
-  demo_split: train
-  max_samples: null
-  max_contexts: null
-  max_context_tokens: null
+  - squad  # 参与评估的数据集名称
+  split: validation  # 评估数据集划分
+  demo_split: train  # few-shot 示例的数据划分
+  max_samples: null  # 最大评估样本数，null 表示不限制
+  max_contexts: null  # 最大 context 数，null 表示不限制
+  max_context_tokens: null  # 覆盖 context token 上限
 inference:
-  batch_size: 2
-  num_shots: 0
-  max_input_tokens: 8192
-  max_new_tokens: 32
-  seed: 42
-  num_workers: 0
-output_dir: null
+  batch_size: 2  # 推理批大小
+  num_shots: 0  # 每个问题使用的示例数
+  max_input_tokens: 8192  # 模型输入最大 token 数
+  max_new_tokens: 32  # 生成 token 上限
+  seed: 42  # 随机种子
+  num_workers: 0  # 数据加载 worker 数
+output_dir: null  # 结果输出目录，null 时使用程序默认值

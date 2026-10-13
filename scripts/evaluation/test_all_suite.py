@@ -132,15 +132,8 @@ def main(argv=None):
         default="outputs/eval_ab_reader",
         help="Root directory; each checkpoint is written under <output-dir>/<checkpoint-stem>",
     )
-    parser.add_argument(
-        "--teacher-forced",
-        action="store_true",
-        help="Also run teacher-forced diagnostics for every checkpoint (disabled by default)",
-    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
-    if args.system_prompt_mode == "context" and args.teacher_forced:
-        parser.error("context prompt mode supports autoregressive evaluation only")
     if bool(args.checkpoints) == bool(args.ckpt_dir):
         parser.error("provide exactly one of --checkpoint/--ckpt or --ckpt-dir")
     checkpoints = (
@@ -205,8 +198,6 @@ def main(argv=None):
                 "--report-file",
                 str(report_path),
             ]
-            if args.teacher_forced:
-                command += ["--teacher-forced"]
             if not args.dry_run:
                 report_path.unlink(missing_ok=True)
             status = run(label, command, args.dry_run)

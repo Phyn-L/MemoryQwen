@@ -1,5 +1,25 @@
 # 评测协议与指标
 
+## 当前实现（2026-10-13）
+
+训练 validation 和独立 eval 均只运行 autoregressive 自由生成，使用 QA task embedding。
+`Evaluator.teacher_forced`、`include_teacher_metrics`、`--teacher-forced` 和
+`val_teacher_forced/*` 日志已删除。标准答案只用于生成后的指标计算，不作为生成输入。
+
+评估报告包含 `autoregressive`，记录 EM、F1、ROUGE-L、`first_token_em`、
+各数据集指标，以及适用时的 RACE accuracy。训练中的 QA、Recon、distill loss
+单独记录在 `loss/*`，评估不再计算 TF loss 或 perplexity。
+
+`evaluation.autoregressive_every` 控制训练中的评估频率，
+`evaluation.evaluation_max_samples` 控制全局评估 QA 数，
+`evaluation.max_new_tokens` 控制每个答案的生成上限。
+相关入口为 `scripts/train.py`、`scripts/test.py` 和
+`scripts/evaluation/test_all_suite.py`。
+
+## 历史协议（以下保留作实验记录）
+
+下文描述旧版 TF/AR 评估及旧聚合数据格式，不代表当前执行路径。
+
 当前实现入口：[evaluator](../../src/evaluator.py)、[metrics](../../src/metrics.py)、[data](../../src/data.py)。2026-09-18 整理；下列样例分数、数据集行数是原 README 的历史快照，不是本次重新测量。正式比较时记录数据指纹、过滤规则、checkpoint、解码预算和实际 QA 数。
 
 当前默认 `question_padding_side=left`、`eos_mode=append`；旧模式只用于复现实验。修复过程及回归示例见[历史记录](../history/ENGINEERING.md#readme-target-format-history)。主指标使用自由生成的 AR EM/F1；TF 用作诊断。数据过滤仍会影响 SQuAD v2 无答案行，不能将有答案子集得分解释为完整 SQuAD 2.0 成绩。

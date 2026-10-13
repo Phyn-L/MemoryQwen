@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import yaml
 from pathlib import Path
 from utils.config_paths import resolve_config_path
@@ -66,16 +67,11 @@ def main():
     )
     parser.add_argument(
         "--qa-batch-size", type=int,
-        help="QA rows per autoregressive generation group and per teacher-forced loss chunk.",
+        help="QA rows per autoregressive generation group.",
     )
     parser.add_argument(
         "--allow-missing-trainable", action="store_true",
         help="Load a checkpoint that does not cover every trainable tensor instead of failing.",
-    )
-    parser.add_argument(
-        "--teacher-forced",
-        action="store_true",
-        help="Also run the slower teacher-forced diagnostic pass (disabled by default).",
     )
     bootstrap = argparse.ArgumentParser(add_help=False)
     bootstrap.add_argument("--config")
@@ -86,7 +82,7 @@ def main():
             if set(raw) - {'test', 'machine'}:
                 parser.error("Test YAML supports only test and machine sections")
             allowed = {'split', 'batch_size', 'qa_batch_size', 'max_new_tokens',
-                       'max_samples', 'teacher_forced'}
+                       'max_samples'}
             if not isinstance(raw['test'], dict) or set(raw['test']) - allowed:
                 parser.error("Unknown test YAML fields")
             parser.set_defaults(**raw['test'], machine=raw.get('machine'))
@@ -134,6 +130,8 @@ def main():
         accelerator = Accelerator(gradient_accumulation_steps=1, mixed_precision="no")
         device = accelerator.device
     except ImportError:
+        if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+            raise RuntimeError("Multi-GPU evaluation requires accelerate")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer, model = load_model(cfg)
     CheckpointManager(cfg.checkpoint.output_dir).load(
@@ -154,6 +152,7 @@ def main():
         pin_memory=cfg.data.pin_memory,
         persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
     )
+    row_loader = loader
     if accelerator is not None:
         loader = accelerator.prepare(loader)
     is_main = accelerator is None or accelerator.is_main_process
@@ -171,36 +170,27 @@ def main():
               f"max_new_tokens={cfg.evaluation.max_new_tokens} "
               f"batches/rank={len(loader)} ranks={ranks}")
     evaluator = Evaluator(tokenizer, cfg)
-    # Autoregressive is the default and headline result. Teacher forcing feeds the answer
-    # prefix back in, so its em/f1 mostly rewards lexical continuation; it is an optional
-    # diagnostic enabled explicitly with --teacher-forced. Every rank follows the same branch
-    # because both evaluator methods contain distributed collectives.
     import time
 
     started = time.time()
     if is_main:
         print("[eval] autoregressive pass (headline) ...", flush=True)
-    autoregressive = evaluator.autoregressive(model, loader, device, include_teacher_metrics=False)
+    task_metrics = evaluator.compare_task_embeddings(
+        model,
+        loader,
+        device,
+        max_qa=cfg.evaluation.evaluation_max_samples,
+        row_loader=row_loader,
+    )
     if is_main:
         print(f"[eval] autoregressive done in {time.time() - started:.1f}s", flush=True)
-    teacher_forced = None
-    if args.teacher_forced:
-        started = time.time()
-        if is_main:
-            print("[eval] teacher-forced pass (diagnostic) ...", flush=True)
-        teacher_forced = evaluator.teacher_forced(model, loader, device)
-        if is_main:
-            print(f"[eval] teacher-forced done in {time.time() - started:.1f}s", flush=True)
     if is_main:
-        print("autoregressive (headline):", autoregressive)
-        if teacher_forced is not None:
-            print("teacher-forced (diagnostic only):", teacher_forced)
+        print("autoregressive by task embedding:", task_metrics)
     if is_main:
         report = {"checkpoint": str(checkpoint_path), "split": args.split,
                   "conversation_file": getattr(cfg.data, f"{args.split}_conversation_file", None)
                   or cfg.data.conversation_file,
-                  "config": cfg.to_dict(), "autoregressive": autoregressive,
-                  "teacher_forced": teacher_forced}
+                  "config": cfg.to_dict(), **task_metrics}
         if args.report_file:
             report_path = Path(args.report_file)
             report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -213,6 +203,8 @@ def main():
         print(f"results: {report_path}")
     if accelerator is not None:
         accelerator.wait_for_everyone()
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":

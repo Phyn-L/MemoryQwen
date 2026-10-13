@@ -75,7 +75,7 @@ def test_the_loop_takes_its_cadences_from_the_config():
     assert "step % 10 == 0" not in source, "the loss-logging cadence must come from the config"
     assert source.count("should_evaluate(") >= 2, "autoregressive evaluation must use the final-step rule"
     assert "teacher_metrics = evaluator.teacher_forced" not in source
-    assert "include_teacher_metrics=False" in source
+    assert "include_teacher_metrics" not in source
 
 
 def test_the_loop_echoes_the_resolved_schedule():
@@ -127,6 +127,29 @@ def test_the_scheduler_is_not_wrapped_by_accelerate():
     )
     assert source.count("scheduler.step()") == 1, "the loop owns the single scheduler step"
     assert '"train/lr"' in source, "the LR must be logged, or a distorted schedule is invisible"
+
+
+def test_training_metrics_include_ppl_grad_norm_and_mfu():
+    source = _train_source()
+    assert '"loss/ppl"' in source
+    assert '"loss/qa_ppl"' in source
+    assert '"loss/recon_ppl"' in source
+    assert '"grad_norm/total"' in source
+    assert '"train/MFU"' in source
+
+
+def test_training_payload_groups_data_probabilities_and_drops_row_throughput_metrics():
+    source = _train_source()
+    assert '"data/qa_probability"' in source
+    assert '"data/recon_probability"' in source
+    for removed in (
+        '"train/qa_rows"',
+        '"train/recon_rows"',
+        '"train/step_seconds"',
+        '"train/supervised_tokens_per_second"',
+        '"train/model_tokens_per_second"',
+    ):
+        assert removed not in source
 
 
 if __name__ == "__main__":

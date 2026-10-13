@@ -1,0 +1,153 @@
+checkpoint:
+  output_dir: outputs  # 检查点与日志的输出目录
+data:
+  # 数据文件路径
+  files:
+    # 聚合数据集根目录
+    root: ${DATA_ROOT:-/data/lz/contexts/aggregated}
+    # 默认训练、验证和测试共用的会话 JSONL 文件
+    conversation_file: data/1qa/1qa-train.jsonl
+    train_conversation_file: data/1qa/1qa-train.jsonl
+    validation_conversation_file: data/1qa/1qa-val/1qa-val.jsonl
+  # 样本筛选与缓存
+  filtering:
+    # 是否缓存数据文件的字节偏移
+    cache_offsets: true
+    # 是否缓存用于 sortish batching 的长度
+    cache_sortish_lengths: true
+    # 是否在聊天模板中启用思考模式
+    chat_template_enable_thinking: false
+    # 是否过滤超过 context 上限的样本
+    filter_long_context: true
+    # 是否过滤没有问答内容的样本
+    filter_no_qa: true
+    # tokenizer 批量筛选的批大小
+    tokenizer_filter_batch_size: 2048
+  # 输入长度上限
+  limits:
+    # context 编码的最大 token 数
+    max_context_tokens: 1536
+    # 模型输入窗口的最大 token 数
+    max_input_tokens: 40960
+    # 单个问题的最大 token 数
+    max_question_tokens: 96
+    # 单个答案的最大 token 数
+    max_answer_tokens: 64
+    # 单条会话中问答内容的最大 token 数
+    max_conversation_tokens: 768
+  # DataLoader 设置
+  loader:
+    # 数据加载 worker 数量
+    num_workers: 8
+    # 是否将 batch 放入 pinned memory
+    pin_memory: true
+    # worker 进程是否跨 epoch 保留
+    persistent_workers: true
+  # 训练任务与采样
+  task:
+    # 训练任务类型：mix、qa 或 recon
+    train_tasks: mix
+    # 混合训练中 reconstruction 任务的比例
+    recon_ratio: 0.5
+    # reconstruction 比例调度方式
+    recon_schedule: constant
+    # 比例调度曲线
+    recon_schedule_curve: linear
+    # 调度起始 reconstruction 比例
+    recon_ratio_start: 0.5
+    # 调度结束 reconstruction 比例
+    recon_ratio_end: 0.5
+    # reconstruction 比例下限
+    recon_ratio_min: 0.1
+    # 每个 context 采样的 QA 数量
+    qa_per_context: 4
+    # sortish bucket 相对 batch size 的倍数
+    sortish_bucket_multiplier: 50
+    # 训练数据集，all 表示使用全部数据集
+    train_datasets: all
+    # 训练样本数上限，null 表示不限制
+    train_max_samples: null
+    # 验证样本数上限，null 表示不限制
+    validation_max_samples: 1280
+    validation_source_file: data/1qa/1qa-validation.jsonl
+    validation_datasets: [squad, msmarcov1.1, msmarcov2.1, hotpotqa(distractor), race]
+    validation_max_context_tokens: 1536
+    validation_sampling_workers: 16
+    validation_max_samples_per_dataset:
+      squad: 256
+      msmarcov1.1: 256
+      msmarcov2.1: 256
+      hotpotqa(distractor): 256
+      race: 256
+evaluation:
+  autoregressive_every: 5000  # 自回归验证的训练步间隔
+  evaluation_max_samples: 1280  # 自回归评估的全局 validation QA 条数
+  max_new_tokens: 64  # 自回归验证生成 token 上限
+  qa_batch_size: 2  # QA 验证批大小
+logging:
+  swanlab_run_name: null # Optional; defaults to model name + timestamp.
+  log_every: 100  # 训练日志记录间隔（步）
+  swanlab_mode: online  # SwanLab 运行模式
+  swanlab_project: MemoryQwen  # SwanLab 项目名称
+memory:
+  # Fixed-length context writer
+  memory_length: 64  # 写入固定 memory 的 slot 数
+  context_layer_indices: [-1]  # 用于构造 context 表示的 Transformer 层索引
+  memory_resampler_layers: 2  # memory resampler 层数
+  memory_resampler_heads: 4  # memory resampler 注意力头数
+  memory_resampler_hidden_size: 256  # memory resampler 隐藏维度
+  memory_resampler_ffn_ratio: 2  # memory resampler 前馈层扩展倍数
+  memory_resampler_output_mode: layer0  # memory resampler 输出模式
+  reader_memory_source: memory_hidden  # reader 使用的 memory 表示来源
+
+  # Question-conditioned readout
+  # readout 工作模式：memory_question、memory_only、learned_prefix 或 off
+  readout_mode: memory_question
+  readout_length: 0  # 问题条件化 readout token 数，0 表示关闭
+  readout_hidden_size: 256  # readout 隐藏维度
+  readout_layers: 2  # readout 层数
+  readout_heads: 4  # readout 注意力头数
+
+  # Reconstruction decoder and vocabulary head
+
+  # QA objective
+  qa_weight: 1.0  # 问答目标损失权重
+  recon_weight: 1.0  # 重建目标损失权重
+
+  # Token reconstruction
+
+  distill_weight: 0.0  # 蒸馏目标损失权重，0 表示关闭
+  distill_positions: 128  # 每条序列参与蒸馏的位置数，0 表示全部位置
+  distill_temperature: 1.0  # 蒸馏 softmax 温度
+  distill_topk: 0  # 蒸馏教师分布保留的 top-k，0 表示完整分布
+  distill_entropy_weight: true  # 是否按教师分布熵加权蒸馏位置
+model:
+  attn_implementation: sdpa  # 注意力实现
+  context_gradient_checkpointing: true  # 是否对 context 前向启用梯度检查点
+  lora_alpha: 16.0  # LoRA 缩放系数
+  lora_dropout: 0.0  # LoRA dropout 概率
+  lora_rank: 8  # LoRA 秩
+  name_or_path: ${MODEL_ROOT:-/data/lz/hf_cache/hub}/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e  # 预训练模型路径或名称
+  target_modules:  # 注入 LoRA 的模块名称
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+  torch_dtype: bfloat16  # 冻结骨干模型的数据类型
+  trainable_dtype: float32  # 可训练参数的数据类型
+optimizer:
+  lr: 0.0001  # 学习率
+  name: adamw  # 优化器或调度器名称
+  weight_decay: 0.01  # 权重衰减系数
+scheduler:
+  name: cosine  # 优化器或调度器名称
+  warmup_steps: 5000  # 学习率预热步数
+training:
+  batch_size: 16  # 每个进程的训练批大小
+  epochs: 1  # 训练轮数
+  max_grad_norm: 1.0  # 梯度裁剪最大范数
+  seed: 42  # 随机种子
+  deterministic: True  # 是否启用确定性算法

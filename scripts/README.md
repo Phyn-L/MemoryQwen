@@ -22,7 +22,7 @@ bash scripts/evaluation/test_all_suite.sh --checkpoint outputs/run/last.pt --dat
 bash scripts/evaluation/test_all_suite.sh --ckpt-dir outputs/checkpoints --datasets ms_marco_v1 ms_marco_v2 --output-dir outputs/eval_ab_reader
 ```
 
-`--output-dir` 只指定根目录（默认 `outputs/eval_ab_reader`），脚本根据 checkpoint 文件名自动创建子目录。例如 `base.pt` 的报告直接位于 `outputs/eval_ab_reader/base/squad.json`、`base/msmarcov1.json`、`base/msmarcov2.json`。checkpoint 目录只保留数据集 JSON，不创建数据集子目录、日志文件或 manifest。评测默认只运行 autoregressive；需要 teacher-forced 诊断时显式添加 `--teacher-forced`。全部 checkpoint 完成后，根目录的 `summary.csv` 按 checkpoint 汇总各数据集的 AR EM/F1/ROUGE-L 百分数（两位小数）。子进程输出直接显示在终端，因此 tqdm 进度条仍然可见。底层 `python -m utils.launcher test` 也支持 `--output-dir`。
+`--output-dir` 只指定根目录（默认 `outputs/eval_ab_reader`），脚本根据 checkpoint 文件名自动创建子目录。例如 `base.pt` 的报告直接位于 `outputs/eval_ab_reader/base/squad.json`、`base/msmarcov1.json`、`base/msmarcov2.json`。checkpoint 目录只保留数据集 JSON，不创建数据集子目录、日志文件或 manifest。评测只运行 autoregressive 自由生成。全部 checkpoint 完成后，根目录的 `summary.csv` 按 checkpoint 汇总各数据集的 AR EM/F1/ROUGE-L 百分数（两位小数）。子进程输出直接显示在终端，因此 tqdm 进度条仍然可见。底层 `python -m utils.launcher test` 也支持 `--output-dir`。
 
 ## Zero-shot ICL
 
