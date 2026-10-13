@@ -95,10 +95,15 @@ def eval_log_payloads(task_metrics=None):
         for key, value in metrics.items():
             if key in ANSWER_METRIC_KEYS:
                 payload[f"{section}/{key}"] = value
-            elif key.startswith("dataset/") and key.rsplit("/", 1)[-1] in {*METRIC_KEYS, "count"}:
+            elif key.startswith("dataset/") and key.rsplit("/", 1)[-1] in {
+                *METRIC_KEYS,
+                "count",
+            }:
                 dataset, metric = key.removeprefix("dataset/").rsplit("/", 1)
                 dataset = dataset.replace("/", "_").replace("(", "_").replace(")", "")
-                metric = {"em": "EM", "f1": "F1", "rouge_l": "ROUGE-L"}.get(metric, metric)
+                metric = {"em": "EM", "f1": "F1", "rouge_l": "ROUGE-L"}.get(
+                    metric, metric
+                )
                 payload[f"{section}/{dataset}_{metric}"] = value
     return [payload] if payload else []
 
@@ -186,7 +191,7 @@ def main() -> None:
             raise RuntimeError("Multi-GPU training requires accelerate")
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    data_dir = Path(__file__).resolve().parents[1] / "data" / "1qa"
+    data_dir = Path(__file__).resolve().parents[1] / "contexts" / "1qa"
     validation_source = Path(
         cfg.data.validation_source_file or data_dir / "1qa-validation.jsonl"
     )
@@ -201,8 +206,13 @@ def main() -> None:
         dataset: default_per_dataset for dataset in datasets
     }
     if not sample_limits:
-        sample_limits = {"squad": 256, "msmarcov1.1": 256, "msmarcov2.1": 256,
-                         "hotpotqa(distractor)": 256, "race": 256}
+        sample_limits = {
+            "squad": 256,
+            "msmarcov1.1": 256,
+            "msmarcov2.1": 256,
+            "hotpotqa(distractor)": 256,
+            "race": 256,
+        }
     validation_context_limit = cfg.data.validation_max_context_tokens
     if validation_context_limit:
         cfg.data.max_context_tokens = validation_context_limit
@@ -509,9 +519,15 @@ def main() -> None:
                     "loss/recon": float(terms["recon_loss"].detach()),
                     "loss/distill": float(terms["distill_loss"].detach()),
                     "train/lr": float(scheduler.get_last_lr()[0]),
-                    "loss/ppl": float(torch.exp(terms["qa_loss"].detach().float().clamp(max=20))),
-                    "loss/qa_ppl": float(torch.exp(terms["qa_loss"].detach().float().clamp(max=20))),
-                    "loss/recon_ppl": float(torch.exp(terms["recon_loss"].detach().float().clamp(max=20))),
+                    "loss/ppl": float(
+                        torch.exp(terms["qa_loss"].detach().float().clamp(max=20))
+                    ),
+                    "loss/qa_ppl": float(
+                        torch.exp(terms["qa_loss"].detach().float().clamp(max=20))
+                    ),
+                    "loss/recon_ppl": float(
+                        torch.exp(terms["recon_loss"].detach().float().clamp(max=20))
+                    ),
                     "grad_norm/total": float(step_grad_norm.detach()),
                     "grad_norm/resampler": float(resampler_grad_norm),
                     "grad_norm/metalora": float(metalora_grad_norm),
