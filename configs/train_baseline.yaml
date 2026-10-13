@@ -6,9 +6,9 @@ data:
     # 聚合数据集根目录
     root: ${DATA_ROOT:-/data/lz/contexts/aggregated}
     # 默认训练、验证和测试共用的会话 JSONL 文件
-    conversation_file: data/1qa/1qa-train.jsonl
-    train_conversation_file: data/1qa/1qa-train.jsonl
-    validation_conversation_file: data/1qa/1qa-val/1qa-val.jsonl
+    conversation_file: contexts/1qa/1qa-train.jsonl
+    train_conversation_file: contexts/1qa/1qa-train.jsonl
+    validation_conversation_file: contexts/1qa/1qa-val/1qa-val.jsonl
   # 样本筛选与缓存
   filtering:
     # 是否缓存数据文件的字节偏移
@@ -69,7 +69,7 @@ data:
     train_max_samples: null
     # 验证样本数上限，null 表示不限制
     validation_max_samples: 1280
-    validation_source_file: data/1qa/1qa-validation.jsonl
+    validation_source_file: contexts/1qa/1qa-validation.jsonl
     validation_datasets: [squad, msmarcov1.1, msmarcov2.1, hotpotqa(distractor), race]
     validation_max_context_tokens: 1536
     validation_sampling_workers: 4
