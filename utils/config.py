@@ -285,7 +285,7 @@ class CheckpointConfig:
 @dataclass
 class LoggingConfig:
     aim_project: str = "MemoryQwen"
-    # Shared local Aim repository. ``AIM_REPO`` can override this at launch time.
+    # Optional override of the machine's Aim repository; ``AIM_REPO`` wins at launch.
     aim_repo_path: str | None = None
     # Run name and checkpoint subdirectory; empty means model name + timestamp.
     aim_run_name: str | None = None

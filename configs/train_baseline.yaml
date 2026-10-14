@@ -60,7 +60,7 @@ evaluation:
   qa_batch_size: 4  # QA 验证批大小
 logging:
   aim_run_name: null # Optional; defaults to model name + timestamp.
-  aim_repo_path: /data/lz/MemoryQwen/.aim # Shared Aim repository for cross-run comparison.
+  aim_repo_path: null # Defaults to the selected machine's Aim repository.
   log_every: 100  # 训练日志记录间隔（步）
   aim_project: MemoryQwen  # Aim 项目名称
 memory:

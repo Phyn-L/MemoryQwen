@@ -62,6 +62,14 @@ def row_window(total: int, rank: int, world_size: int) -> tuple[int, int]:
     return start, min(int(total), start + per_rank)
 
 
+def _window_batch_count(window: tuple[int, int], batch_size: int | None) -> int | None:
+    """Number of batches intersecting a contiguous row window."""
+    if batch_size is None or batch_size <= 0:
+        return None
+    start, end = window
+    return max(0, -(-end // batch_size) - start // batch_size)
+
+
 class Evaluator:
     def __init__(self, tokenizer, cfg):
         self.tokenizer, self.cfg = tokenizer, cfg
@@ -166,15 +174,20 @@ class Evaluator:
         desc = f"Validation (autoregressive, {task_name} task)"
         if world > 1:
             desc += f" [rank {rank}/{world}]"
+        if window[1] is None:
+            local_batch_count = len(row_source)
+        else:
+            local_batch_count = _window_batch_count(
+                window, getattr(row_source, "batch_size", None)
+            )
         progress = tqdm(
-            row_source,
-            total=len(row_source),
+            total=local_batch_count,
             desc=desc,
             unit="batch",
             disable=not enabled,
             leave=True,
         )
-        for batch in progress:
+        for batch in row_source:
             rows = _batch_value(batch, "input_ids", "question_ids").size(0)
             batch_start, batch_end = cursor, cursor + rows
             cursor = batch_end
@@ -247,6 +260,7 @@ class Evaluator:
                     race_correct += int(predicted_letter == record.answer_letter)
                     race_count += 1
                 samples += 1
+            progress.update(1)
             progress.set_postfix({"qa_rows": samples}, refresh=False)
             if window[1] is not None and cursor >= window[1]:
                 break

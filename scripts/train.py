@@ -11,7 +11,8 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from utils.config import TrainConfig, dtype_from_name
-from utils.machines import machine_names
+from utils.eval_monitor import EvalResourceMonitor
+from utils.machines import machine_names, resolve_aim_repo_path
 from src.data import SortishSampler
 from src.evaluator import Evaluator
 from src.losses import objective_total, scheduled_task_weights, supervision_objectives
@@ -371,12 +372,9 @@ def main() -> None:
         try:
             from aim import Run
 
-            # Aim stores runs in a local repository.  Set AIM_REPO to share one
-            # repository with ``aim up``; otherwise use the configured output root.
-            aim_repo = os.environ.get(
-                "AIM_REPO",
-                cfg.logging.aim_repo_path
-                or str(Path(cfg.checkpoint.output_dir) / ".aim"),
+            # Launch override, explicit config, selected machine, then output root.
+            aim_repo = resolve_aim_repo_path(
+                cfg.machine, cfg.logging.aim_repo_path, cfg.checkpoint.output_dir
             )
             run_kwargs = {
                 "repo": aim_repo,
@@ -558,14 +556,17 @@ def main() -> None:
                         f"max_new_tokens={cfg.evaluation.max_new_tokens})",
                         flush=True,
                     )
-                metrics = evaluator.compare_reader_tasks(
-                    base_model,
-                    validation_loader,
-                    device,
-                    max_qa=cfg.evaluation.evaluation_max_samples,
-                    row_loader=validation_row_loader,
-                    include_recon=False,
-                )
+                with EvalResourceMonitor(
+                    cfg.checkpoint.output_dir, step=step, device=device
+                ):
+                    metrics = evaluator.compare_reader_tasks(
+                        base_model,
+                        validation_loader,
+                        device,
+                        max_qa=cfg.evaluation.evaluation_max_samples,
+                        row_loader=validation_row_loader,
+                        include_recon=False,
+                    )
                 if is_main:
                     print(f"[eval] step={step}: QA validation complete", flush=True)
             if run and is_main:

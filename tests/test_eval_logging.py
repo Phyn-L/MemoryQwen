@@ -42,6 +42,15 @@ def test_evaluation_does_not_log_losses_or_empty_results():
     ]
 
 
+def test_window_progress_total_counts_only_batches_intersecting_rank_rows():
+    from src.evaluator import _window_batch_count, row_window
+
+    assert _window_batch_count(row_window(1280, 0, 8), 24) == 7
+    assert _window_batch_count(row_window(1280, 1, 8), 24) == 8
+    assert _window_batch_count(row_window(1280, 7, 8), 24) == 8
+    assert _window_batch_count((0, 160), None) is None
+
+
 def test_evaluator_has_no_teacher_forced_path():
     from src.evaluator import Evaluator
     import inspect
