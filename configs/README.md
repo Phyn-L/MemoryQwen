@@ -9,7 +9,7 @@
 
 ## 运行名称
 
-通过 `logging.wandb_run_name: my_experiment` 显式指定运行名称，同时用于 W&B
+通过 `logging.aim_run_name: my_experiment` 显式指定运行名称，同时用于 Aim
 和 checkpoint 子目录：`<checkpoint.output_dir>/my_experiment/`。
 省略该字段、设为 `null` 或空字符串时，自动使用模型名和时间，例如
 `Qwen1.7B_20260922_153000`。显式名称应使用单个目录名；相同名称会复用同一路径。
@@ -37,8 +37,8 @@ data:
   recon_ratio_min: 0.1
 ```
 
-`mix` 为每个 context 同时生成一条 QA 行和一条 Recon 行，比例调度只改变损失权重。Recon reader 使用 `task_embeddings[0]` 和 memory prefix 预测 context；QA 使用 `task_embeddings[1]`、memory 和 conversation 消息，并应用模型原生 chat template。
-task embedding 是两个可训练的连续向量（`0=Recon`、`1=QA`），不新增 tokenizer special token，也不改变词表。需要先做 Recon
+`mix` 为每个 context 同时生成一条 QA 行和一条 Recon 行，比例调度只改变损失权重。Recon reader 使用 `recon_task_embedding` 和 memory prefix 预测 context；QA 使用 memory 和 conversation 消息，并应用模型原生 chat template。
+task embedding 只有一个可训练的 Recon 连续向量，不新增 tokenizer special token，也不改变词表。需要先做 Recon
 再做 QA 时，把第一阶段 checkpoint 传给 `scripts/train.py --init-from`，第二阶段设
 `train_tasks: qa`。
 

@@ -1,6 +1,6 @@
 """Absolute positions of task, QA, readout, and answer tokens behind memory.
 
-The training/evaluation path (:meth:`ContextMemoryModel.forward_qa_with_prefix`) and the generation
+The training/evaluation path (:meth:`ContextMemoryModel.forward_with_memory_prefix`) and the generation
 path (:meth:`ContextMemoryModel.generate_answers_with_prefix`) must number the *same* tokens the same
 way, otherwise the memory-to-question distance the model sees while learning is not the one
 it sees while answering -- and RoPE attention depends on exactly that distance.
@@ -117,7 +117,7 @@ def _train_positions(model: ContextMemoryModel, prefix):
     answer_ids = torch.randint(2, VOCAB, (QUESTION_IDS.size(0), ANSWER_LENGTH))
     answer_mask = torch.ones_like(answer_ids, dtype=torch.bool)
     seen = _record_positions(model)
-    model.forward_qa_with_prefix(
+    model.forward_with_memory_prefix(
         prefix,
         torch.zeros(QUESTION_IDS.size(0), dtype=torch.long),
         embedding(QUESTION_IDS),
@@ -151,13 +151,13 @@ def test_training_ignores_left_padding_when_numbering_the_question():
     prefix = _prefix(model)
     train = _train_positions(model, prefix)[0]
 
-    # Each row starts with the task embedding; question tokens follow it, ignoring left padding.
-    assert train[0, :5].tolist() == [START, START + 1, START + 1, START + 1, START + 2], train[0].tolist()
-    assert train[1, :5].tolist() == [START, START + 1, START + 2, START + 3, START + 4], train[1].tolist()
+    # QA has no task embedding; real question tokens ignore left padding.
+    assert train[0, :4].tolist() == [START, START, START, START + 1], train[0].tolist()
+    assert train[1, :4].tolist() == [START, START + 1, START + 2, START + 3], train[1].tolist()
     # The answer starts right after the row's own question, not after the padded width.
-    assert train[0, 5].item() == START + 3, train[0].tolist()
-    assert train[1, 5].item() == START + 5, train[1].tolist()
-    assert train[0, 5:].tolist() == [START + 3, START + 4, START + 5]
+    assert train[0, 4].item() == START + 2, train[0].tolist()
+    assert train[1, 4].item() == START + 4, train[1].tolist()
+    assert train[0, 4:].tolist() == [START + 2, START + 3, START + 4]
 
 
 def test_generation_prefills_the_same_positions_as_training():
@@ -169,9 +169,9 @@ def test_generation_prefills_the_same_positions_as_training():
     generation = _generation_positions(model, prefix)
 
     prefill = generation[0]
-    assert prefill.shape == (2, 5)
-    assert torch.equal(prefill, train[:, :5]), (
-        f"generation prefilled {prefill.tolist()} but training supervised {train[:, :5].tolist()}"
+    assert prefill.shape == (2, 4)
+    assert torch.equal(prefill, train[:, :4]), (
+        f"generation prefilled {prefill.tolist()} but training supervised {train[:, :4].tolist()}"
     )
 
 
@@ -187,9 +187,9 @@ def test_the_first_generated_token_sits_where_training_supervised_it():
     assert len(generation) >= 2, "the generation path should decode at least one token"
     first_decoded = generation[1]
     assert first_decoded.shape == (2, 1)
-    assert first_decoded.flatten().tolist() == train[:, 5].tolist(), (
+    assert first_decoded.flatten().tolist() == train[:, 4].tolist(), (
         f"first decoded positions {first_decoded.flatten().tolist()} != supervised "
-        f"first answer positions {train[:, 5].tolist()}"
+        f"first answer positions {train[:, 4].tolist()}"
     )
 
 
@@ -200,15 +200,15 @@ def test_the_readout_and_the_answer_follow_the_real_question_length():
     prefix = _prefix(model)
     train = _train_positions(model, prefix)[0]
 
-    readout = train[:, 5:13]
-    assert readout[0].tolist() == list(range(START + 3, START + 11)), readout[0].tolist()
-    assert readout[1].tolist() == list(range(START + 5, START + 13)), readout[1].tolist()
-    assert train[0, 13].item() == START + 3 + 8
-    assert train[1, 13].item() == START + 5 + 8
-    assert train[0, 13:].tolist() == [START + 11, START + 12, START + 13]
+    readout = train[:, 4:12]
+    assert readout[0].tolist() == list(range(START + 2, START + 10)), readout[0].tolist()
+    assert readout[1].tolist() == list(range(START + 4, START + 12)), readout[1].tolist()
+    assert train[0, 12].item() == START + 2 + 8
+    assert train[1, 12].item() == START + 4 + 8
+    assert train[0, 12:].tolist() == [START + 10, START + 11, START + 12]
 
     generation = _generation_positions(model, prefix)
-    assert torch.equal(generation[0][:, :13], train[:, :13])
+    assert torch.equal(generation[0][:, :12], train[:, :12])
 
 
 if __name__ == "__main__":

@@ -48,7 +48,7 @@ def _row(context, assistant=True):
     return {"context": context, "conversations": messages}
 
 
-def test_conversation_offsets_are_cached_and_invalidated(tmp_path: Path):
+def test_filtered_conversation_dataset_is_cached_and_invalidated(tmp_path: Path):
     source = tmp_path / "conversation.jsonl"
     source.write_text(
         "\n".join(json.dumps(row) for row in [_row("one two"), _row("three", False)]) + "\n",
@@ -64,7 +64,7 @@ def test_conversation_offsets_are_cached_and_invalidated(tmp_path: Path):
         max_input_tokens=8,
         cache_dir=cache,
     )
-    files_after_first = sorted(cache.glob("conversation_offsets-*.json"))
+    files_after_first = sorted(cache.glob("conversation_filtered-*.jsonl"))
     assert len(first) == 1
     assert len(files_after_first) == 1
 
@@ -76,7 +76,7 @@ def test_conversation_offsets_are_cached_and_invalidated(tmp_path: Path):
         cache_dir=cache,
     )
     assert len(second) == len(first)
-    assert sorted(cache.glob("conversation_offsets-*.json")) == files_after_first
+    assert sorted(cache.glob("conversation_filtered-*.jsonl")) == files_after_first
 
     source.write_text(
         source.read_text(encoding="utf-8") + json.dumps(_row("four five six")) + "\n",
@@ -90,7 +90,7 @@ def test_conversation_offsets_are_cached_and_invalidated(tmp_path: Path):
         cache_dir=cache,
     )
     assert len(third) == 2
-    assert len(list(cache.glob("conversation_offsets-*.json"))) == 2
+    assert len(list(cache.glob("conversation_filtered-*.jsonl"))) == 2
 
 
 def test_batched_tokenizer_filter_respects_max_samples(tmp_path: Path):

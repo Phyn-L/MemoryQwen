@@ -62,7 +62,7 @@ def test_expansion_walks_nested_structures():
         os.environ.pop("MEMORYQWEN_TEST_ROOT")
 
 
-MACHINE_VARIABLES = ("MACHINE", "MODEL_ROOT", "DATA_ROOT", "WANDB_MODE")
+MACHINE_VARIABLES = ("MACHINE", "MODEL_ROOT", "DATA_ROOT")
 
 
 def _without_machine_variables():
@@ -100,14 +100,12 @@ def test_cloud_defaults_resolve_without_any_environment():
             cfg.validate()
             assert cfg.model.name_or_path.startswith("/data/lz/hf_cache/hub/models--Qwen--"), config
             assert cfg.data.root == "/data/lz/contexts/aggregated", config
-            assert cfg.logging.wandb_mode == "online", config
 
 
 def test_the_same_config_files_resolve_to_another_machine():
     """The exact H200 override, applied to every shipped config."""
     os.environ["MODEL_ROOT"] = "/home/lijie/proj2/xmu/lz"
     os.environ["DATA_ROOT"] = "/home/lijie/proj2/xmu/lz/aggregated"
-    os.environ["WANDB_MODE"] = "offline"
     try:
         for config in CONFIGS:
             cfg = TrainConfig.from_file(config)
@@ -115,7 +113,6 @@ def test_the_same_config_files_resolve_to_another_machine():
             assert cfg.model.name_or_path.startswith("/home/lijie/proj2/xmu/lz/models--Qwen--"), config
             assert "/snapshots/" in cfg.model.name_or_path, config
             assert cfg.data.root == "/home/lijie/proj2/xmu/lz/aggregated", config
-            assert cfg.logging.wandb_mode == "offline", config
     finally:
         for name in MACHINE_VARIABLES:
             os.environ.pop(name, None)

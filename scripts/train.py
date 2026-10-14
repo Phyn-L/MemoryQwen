@@ -59,21 +59,6 @@ def should_evaluate(step: int, every: int, total_steps: int) -> bool:
     return step % every == 0 or step >= total_steps
 
 
-def _gpu_peak_flops(device: torch.device) -> float | None:
-    """Peak dense BF16/FP16 FLOPs/s for GPUs with a known specification."""
-    if device.type != "cuda":
-        return None
-    name = torch.cuda.get_device_name(device).upper()
-    # Dense tensor-core peaks (without sparsity), in FLOPs/s.
-    peaks = (
-        (("H100", "H200"), 1_979e12),
-        (("A100",), 312e12),
-        (("RTX 4090",), 330e12),
-        (("RTX 5090",), 419e12),
-    )
-    return next((peak for names, peak in peaks if any(n in name for n in names)), None)
-
-
 def _gradient_norm(parameters) -> torch.Tensor:
     norms = [
         torch.linalg.vector_norm(parameter.grad.detach().float())
@@ -123,11 +108,11 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
     if resume:
         run_dir = Path(resume).resolve().parent
         cfg.checkpoint.output_dir = str(run_dir)
-        cfg.logging.swanlab_run_name = cfg.logging.swanlab_run_name or run_dir.name
+        cfg.logging.aim_run_name = cfg.logging.aim_run_name or run_dir.name
         return
     is_main = accelerator is None or accelerator.is_main_process
     run_name = (
-        (cfg.logging.swanlab_run_name or new_run_name(cfg.model.name_or_path))
+        (cfg.logging.aim_run_name or new_run_name(cfg.model.name_or_path))
         if is_main
         else None
     )
@@ -136,7 +121,7 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
         names = [run_name]
         torch.distributed.broadcast_object_list(names, src=0)
         run_name = names[0]
-    cfg.logging.swanlab_run_name = run_name
+    cfg.logging.aim_run_name = run_name
     # Both explicit and generated names live under the configured output root.
     cfg.checkpoint.output_dir = str(Path(cfg.checkpoint.output_dir) / run_name)
 
@@ -148,7 +133,7 @@ def main() -> None:
         "--machine",
         choices=machine_names(),
         default=None,
-        help="Take MODEL_ROOT / DATA_ROOT (and the machine's swanlab mode) from "
+        help="Take MODEL_ROOT / DATA_ROOT from "
         "utils/machines.py::MACHINES. Overrides the config's `machine:` field; can also "
         "come from the MACHINE environment variable or, failing that, the hostname.",
     )
@@ -157,7 +142,7 @@ def main() -> None:
         "--init-from",
         help="Initialize model weights only; start a new optimizer, schedule and run.",
     )
-    parser.add_argument("--swanlab-run-id")
+    parser.add_argument("--aim-run-id")
     args = parser.parse_args()
 
     cfg = TrainConfig.from_file(args.config, machine=args.machine)
@@ -246,6 +231,7 @@ def main() -> None:
         "train",
         tokenizer,
         limit=resolve_split_limit(cfg, "train"),
+        num_workers=cfg.data.num_workers,
     )
     train_collate = make_collate(cfg, tokenizer, sample_qa=True, training=True)
     sampler = SortishSampler(
@@ -272,6 +258,7 @@ def main() -> None:
         tokenizer,
         limit=resolve_split_limit(cfg, "validation"),
         allow_empty=True,
+        num_workers=cfg.data.num_workers,
     )
     validation_loader = DataLoader(
         validation_dataset,
@@ -336,8 +323,8 @@ def main() -> None:
     step = 0
     if args.resume:
         step, saved_run_id = manager.load(args.resume, model, optimizer, scheduler)
-        if not cfg.logging.swanlab_run_id:
-            cfg.logging.swanlab_run_id = saved_run_id
+        if not cfg.logging.aim_run_id:
+            cfg.logging.aim_run_id = saved_run_id
         # The sampler is deterministic only for a fixed sharding; a different rank count
         # would make "skip the batches this run already saw" skip the wrong ones.
         ranks = 1 if accelerator is None else accelerator.num_processes
@@ -359,8 +346,8 @@ def main() -> None:
             flush=True,
         )
     finished = False
-    if args.swanlab_run_id:
-        cfg.logging.swanlab_run_id = args.swanlab_run_id
+    if args.aim_run_id:
+        cfg.logging.aim_run_id = args.aim_run_id
 
     if accelerator is not None:
         # The scheduler is deliberately NOT prepared. `accelerator.prepare` wraps an
@@ -382,16 +369,24 @@ def main() -> None:
     run = None
     if accelerator is None or accelerator.is_main_process:
         try:
-            import swanlab
+            from aim import Run
 
-            run = swanlab.init(
-                project=cfg.logging.swanlab_project,
-                name=cfg.logging.swanlab_run_name,
-                id=cfg.logging.swanlab_run_id,
-                resume="allow" if cfg.logging.swanlab_run_id else None,
-                mode=cfg.logging.swanlab_mode,
-                config=cfg.to_dict(),
+            # Aim stores runs in a local repository.  Set AIM_REPO to share one
+            # repository with ``aim up``; otherwise use the configured output root.
+            aim_repo = os.environ.get(
+                "AIM_REPO",
+                cfg.logging.aim_repo_path
+                or str(Path(cfg.checkpoint.output_dir) / ".aim"),
             )
+            run_kwargs = {
+                "repo": aim_repo,
+                "experiment": cfg.logging.aim_project,
+            }
+            if cfg.logging.aim_run_id:
+                run_kwargs["run_hash"] = cfg.logging.aim_run_id
+            run = Run(**run_kwargs)
+            run["name"] = cfg.logging.aim_run_name
+            run["hparams"] = cfg.to_dict()
         except ImportError:
             pass
 
@@ -420,26 +415,42 @@ def main() -> None:
                 accelerator.unwrap_model(model) if accelerator is not None else model
             )
             embedding = base_model.qwen.get_input_embeddings()
+            recon_batch = {
+                "context_indices": ids["recon_context_indices"],
+                "context_embeds": embedding(ids["recon_target_ids"]),
+                "context_mask": ids["recon_target_mask"],
+                "labels": ids["recon_labels"],
+            }
             output = model(
                 embedding(ids["context_ids"]),
                 ids["context_mask"],
-                embedding(ids["input_ids"]),
-                ids["input_mask"],
-                embedding(ids["target_ids"]),
-                ids["target_mask"],
-                ids["labels"],
+                embedding(ids["qa_input_ids"]),
+                ids["qa_input_mask"],
+                embedding(ids["qa_target_ids"]),
+                ids["qa_target_mask"],
+                ids["qa_labels"],
                 ids["qa_context_indices"],
                 context_ids=ids["context_ids"],
                 objective_config=cfg.memory,
                 loss_only=True,
-                task_ids=ids["task_ids"],
+                recon_batch=recon_batch,
+            )
+            task_ids = torch.cat(
+                [
+                    torch.ones(
+                        ids["qa_input_ids"].size(0), dtype=torch.long, device=device
+                    ),
+                    torch.zeros(
+                        ids["recon_target_ids"].size(0), dtype=torch.long, device=device
+                    ),
+                ]
             )
             qa_weight, recon_weight, effective_ratio = scheduled_task_weights(
                 step, total_steps, cfg.data
             )
             supervised, task_terms = supervision_objectives(
                 output.supervision_losses,
-                ids["task_ids"],
+                task_ids,
                 cfg.memory,
                 qa_weight=qa_weight * cfg.memory.qa_weight,
                 recon_weight=recon_weight * cfg.memory.recon_weight,
@@ -477,10 +488,10 @@ def main() -> None:
                 for name, parameter in named_parameters
                 if name == "context_resampler.layer_gates"
             )
-            task_embedding_grad_norm = (
-                base_model.task_embeddings.grad.detach().float().norm(dim=1)
-                if base_model.task_embeddings.grad is not None
-                else torch.zeros(2, device=device)
+            recon_task_embedding_grad_norm = (
+                base_model.recon_task_embedding.grad.detach().float().norm()
+                if base_model.recon_task_embedding.grad is not None
+                else torch.zeros((), device=device)
             )
             step_grad_norm = torch.nn.utils.clip_grad_norm_(
                 model.parameters(),
@@ -504,12 +515,6 @@ def main() -> None:
                 # the one training-side scalar that silently went wrong before (accelerate
                 # stepping it once per rank, see the prepare() comment), and without this
                 # key a distorted schedule is invisible in the run history.
-                model_tokens = int(ids["context_mask"].sum())
-                model_tokens += int(ids["input_mask"].sum() + ids["target_mask"].sum())
-                model_tokens += int(
-                    ids["context_mask"].sum(dim=1).numel()
-                    * base_model.context_resampler.num_memory
-                )
                 payload = {
                     "loss/total": float(terms["loss"].detach()),
                     "loss/qa": float(terms["qa_loss"].detach()),
@@ -529,28 +534,12 @@ def main() -> None:
                     "grad_norm/resampler": float(resampler_grad_norm),
                     "grad_norm/metalora": float(metalora_grad_norm),
                     "grad_norm/layer_gates": float(layer_gates_grad_norm),
-                    "grad_norm/task_recon": float(task_embedding_grad_norm[0]),
-                    "grad_norm/task_qa": float(task_embedding_grad_norm[1]),
+                    "grad_norm/recon_task_embedding": float(recon_task_embedding_grad_norm),
                     "data/qa_probability": float(1.0 - effective_ratio),
                     "data/recon_probability": float(effective_ratio),
                 }
-                if torch.cuda.is_available():
-                    payload["train/peak_cuda_memory_gib"] = (
-                        torch.cuda.max_memory_allocated(device) / (1024**3)
-                    )
-                    peak_flops = _gpu_peak_flops(device)
-                    if peak_flops:
-                        # Approximate dense-model MFU as 6 * total parameters * tokens.
-                        # Tokens include context, memory-prefix and QA forwards.
-                        model_params = sum(
-                            p.numel() for p in base_model.qwen.parameters()
-                        )
-                        payload["train/MFU"] = min(
-                            1.0,
-                            6 * model_params * model_tokens / step_seconds / peak_flops,
-                        )
-                        payload["train/MFU_estimated"] = 1
-                run.log(payload, step=step)
+                for name, value in payload.items():
+                    run.track(value, name=name, step=step)
             is_main = accelerator is None or accelerator.is_main_process
             # Validation runs on EVERY rank.  accelerator.prepare shards the validation
             # loader, so evaluating only on the main process would (a) score one shard
@@ -562,16 +551,27 @@ def main() -> None:
             if len(validation_loader) and should_evaluate(
                 step, cfg.evaluation.autoregressive_every, total_steps
             ):
-                metrics = evaluator.compare_task_embeddings(
+                if is_main:
+                    print(
+                        f"\n[eval] step={step}: starting QA autoregressive validation "
+                        f"(max_samples={cfg.evaluation.evaluation_max_samples}, "
+                        f"max_new_tokens={cfg.evaluation.max_new_tokens})",
+                        flush=True,
+                    )
+                metrics = evaluator.compare_reader_tasks(
                     base_model,
                     validation_loader,
                     device,
                     max_qa=cfg.evaluation.evaluation_max_samples,
                     row_loader=validation_row_loader,
+                    include_recon=False,
                 )
+                if is_main:
+                    print(f"[eval] step={step}: QA validation complete", flush=True)
             if run and is_main:
                 for payload in eval_log_payloads(metrics):
-                    run.log(payload, step=step)
+                    for name, value in payload.items():
+                        run.track(value, name=name, step=step)
             if accelerator is not None:
                 # Resynchronise explicitly so a rank whose shard finished early cannot
                 # race ahead into the next training step.
@@ -599,7 +599,7 @@ def main() -> None:
                     step,
                     cfg.to_dict(),
                     validation_f1=metrics["qa_task"]["f1"],
-                    swanlab_run_id=getattr(run, "id", None),
+                    aim_run_id=getattr(run, "hash", None),
                     world_size=1 if accelerator is None else accelerator.num_processes,
                 )
         if finished:
@@ -616,12 +616,12 @@ def main() -> None:
             step,
             cfg.to_dict(),
             final=True,
-            swanlab_run_id=getattr(run, "id", None),
+            aim_run_id=getattr(run, "hash", None),
             world_size=1 if accelerator is None else accelerator.num_processes,
         )
     progress.close()
     if run:
-        run.finish()
+        run.close()
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 

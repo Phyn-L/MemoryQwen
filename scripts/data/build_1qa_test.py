@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from split_c1qa_eval_sets import _snapshot, cache_rows, make_row
+from split_1qa_eval_sets import _snapshot, cache_rows, make_row
 
 
 ROOT = Path("data/generated")

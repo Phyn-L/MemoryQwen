@@ -75,8 +75,8 @@ for name, overrides in runs.items():
     memory.update(overrides)
     config.setdefault("checkpoint", {})["output_dir"] = str(out_root)
     logging = config.setdefault("logging", {})
-    logging["swanlab_run_name"] = name
-    logging["swanlab_run_id"] = None
+    logging["aim_run_name"] = name
+    logging["aim_run_id"] = None
     config["machine"] = os.environ["MACHINE"]
 
     TrainConfig.from_dict(config).validate()

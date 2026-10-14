@@ -36,14 +36,10 @@ MACHINES: dict[str, dict[str, str]] = {
     "h200": {
         "MODEL_ROOT": "/home/lijie/proj2/xmu/lz/Qwen",
         "DATA_ROOT": "/home/lijie/proj2/xmu/lz/contexts",
-        "SWANLAB_MODE": "offline",
-        "WANDB_MODE": "offline",
     },
     "a800": {
         "MODEL_ROOT": "/mnt/beegfs-storage-a8002/seanlz/Qwen",
         "DATA_ROOT": "/mnt/beegfs-storage-a8002/seanlz/aggregated",
-        "SWANLAB_MODE": "offline",
-        "WANDB_MODE": "offline",
     },
 }
 

@@ -21,7 +21,7 @@
 入口是 `pipeline.make_context_dataset()`，底层是 `ConversationDataset`：
 
 1. 每个 split 直接读取配置中的 JSONL 文件；每行包含 `context` 和 `conversations`。
-2. `ConversationDataset` 建立字节 offset 索引，随机访问时只解析当前行，不把整个文件载入内存。首次扫描会显示 `Indexing conversation data` 进度条，并在 `data.cache_offsets=true` 时缓存过滤后的 offsets；长 context、chat-template Question 和 Answer 的 tokenizer 过滤按 `data.tokenizer_filter_batch_size` 批量执行，当前默认 batch size 为 2048。`max_question_tokens` 限制单个 Question，`max_answer_tokens` 限制单个 Answer，`max_conversation_tokens` 限制一行内所有 Question+Answer 的总长度。缓存放在共享的 `outputs/conversation_cache` 下，并按数据文件、过滤参数和 tokenizer 内容指纹复用，因此兼容模型无需重复处理。空 context、超限 context、Question、Answer 或 conversation，或没有 assistant turn 的行会被过滤。
+2. `ConversationDataset` 会将过滤后的 conversation 数据缓存到共享的 `outputs/conversation_cache`；`data.cache_filtered_dataset` 控制是否启用该缓存。长 context、chat-template Question 和 Answer 的 tokenizer 过滤按 `data.tokenizer_filter_batch_size` 批量执行，当前默认 batch size 为 2048。`max_question_tokens` 限制单个 Question，`max_answer_tokens` 限制单个 Answer，`max_conversation_tokens` 限制一行内所有 Question+Answer 的总长度。缓存按数据文件、过滤参数和 tokenizer 内容指纹复用，因此兼容模型无需重复处理。空 context、超限 context、Question、Answer 或 conversation，或没有 assistant turn 的行会被过滤。
 3. 一个 JSONL 行对应一个 `ContextRecord`。`ContextRecord.turns()` 将每个 assistant 消息配对为一个监督 turn，并保留此前所有 system/user/assistant 消息作为历史。
 4. `SortishSampler` 先按 context token 长度排序，再在 bucket 内随机打乱，减少 padding；长度缓存同时绑定数据 fingerprint 和 tokenizer 信息。
 5. `collate_context_records` 对 context、conversation prompt、answer 分别 tokenize：
@@ -43,7 +43,7 @@
 
 ### 3.2 读取 memory：QA、readout 与生成
 
-`forward_qa_with_prefix()` 按 `qa_context_indices` 选择 cache，拼接 `task + question + answer`，并让 question/answer 读取 memory。`task_embeddings[0]` 对应 Recon，`task_embeddings[1]` 对应 QA；Recon 的 question 为空。answer 的 label 前缀全部为 `-100`，所以监督只计算 target token。
+`forward_with_memory_prefix()` 按 `qa_context_indices` 选择 cache。QA 拼接 `question + answer`，Recon 拼接 `recon_task_embedding + context`；两条路径都让 user 段读取 memory，answer/context 作为 assistant 目标。answer 的 label 前缀全部为 `-100`，所以监督只计算 target token。
 
 当 `readout_length > 0` 时，`QuestionResampler` 根据 task、question 和 memory 生成 R 个 readout latent，序列变为 `task + question + readout(R) + answer`；R 个位置只服务于当前问题，不会改变可缓存的 context memory。生成阶段复用同一 memory cache，按 context 分组解码。
 

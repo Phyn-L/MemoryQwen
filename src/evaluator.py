@@ -172,7 +172,7 @@ class Evaluator:
             desc=desc,
             unit="batch",
             disable=not enabled,
-            leave=False,
+            leave=True,
         )
         for batch in progress:
             rows = _batch_value(batch, "input_ids", "question_ids").size(0)
@@ -207,13 +207,26 @@ class Evaluator:
             # share the same memory cache, so they are prefilled and decoded together
             # instead of one row at a time.  ``max_rows_per_group`` keeps the group
             # batch bounded by the same knob that used to bound the micro-batching.
+            max_new_tokens = (
+                self.cfg.data.max_context_tokens
+                if task_id == TASK_RECON
+                else self.cfg.evaluation.max_new_tokens
+            )
+            if task_id == TASK_RECON:
+                question_ids = ids["input_ids"].new_empty((end_row - start_row, 0))
+                question_mask = ids["input_mask"].new_empty(
+                    (end_row - start_row, 0), dtype=torch.bool
+                )
+            else:
+                question_ids = ids["input_ids"][rows_slice]
+                question_mask = ids["input_mask"][rows_slice]
             generated = model.generate_answers_with_prefix(
                 prefix,
                 q,
-                ids["input_ids"][rows_slice],
-                ids["input_mask"][rows_slice],
+                question_ids,
+                question_mask,
                 self.tokenizer,
-                self.cfg.evaluation.max_new_tokens,
+                max_new_tokens,
                 group_by_context=True,
                 max_rows_per_group=max(1, self.cfg.evaluation.qa_batch_size),
                 task_id=task_id,
@@ -268,15 +281,20 @@ class Evaluator:
         return result
 
     @torch.no_grad()
-    def compare_task_embeddings(self, model, loader, device, max_qa=None, row_loader=None):
-        """Evaluate identical QA rows with QA and Recon task embeddings."""
-        return {
+    def compare_reader_tasks(
+        self, model, loader, device, max_qa=None, row_loader=None,
+        include_recon=True,
+    ):
+        """Evaluate QA, optionally followed by the expensive Recon reader path."""
+        metrics = {
             "qa_task": self.autoregressive(
                 model, loader, device, max_qa=max_qa, task_id=TASK_QA,
                 row_loader=row_loader,
-            ),
-            "recon_task": self.autoregressive(
+            )
+        }
+        if include_recon:
+            metrics["recon_task"] = self.autoregressive(
                 model, loader, device, max_qa=max_qa, task_id=TASK_RECON,
                 row_loader=row_loader,
-            ),
-        }
+            )
+        return metrics

@@ -16,7 +16,6 @@ evaluation:
   max_new_tokens: 32  # 生成 token 上限
   qa_batch_size: 4  # QA 验证批大小
 logging:
-  swanlab_mode: offline  # SwanLab 运行模式
 memory:
   readout_length: 8  # readout token 数
 scheduler:

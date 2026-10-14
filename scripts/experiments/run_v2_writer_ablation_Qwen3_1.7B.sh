@@ -113,7 +113,7 @@ base.setdefault("evaluation", {}).update(
     qa_batch_size=8,
     max_new_tokens=32,
 )
-base.setdefault("logging", {}).update(log_every=25, swanlab_mode="offline")
+base.setdefault("logging", {}).update(log_every=25)
 
 # Keep the old auxiliary branches off in every v2 arm.  The only varied factors
 # below are the new context writer and the QA/Recon supervision mixture.
@@ -147,8 +147,8 @@ for name, overrides in runs.items():
     for section, values in overrides.items():
         config.setdefault(section, {}).update(values)
     config.setdefault("checkpoint", {})["output_dir"] = str(out_root)
-    config.setdefault("logging", {})["swanlab_run_name"] = name
-    config["logging"]["swanlab_run_id"] = None
+    config.setdefault("logging", {})["aim_run_name"] = name
+    config["logging"]["aim_run_id"] = None
     config["machine"] = os.environ["MACHINE"]
 
     TrainConfig.from_dict(config).validate()

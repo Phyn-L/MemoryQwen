@@ -26,14 +26,14 @@ data:
   recon_ratio: 0.5
 ```
 
-reader 在两种任务前都插入一个独立的连续 task embedding：
+reader 只为 Recon 插入一个连续 task embedding；QA 不再插入任务向量：
 
 ```text
-Recon: [task_embeddings[0], memory] → frozen Qwen → context
-QA:    [task_embeddings[1], memory, question] → frozen Qwen → answer
+Recon: [memory, recon_task_embedding] → frozen Qwen → context
+QA:    [memory, question] → frozen Qwen → answer
 ```
 
-两个向量是 `ContextMemoryModel.task_embeddings` 中的可训练参数，会随 checkpoint 保存；它们不是 tokenizer special token，也不会改变 Qwen 词表。训练 batch 的 `task_ids` 使用 `0=Recon`、`1=QA`。context 编码阶段启用 MetaLoRA，reader 的 Recon/QA forward 和生成阶段都关闭 MetaLoRA。
+`ContextMemoryModel.recon_task_embedding` 是唯一的任务参数，会随 checkpoint 保存；它不是 tokenizer special token，也不会改变 Qwen 词表。QA 将 memory 与 question 作为 user，answer 作为 assistant；Recon 将 memory 与该 task embedding 作为 user，context 作为 assistant。context 编码阶段启用 MetaLoRA，reader 的 Recon/QA forward 和生成阶段都关闭 MetaLoRA。
 
 如果要先训练 Recon 再训练 QA，第二阶段使用 `--init-from` 加载第一阶段模型参数；该选项会重新开始 optimizer、scheduler、step 和随机状态。
 

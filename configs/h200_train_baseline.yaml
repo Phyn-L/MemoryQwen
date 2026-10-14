@@ -9,40 +9,18 @@ data:
     conversation_file: contexts/1qa/1qa-train.jsonl
     train_conversation_file: contexts/1qa/1qa-train.jsonl
     validation_conversation_file: contexts/1qa/1qa-val/1qa-val.jsonl
-  # 样本筛选与缓存
-  filtering:
-    # 是否缓存数据文件的字节偏移
-    cache_offsets: true
-    # 是否缓存用于 sortish batching 的长度
-    cache_sortish_lengths: true
-    # 是否在聊天模板中启用思考模式
-    chat_template_enable_thinking: false
-    # 是否过滤超过 context 上限的样本
-    filter_long_context: true
-    # 是否过滤没有问答内容的样本
-    filter_no_qa: true
-    # tokenizer 批量筛选的批大小
-    tokenizer_filter_batch_size: 2048
   # 输入长度上限
   limits:
-    # context 编码的最大 token 数
     max_context_tokens: 1536
-    # 模型输入窗口的最大 token 数
     max_input_tokens: 40960
-    # 单个问题的最大 token 数
     max_question_tokens: 96
-    # 单个答案的最大 token 数
     max_answer_tokens: 64
-    # 单条会话中问答内容的最大 token 数
     max_conversation_tokens: 768
   # DataLoader 设置
   loader:
-    # 数据加载 worker 数量
     num_workers: 2
-    # 是否将 batch 放入 pinned memory
     pin_memory: true
-    # worker 进程是否跨 epoch 保留
-    persistent_workers: true
+    persistent_workers: false
   # 训练任务与采样
   task:
     # 训练任务类型：mix、qa 或 recon
@@ -50,17 +28,17 @@ data:
     # 混合训练中 reconstruction 任务的比例
     recon_ratio: 0.5
     # reconstruction 比例调度方式
-    recon_schedule: constant
+    recon_schedule: decay
     # 比例调度曲线
-    recon_schedule_curve: linear
+    recon_schedule_curve: cosine
     # 调度起始 reconstruction 比例
-    recon_ratio_start: 0.5
+    recon_ratio_start: 1.0
     # 调度结束 reconstruction 比例
-    recon_ratio_end: 0.5
+    recon_ratio_end: 0.1
     # reconstruction 比例下限
     recon_ratio_min: 0.1
     # 每个 context 采样的 QA 数量
-    qa_per_context: 4
+    qa_per_context: 8
     # sortish bucket 相对 batch size 的倍数
     sortish_bucket_multiplier: 50
     # 训练数据集，all 表示使用全部数据集
@@ -72,7 +50,7 @@ data:
     validation_source_file: contexts/1qa/1qa-validation.jsonl
     validation_datasets: [squad, msmarcov1.1, msmarcov2.1, hotpotqa(distractor), race]
     validation_max_context_tokens: 1536
-    validation_sampling_workers: 16
+    validation_sampling_workers: 4
     validation_max_samples_per_dataset:
       squad: 256
       msmarcov1.1: 256
@@ -80,15 +58,15 @@ data:
       hotpotqa(distractor): 256
       race: 256
 evaluation:
-  autoregressive_every: 1000  # 自回归验证的训练步间隔
+  autoregressive_every: 500  # 自回归验证的训练步间隔
   evaluation_max_samples: 1280  # 自回归评估的全局 validation QA 条数
   max_new_tokens: 64  # 自回归验证生成 token 上限
-  qa_batch_size: 12  # QA 验证批大小
+  qa_batch_size: 32  # QA 验证批大小
 logging:
-  swanlab_run_name: null # Optional; defaults to model name + timestamp.
-  log_every: 100  # 训练日志记录间隔（步）
-  swanlab_mode: offline  # SwanLab 运行模式
-  swanlab_project: MemoryQwen  # SwanLab 项目名称
+  aim_run_name: null # Optional; defaults to model name + timestamp.
+  aim_repo_path: /data/lz/MemoryQwen/.aim # Shared Aim repository for cross-run comparison.
+  log_every: 25  # 训练日志记录间隔（步）
+  aim_project: MemoryQwen  # Aim 项目名称
 memory:
   # Fixed-length context writer
   memory_length: 64  # 写入固定 memory 的 slot 数
@@ -146,7 +124,7 @@ scheduler:
   name: cosine  # 优化器或调度器名称
   warmup_steps: 1000  # 学习率预热步数
 training:
-  batch_size: 12  # 每个进程的训练批大小
+  batch_size: 32  # 每个进程的训练批大小
   epochs: 1  # 训练轮数
   max_grad_norm: 1.0  # 梯度裁剪最大范数
   seed: 42  # 随机种子

@@ -10,7 +10,7 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
-from build_c1qa_from_hf_cache import _clean, _record, _snapshot
+from build_1qa_from_hf_cache import _clean, _record, _snapshot
 
 
 CACHE = Path("/data/lz/hf_cache")

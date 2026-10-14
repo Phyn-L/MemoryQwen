@@ -93,7 +93,7 @@ def test_qa_gradients_reach_writer_lora_layer_weights_and_reader(source):
     prefix = encode(model)
     question = model.qwen.get_input_embeddings()(torch.randint(0, 64, (2, 3)))
     answer = model.qwen.get_input_embeddings()(torch.randint(0, 64, (2, 2)))
-    output = model.forward_qa_with_prefix(
+    output = model.forward_with_memory_prefix(
         prefix, torch.arange(2), question, torch.ones(2, 3, dtype=torch.bool),
         answer, torch.ones(2, 2, dtype=torch.bool), torch.ones(2, 2, dtype=torch.long),
     )
@@ -162,7 +162,7 @@ def test_reader_passes_disable_lora_and_restores_state():
         prefix = encode(model, length=9, batch=1)
         question = model.qwen.get_input_embeddings()(torch.randint(0, 64, (1, 2)))
         answer = model.qwen.get_input_embeddings()(torch.randint(0, 64, (1, 2)))
-        model.forward_qa_with_prefix(
+        model.forward_with_memory_prefix(
             prefix, torch.zeros(1, dtype=torch.long), question,
             torch.ones(1, 2, dtype=torch.bool), answer,
             torch.ones(1, 2, dtype=torch.bool), torch.ones(1, 2, dtype=torch.long),
@@ -193,7 +193,7 @@ def test_each_lora_layer_is_enabled_only_for_encoder_and_disabled_for_reader():
         prefix = encode(model, length=9, batch=1)
         question = model.qwen.get_input_embeddings()(torch.randint(0, 64, (1, 2)))
         answer = model.qwen.get_input_embeddings()(torch.randint(0, 64, (1, 2)))
-        model.forward_qa_with_prefix(
+        model.forward_with_memory_prefix(
             prefix, torch.zeros(1, dtype=torch.long), question,
             torch.ones(1, 2, dtype=torch.bool), answer,
             torch.ones(1, 2, dtype=torch.bool), torch.ones(1, 2, dtype=torch.long),
@@ -209,10 +209,11 @@ def test_each_lora_layer_is_enabled_only_for_encoder_and_disabled_for_reader():
         assert adapters[name].enabled is True, f"{name} did not restore its state"
 
 
-def test_recon_and_qa_use_independent_task_embeddings():
+def test_qa_has_no_task_embedding_and_recon_uses_one_embedding():
     model = tiny_model().eval()
-    assert model.task_embeddings.shape == (2, model.qwen_hidden_size)
-    assert model.task_embeddings.requires_grad
+    assert model.recon_task_embedding.shape == (model.qwen_hidden_size,)
+    assert model.recon_task_embedding.requires_grad
+    assert not hasattr(model, "task_embeddings")
     prefix = encode(model, length=9, batch=1)
     question = model.qwen.get_input_embeddings()(torch.randint(0, 64, (1, 2)))
     answer = model.qwen.get_input_embeddings()(torch.randint(0, 64, (1, 2)))
@@ -222,20 +223,25 @@ def test_recon_and_qa_use_independent_task_embeddings():
         answer_embeds=answer, answer_mask=torch.ones(1, 2, dtype=torch.bool),
         labels=torch.ones(1, 2, dtype=torch.long), loss_only=False,
     )
-    recon = model.forward_qa_with_prefix(**common, task_ids=torch.zeros(1, dtype=torch.long))
-    qa = model.forward_qa_with_prefix(**common, task_ids=torch.ones(1, dtype=torch.long))
-    assert recon.labels.shape == qa.labels.shape == (1, 5)
-    assert not torch.allclose(recon.logits, qa.logits)
-    (recon.logits.float().square().mean() + qa.logits.float().square().mean()).backward()
-    assert model.task_embeddings.grad is not None
+    qa = model.forward_with_memory_prefix(**common)
+    recon = model.forward_recon_with_memory_prefix(
+        prefix, torch.zeros(1, dtype=torch.long), answer, torch.ones(1, 2, dtype=torch.bool),
+        torch.ones(1, 2, dtype=torch.long),
+    )
+    assert recon.logits.shape[:2] == (1, 1 + 2)
+    assert qa.logits.shape[:2] == (1, 2 + 2)
+    assert recon.labels.shape == (1, 3)
+    assert qa.labels.shape == (1, 4)
+    recon.logits.float().square().mean().backward()
+    assert model.recon_task_embedding.grad is not None
+    assert model.recon_task_embedding.grad.abs().sum() > 0
 
 
-def test_task_ids_select_recon_then_qa_embedding_in_reader():
+def test_recon_reader_inserts_only_recon_embedding():
     model = tiny_model().eval()
     prefix = encode(model, length=9, batch=2)
     embedding = model.qwen.get_input_embeddings()
-    question = embedding(torch.randint(0, 64, (2, 2)))
-    answer = embedding(torch.randint(0, 64, (2, 2)))
+    context = embedding(torch.randint(0, 64, (2, 2)))
     seen = []
     original = model.qwen.forward
 
@@ -244,14 +250,12 @@ def test_task_ids_select_recon_then_qa_embedding_in_reader():
         return original(*args, **kwargs)
 
     model.qwen.forward = capture
-    model.forward_qa_with_prefix(
-        prefix, torch.arange(2), question, torch.ones(2, 2, dtype=torch.bool),
-        answer, torch.ones(2, 2, dtype=torch.bool), torch.ones(2, 2, dtype=torch.long),
-        task_ids=torch.tensor([TASK_RECON, TASK_QA]),
+    model.forward_recon_with_memory_prefix(
+        prefix, torch.arange(2), context, torch.ones(2, 2, dtype=torch.bool),
+        torch.ones(2, 2, dtype=torch.long),
     )
     assert len(seen) == 1
-    torch.testing.assert_close(seen[0][0], model.task_embeddings[TASK_RECON].to(model.dtype))
-    torch.testing.assert_close(seen[0][1], model.task_embeddings[TASK_QA].to(model.dtype))
+    torch.testing.assert_close(seen[0], model.recon_task_embedding.to(model.dtype).expand(2, -1))
 
 
 def test_context_resampler_depth_and_block_order_are_configurable():

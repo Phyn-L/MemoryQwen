@@ -189,8 +189,8 @@ def test_readout_off_keeps_the_historical_model():
     model = _model(readout_length=0)
     assert model.resampler is None
     output = _forward(model, _batch())
-    assert output.logits.shape[:2] == (2, 1 + 4 + 5), "labels include the QA task embedding"
-    assert output.labels.shape == (2, 10)
+    assert output.logits.shape[:2] == (2, 4 + 5), "QA has no task embedding"
+    assert output.labels.shape == (2, 9)
     # the resampler name is still wired into the trainable-parameter rule
     assert is_trainable_parameter_name("resampler.latents")
 
@@ -206,10 +206,10 @@ def test_readout_is_conditioned_and_trains_the_resampler():
     # The forward runs [question, read-out, answer], so the logits gain R positions -- but
     # the read-out rows are not supervised (-100), exactly like the question rows, and the
     # answer labels keep their alignment.
-    assert output.logits.shape[:2] == (2, 1 + 4 + 3 + 5)
-    assert output.labels.shape == (2, 13)
-    assert bool((output.labels[:, 5:8] == -100).all()), "the read-out rows must not be supervised"
-    assert torch.equal(output.labels[:, 8:], batch["answer_ids"])
+    assert output.logits.shape[:2] == (2, 4 + 3 + 5)
+    assert output.labels.shape == (2, 12)
+    assert bool((output.labels[:, 4:7] == -100).all()), "the read-out rows must not be supervised"
+    assert torch.equal(output.labels[:, 7:], batch["answer_ids"])
     loss = output.logits.float().logsumexp(-1).mean()      # any differentiable scalar
     loss.backward()
     grads = [p.grad for p in model.resampler.parameters()]
@@ -292,10 +292,10 @@ def test_new_modes_forward_gradient_and_generation():
         batch = _batch()
         output = _forward(model, batch)
         extra = 0 if mode == "off" else 3
-        assert output.logits.shape[1] == 10 + extra
-        assert torch.equal(output.labels[:, 5 + extra:], batch["answer_ids"])
+        assert output.logits.shape[1] == 9 + extra
+        assert torch.equal(output.labels[:, 4 + extra:], batch["answer_ids"])
         if extra:
-            assert (output.labels[:, 5:8] == -100).all()
+                assert (output.labels[:, 4:7] == -100).all()
         qa_loss(output.logits, output.labels).backward()
         if mode == "off":
             assert model.resampler is None and model.readout_length == 0

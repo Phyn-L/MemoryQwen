@@ -6,6 +6,7 @@ __pycache__/
 outputs/
 output/
 contexts/
+.aim/
 wandb/
 *.pt
 *.pth
@@ -16,7 +17,7 @@ wandb/
 # scratch/experiment artifacts: kept on disk, never versioned
 .tmp_analysis/
 
-# per-machine settings (paths, wandb mode, visible devices)
+# per-machine settings (paths, visible devices)
 scripts/env.local.sh
 
 # A/B launcher logs (scripts/run_ab.sh)

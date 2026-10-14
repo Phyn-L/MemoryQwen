@@ -17,13 +17,13 @@ class CheckpointManager:
         self.loaded = {}
 
     def save(self, model, optimizer, scheduler, step, config, final=False,
-             swanlab_run_id=None, world_size=1, validation_f1=None):
+             aim_run_id=None, world_size=1, validation_f1=None):
         path = self.output_dir / ("last.pt" if final else f"step-{step}.pt")
         path.parent.mkdir(parents=True, exist_ok=True)
         # Only trainable tensors are stored: the frozen Qwen backbone is ~1.7B parameters
         # that never change, so saving it would multiply checkpoint size by roughly ten.
         trainable = {n: p.detach().cpu() for n,p in model.named_parameters() if p.requires_grad}
-        state = {"model": trainable, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "step": step, "config": config, "swanlab_run_id": swanlab_run_id, "world_size": int(world_size), "rng": {"python": random.getstate(), "torch": torch.get_rng_state()}}
+        state = {"model": trainable, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "step": step, "config": config, "aim_run_id": aim_run_id, "world_size": int(world_size), "rng": {"python": random.getstate(), "torch": torch.get_rng_state()}}
         score = None if validation_f1 is None else float(validation_f1)
         improved = score is not None and math.isfinite(score) and (
             self.best_f1 is None or score > self.best_f1
@@ -117,4 +117,4 @@ class CheckpointManager:
             "world_size": int(state.get("world_size", 1) or 1),
             "config": state.get("config") or {},
         }
-        return self.loaded["step"], state.get("swanlab_run_id")
+        return self.loaded["step"], state.get("aim_run_id")

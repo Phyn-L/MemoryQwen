@@ -41,7 +41,7 @@ def _filter_row_batch(rows):
         messages = _messages_from_row(raw)
         if filter_no_conversation and not any(m.role == "assistant" for m in messages):
             continue
-        turns = ContextRecord("", messages).turns()
+        turns = ContextRecord("", messages, independent_qa=True).turns() if raw.get("qa_pairs") else ContextRecord("", messages).turns()
         if not turns:
             continue
         if tokenizer is not None:
@@ -53,9 +53,16 @@ def _filter_row_batch(rows):
             questions = [render_conversation(tokenizer, t.messages) if getattr(tokenizer, "apply_chat_template", None) else t.question for t in turns]
             qids = tokenizer(questions, add_special_tokens=False, truncation=True, max_length=max_question_tokens + 1).input_ids
             aids = tokenizer([t.answer for t in turns], add_special_tokens=False, truncation=True, max_length=max_answer_tokens + 1).input_ids
-            if any(not 0 < len(q) <= max_question_tokens or not 0 < len(a) <= max_answer_tokens for q, a in zip(qids, aids)):
+            if any(
+                not 0 < len(q) <= max_question_tokens
+                or not 0 < len(a) <= max_answer_tokens
+                for q, a in zip(qids, aids)
+            ) and not raw.get("qa_pairs"):
                 continue
-            if sum(map(len, qids)) + sum(map(len, aids)) > max_conversation_tokens:
+            if (
+                sum(map(len, qids)) + sum(map(len, aids)) > max_conversation_tokens
+                and not raw.get("qa_pairs")
+            ):
                 continue
         accepted.append(raw)
     return accepted
@@ -147,6 +154,7 @@ class ContextRecord:
     context_id: str = ""
     context_token_length: int | None = None
     task: str | None = None
+    independent_qa: bool = False
 
     def __post_init__(self) -> None:
         normalized = []
@@ -173,7 +181,10 @@ class ContextRecord:
         for message in self.conversations:
             if message.role == "user":
                 pending_user = message
-                history.append(message)
+                if self.independent_qa:
+                    history = [message]
+                else:
+                    history.append(message)
             elif message.role == "assistant" and pending_user is not None:
                 turns.append(
                     ConversationTurn(
@@ -185,7 +196,8 @@ class ContextRecord:
                         self.context_id,
                     )
                 )
-                history.append(message)
+                if not self.independent_qa:
+                    history.append(message)
                 pending_user = None
             elif message.role == "system":
                 history.append(message)
@@ -231,6 +243,28 @@ def _iter_jsonl(path: Path):
 
 
 def _messages_from_row(row: dict[str, Any]) -> tuple[ConversationMessage, ...]:
+    qa_pairs = row.get("qa_pairs")
+    if isinstance(qa_pairs, list):
+        messages = []
+        for pair in qa_pairs:
+            if not isinstance(pair, dict):
+                continue
+            question = str(pair.get("question", "")).strip()
+            answers = pair.get("answers") or ()
+            if isinstance(answers, str):
+                answers = (answers,)
+            answers = tuple(str(value).strip() for value in answers if str(value).strip())
+            answer = str(pair.get("answer") or (answers[0] if answers else "")).strip()
+            if not question or not answer:
+                continue
+            messages.extend(
+                (
+                    ConversationMessage("user", question),
+                    ConversationMessage("assistant", answer, answers),
+                )
+            )
+        if messages:
+            return tuple(messages)
     raw = row.get("conversations")
     if not isinstance(raw, list):
         raise ValueError(
@@ -278,7 +312,7 @@ def _messages_from_row(row: dict[str, Any]) -> tuple[ConversationMessage, ...]:
 class ConversationDataset(Dataset):
     """Materialized conversation dataset backed by a filtered JSONL cache."""
 
-    CACHE_VERSION = 3
+    CACHE_VERSION = 4
 
     def __init__(self, path: str | Path, tokenizer=None, max_context_tokens=2048,
                  max_input_tokens=40960, max_samples=None, filter_long_context=True,
@@ -377,7 +411,7 @@ class ConversationDataset(Dataset):
                 messages = _messages_from_row(row)
                 if filter_no_conversation and not any(m.role == 'assistant' for m in messages):
                     continue
-                turns = ContextRecord('', messages).turns()
+                turns = ContextRecord("", messages, independent_qa=True).turns() if row.get("qa_pairs") else ContextRecord("", messages).turns()
                 if not turns:
                     continue
                 if tokenizer is not None:
@@ -389,9 +423,17 @@ class ConversationDataset(Dataset):
                     questions = [render_conversation(tokenizer, t.messages) if getattr(tokenizer, 'apply_chat_template', None) else t.question for t in turns]
                     qids = tokenizer(questions, add_special_tokens=False, truncation=True, max_length=max_question_tokens + 1).input_ids
                     aids = tokenizer([t.answer for t in turns], add_special_tokens=False, truncation=True, max_length=max_answer_tokens + 1).input_ids
-                    if any(not 0 < len(q) <= max_question_tokens or not 0 < len(a) <= max_answer_tokens for q, a in zip(qids, aids)):
+                    if any(
+                        not 0 < len(q) <= max_question_tokens
+                        or not 0 < len(a) <= max_answer_tokens
+                        for q, a in zip(qids, aids)
+                    ) and not row.get("qa_pairs"):
                         continue
-                    if sum(map(len, qids)) + sum(map(len, aids)) > max_conversation_tokens:
+                    if (
+                        sum(map(len, qids)) + sum(map(len, aids))
+                        > max_conversation_tokens
+                        and not row.get("qa_pairs")
+                    ):
                         continue
                 rows.append(row)
                 if max_samples is not None and len(rows) >= max_samples:
@@ -460,9 +502,15 @@ class ConversationDataset(Dataset):
 
     def __getitem__(self, index):
         row = self._rows[index]
-        return ContextRecord(str(row['context']).strip(), _messages_from_row(row),
-                             str(row.get('dataset', self.source_path.stem)),
-                             str(row.get('context_id', row.get('id', ''))))
+        return ContextRecord(
+            str(row["context"]).strip(),
+            _messages_from_row(row),
+            str(row.get("dataset", self.source_path.stem)),
+            str(row.get("context_id", row.get("id", ""))),
+            None,
+            None,
+            bool(row.get("qa_pairs")),
+        )
 
 
 class TrainingTaskDataset(Dataset):
@@ -492,6 +540,7 @@ class TrainingTaskDataset(Dataset):
                 row.context_id,
                 row.context_token_length,
                 "recon" if task else "qa",
+                row.independent_qa,
             )
         return self.source[index]
 
@@ -731,8 +780,9 @@ def collate_context_records(
                 "conversation training requires at least one assistant turn"
             )
         if training and train_tasks == "mix":
+            qa_turns = random.sample(turns, min(qa_per_context, len(turns)))
             chosen = [
-                random.choice(turns),
+                *qa_turns,
                 ConversationTurn(
                     (),
                     record.context,
@@ -740,7 +790,7 @@ def collate_context_records(
                     context_id=record.context_id,
                 ),
             ]
-            chosen_tasks = [1, 0]  # 1=QA, 0=Recon
+            chosen_tasks = [1] * len(qa_turns) + [0]  # 1=QA, 0=Recon
         elif training and train_tasks == "recon":
             chosen = [
                 ConversationTurn(
@@ -752,8 +802,8 @@ def collate_context_records(
             ]
             chosen_tasks = [0]
         elif training:
-            chosen = [random.choice(turns)]
-            chosen_tasks = [1]
+            chosen = random.sample(turns, min(qa_per_context, len(turns)))
+            chosen_tasks = [1] * len(chosen)
         else:
             chosen = (
                 random.sample(turns, min(qa_per_context, len(turns)))
@@ -846,6 +896,96 @@ def collate_context_records(
         a["attention_mask"] = mask
     labels = torch.full_like(a.input_ids, -100)
     labels[a.attention_mask.bool()] = a.input_ids[a.attention_mask.bool()]
+    if training:
+        task_tensor = torch.tensor(task_ids, dtype=torch.long)
+
+        def pack_task(task_id: int):
+            indices = torch.nonzero(task_tensor.eq(task_id), as_tuple=False).flatten()
+            if indices.numel() == 0:
+                return {
+                    "input_ids": q.new_empty((0, q.size(1) if task_id == 1 else 0)),
+                    "input_mask": q_mask.new_empty((0, q_mask.size(1) if task_id == 1 else 0)),
+                    "target_ids": a.new_empty((0, 0)),
+                    "target_mask": a.new_empty((0, 0), dtype=torch.bool),
+                    "labels": labels.new_empty((0, 0)),
+                    "context_indices": indices,
+                }
+            target_rows_task = [
+                tokenizer(
+                    selected[index].answer,
+                    truncation=True,
+                    max_length=max_context_tokens if task_id == 0 else max_answer_tokens,
+                    add_special_tokens=False,
+                ).input_ids
+                for index in indices.tolist()
+            ]
+            previous_side = tokenizer.padding_side
+            tokenizer.padding_side = "right"
+            try:
+                target = tokenizer.pad(
+                    {"input_ids": target_rows_task}, padding=True, return_tensors="pt"
+                )
+            finally:
+                tokenizer.padding_side = previous_side
+            if append_eos and getattr(tokenizer, "eos_token_id", None) is not None:
+                eos = int(tokenizer.eos_token_id)
+                ids = torch.full(
+                    (target.input_ids.size(0), target.input_ids.size(1) + 1),
+                    int(tokenizer.pad_token_id),
+                    dtype=target.input_ids.dtype,
+                )
+                mask = torch.zeros_like(ids)
+                for row_idx in range(target.input_ids.size(0)):
+                    valid = int(target.attention_mask[row_idx].sum())
+                    ids[row_idx, :valid] = target.input_ids[row_idx, :valid]
+                    mask[row_idx, :valid + 1] = 1
+                    ids[row_idx, valid] = eos
+                target.input_ids, target.attention_mask = ids, mask
+            target_labels = torch.full_like(target.input_ids, -100)
+            target_labels[target.attention_mask.bool()] = target.input_ids[
+                target.attention_mask.bool()
+            ]
+            if task_id == 1:
+                return {
+                    "input_ids": q[indices],
+                    "input_mask": q_mask[indices],
+                    "target_ids": target.input_ids,
+                    "target_mask": target.attention_mask.bool(),
+                    "labels": target_labels,
+                    "context_indices": torch.tensor(
+                        [mapping[index] for index in indices.tolist()], dtype=torch.long
+                    ),
+                }
+            return {
+                "input_ids": q.new_empty((indices.numel(), 0)),
+                "input_mask": q_mask.new_empty((indices.numel(), 0)),
+                "target_ids": target.input_ids,
+                "target_mask": target.attention_mask.bool(),
+                "labels": target_labels,
+                "context_indices": torch.tensor(
+                    [mapping[index] for index in indices.tolist()], dtype=torch.long
+                ),
+            }
+
+        qa = pack_task(1)
+        recon = pack_task(0)
+        return {
+            "context_ids": c.input_ids,
+            "context_mask": c.attention_mask.bool(),
+            "qa_input_ids": qa["input_ids"],
+            "qa_input_mask": qa["input_mask"],
+            "qa_target_ids": qa["target_ids"],
+            "qa_target_mask": qa["target_mask"],
+            "qa_labels": qa["labels"],
+            "qa_context_indices": qa["context_indices"],
+            "recon_input_ids": recon["input_ids"],
+            "recon_input_mask": recon["input_mask"],
+            "recon_target_ids": recon["target_ids"],
+            "recon_target_mask": recon["target_mask"],
+            "recon_labels": recon["labels"],
+            "recon_context_indices": recon["context_indices"],
+            "records": selected,
+        }
     batch = {
         "context_ids": c.input_ids,
         "context_mask": c.attention_mask.bool(),

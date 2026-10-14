@@ -23,7 +23,7 @@ def test_reconstruction_preserves_prefix():
         with torch.set_grad_enabled(training):
             prefix = model.encode_context_prefix(embed(context), context.bool())
             saved = [(layer.keys.clone(), layer.values.clone()) for layer in prefix.memory_cache.layers]
-            baseline = model.forward_qa_with_prefix(prefix, indices, embed(question), question.bool(),
+            baseline = model.forward_with_memory_prefix(prefix, indices, embed(question), question.bool(),
                                                     embed(answer), answer.bool(), answer)
             recon = model._distillation_student_hidden(prefix, embed(context), context.bool())
             assert prefix.memory_cache.get_seq_length() == 4
@@ -31,7 +31,7 @@ def test_reconstruction_preserves_prefix():
                 torch.testing.assert_close(layer.keys, keys)
                 torch.testing.assert_close(layer.values, values)
             for _ in range(2):
-                output = model.forward_qa_with_prefix(prefix, indices, embed(question), question.bool(),
+                output = model.forward_with_memory_prefix(prefix, indices, embed(question), question.bool(),
                                                       embed(answer), answer.bool(), answer)
                 torch.testing.assert_close(output.logits, baseline.logits)
             if training:

@@ -71,8 +71,8 @@ config.setdefault("memory", {}).update(
 )
 config.setdefault("checkpoint", {})["output_dir"] = str(out_root / run_name)
 logging = config.setdefault("logging", {})
-logging["swanlab_run_name"] = f"{out_root.name}_{run_name}"
-logging["swanlab_run_id"] = None
+logging["aim_run_name"] = f"{out_root.name}_{run_name}"
+logging["aim_run_id"] = None
 config["machine"] = os.environ["MACHINE"]
 
 TrainConfig.from_dict(config).validate()

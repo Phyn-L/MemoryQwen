@@ -58,7 +58,7 @@ def make_context_dataset(
         raise ValueError(
             f"data.{split}_conversation_file or data.conversation_file is required"
         )
-    cache_dir = data_cache_dir() if cfg.data.cache_offsets else None
+    cache_dir = data_cache_dir() if cfg.data.cache_filtered_dataset else None
     return ConversationDataset(
         path,
         tokenizer=tokenizer,

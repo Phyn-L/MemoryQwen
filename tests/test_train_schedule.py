@@ -129,13 +129,14 @@ def test_the_scheduler_is_not_wrapped_by_accelerate():
     assert '"train/lr"' in source, "the LR must be logged, or a distorted schedule is invisible"
 
 
-def test_training_metrics_include_ppl_grad_norm_and_mfu():
+def test_training_metrics_include_ppl_and_grad_norm_without_mfu():
     source = _train_source()
     assert '"loss/ppl"' in source
     assert '"loss/qa_ppl"' in source
     assert '"loss/recon_ppl"' in source
     assert '"grad_norm/total"' in source
-    assert '"train/MFU"' in source
+    assert '"train/MFU"' not in source
+    assert "_gpu_peak_flops" not in source
 
 
 def test_training_payload_groups_data_probabilities_and_drops_row_throughput_metrics():

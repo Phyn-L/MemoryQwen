@@ -70,9 +70,9 @@ def main() -> None:
     if num_workers < 0:
         raise SystemExit("--num-workers must be non-negative")
     cfg.validate()
-    if not cfg.data.cache_offsets and not cfg.data.cache_sortish_lengths:
+    if not cfg.data.cache_filtered_dataset and not cfg.data.cache_sortish_lengths:
         raise SystemExit(
-            "Both data.cache_offsets and data.cache_sortish_lengths are false; "
+            "Both data.cache_filtered_dataset and data.cache_sortish_lengths are false; "
             "there is nothing to cache."
         )
 

@@ -5,7 +5,7 @@ invisible in the repository and a `git pull` could not tell whether the local fi
 correct. They are a table now, and a run names its machine; this file pins the resolution
 rules, because getting them wrong silently points a run at the wrong data tree:
 
-1. an explicitly named machine supplies MODEL_ROOT / DATA_ROOT / WANDB_MODE outright;
+1. an explicitly named machine supplies MODEL_ROOT / DATA_ROOT outright;
 2. a machine recognised only from the hostname only *fills gaps* -- an exported MODEL_ROOT
    must never be overwritten by a guess;
 3. an unknown name is an error listing the known ones, never a silent fallback;
@@ -34,7 +34,7 @@ from utils.machines import (  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 CONFIG = REPO / "configs/train_baseline.yaml"
-MACHINE_VARIABLES = ("MACHINE", "MODEL_ROOT", "DATA_ROOT", "WANDB_MODE")
+MACHINE_VARIABLES = ("MACHINE", "MODEL_ROOT", "DATA_ROOT")
 
 
 class _Hidden:
@@ -73,8 +73,6 @@ def test_the_table_holds_both_machines_with_distinct_paths():
     assert MACHINES["4090"]["MODEL_ROOT"] != MACHINES["h200"]["MODEL_ROOT"]
     assert MACHINES["4090"]["DATA_ROOT"] == "/data/lz/contexts"
     assert MACHINES["h200"]["DATA_ROOT"] == "/home/lijie/proj2/xmu/lz/contexts"
-    # The H200 has no internet, so its entry has to keep wandb offline.
-    assert MACHINES["h200"]["WANDB_MODE"] == "offline"
 
 
 def test_names_and_aliases_resolve_to_the_canonical_machine():
@@ -104,7 +102,7 @@ def test_an_explicit_machine_supplies_the_paths_even_over_an_exported_one():
         assert cfg.machine == "h200"
         assert cfg.data.root == MACHINES["h200"]["DATA_ROOT"]
         assert cfg.model.name_or_path.startswith(MACHINES["h200"]["MODEL_ROOT"] + "/models--")
-        # ... and the config records it for the run's wandb entry / checkpoint.
+        # ... and the config records it for the run's Aim run / checkpoint.
         assert cfg.to_dict()["machine"] == "h200"
 
 

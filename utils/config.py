@@ -224,15 +224,15 @@ class DataConfig:
     tokenizer_filter_batch_size: int = 2048
     sortish_bucket_multiplier: int = 50
     cache_sortish_lengths: bool = True
-    cache_offsets: bool = True
+    cache_filtered_dataset: bool = True
     append_eos: bool = True
     chat_template_enable_thinking: bool = False
-    qa_per_context: int = 4
+    qa_per_context: int = 8
     # Left-padding keeps the question's real tokens adjacent to the answer; right
     # padding inserts pad positions between them, so the first answer token would be
     # supervised from a padding hidden state.  Set to "right" only to reproduce old runs.
     question_padding_side: str = "left"
-    num_workers: int = 8
+    num_workers: int = 16
     pin_memory: bool = True
     persistent_workers: bool = True
     # "append" writes EOS after the last answer token; the legacy "overwrite" mode
@@ -284,20 +284,17 @@ class CheckpointConfig:
 
 @dataclass
 class LoggingConfig:
-    swanlab_project: str = "MemoryQwen"
-    # W&B name and checkpoint subdirectory; empty means model name + timestamp.
-    swanlab_run_name: str | None = None
-    swanlab_mode: str = "online"
-    swanlab_run_id: str | None = None
+    aim_project: str = "MemoryQwen"
+    # Shared local Aim repository. ``AIM_REPO`` can override this at launch time.
+    aim_repo_path: str | None = None
+    # Run name and checkpoint subdirectory; empty means model name + timestamp.
+    aim_run_name: str | None = None
+    aim_run_id: str | None = None
     # Cadence of the training-loss scalars (``train/*``), in optimizer steps. The two
     # evaluation sections keep their own cadence, so this only controls how densely the
     # loss curves are sampled. 10 is the historical value; a single-epoch run can afford
     # to be denser (or sparser) without touching any other schedule.
     log_every: int = 10
-
-    @property
-    def wandb_run_name(self):
-        return self.swanlab_run_name
 
 
 @dataclass
@@ -312,7 +309,7 @@ class TrainConfig:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     # Which entry of ``utils/machines.py::MACHINES`` supplied the paths (None = the config's
-    # own defaults). Recorded so a run's swanlab config and checkpoint say where it ran.
+    # own defaults). Recorded so a run's aim config and checkpoint say where it ran.
     machine: str | None = None
 
     @classmethod
@@ -321,7 +318,7 @@ class TrainConfig:
 
         ``machine`` (or ``machine:`` in the file, or ``MACHINE`` in the environment) selects
         an entry from ``utils/machines.py::MACHINES``; a machine that was named outright
-        supplies ``MODEL_ROOT``/``DATA_ROOT``/``SWANLAB_MODE`` for this load, while one only
+        supplies ``MODEL_ROOT``/``DATA_ROOT`` for this load, while one only
         recognised from the hostname just fills in what the environment did not set.
         """
         path = Path(path)
