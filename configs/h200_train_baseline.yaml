@@ -18,7 +18,7 @@ data:
     max_conversation_tokens: 768
   # DataLoader 设置
   loader:
-    num_workers: 2
+    num_workers: 4
     pin_memory: true
     persistent_workers: false
   # 训练任务与采样
@@ -64,7 +64,7 @@ evaluation:
   qa_batch_size: 32  # QA 验证批大小
 logging:
   aim_run_name: null # Optional; defaults to model name + timestamp.
-  aim_repo_path: /data/lz/MemoryQwen/.aim # Shared Aim repository for cross-run comparison.
+  aim_repo_path: /home/lijie/proj2/xmu/lz/MemoryQwen/.aim # Shared Aim repository for cross-run comparison.
   log_every: 25  # 训练日志记录间隔（步）
   aim_project: MemoryQwen  # Aim 项目名称
 memory:
