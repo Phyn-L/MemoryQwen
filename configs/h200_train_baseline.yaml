@@ -58,10 +58,10 @@ data:
       hotpotqa(distractor): 256
       race: 256
 evaluation:
-  autoregressive_every: 500  # 自回归验证的训练步间隔
+  autoregressive_every: 200  # 自回归验证的训练步间隔
   evaluation_max_samples: 1280  # 自回归评估的全局 validation QA 条数
   max_new_tokens: 64  # 自回归验证生成 token 上限
-  qa_batch_size: 32  # QA 验证批大小
+  qa_batch_size: 24  # QA 验证批大小
 logging:
   aim_run_name: null # Optional; defaults to model name + timestamp.
   aim_repo_path: /home/lijie/proj2/xmu/lz/MemoryQwen/.aim # Shared Aim repository for cross-run comparison.
@@ -122,9 +122,9 @@ optimizer:
   weight_decay: 0.01  # 权重衰减系数
 scheduler:
   name: cosine  # 优化器或调度器名称
-  warmup_steps: 1000  # 学习率预热步数
+  warmup_steps: 200  # 学习率预热步数
 training:
-  batch_size: 32  # 每个进程的训练批大小
+  batch_size: 24  # 每个进程的训练批大小
   epochs: 1  # 训练轮数
   max_grad_norm: 1.0  # 梯度裁剪最大范数
   seed: 42  # 随机种子
