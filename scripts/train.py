@@ -11,7 +11,6 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
 from utils.config import TrainConfig, dtype_from_name
-from utils.eval_monitor import EvalResourceMonitor
 from utils.machines import machine_names, resolve_aim_repo_path
 from src.data import SortishSampler
 from src.evaluator import Evaluator
@@ -92,6 +91,61 @@ def eval_log_payloads(task_metrics=None):
                 )
                 payload[f"{section}/{dataset}_{metric}"] = value
     return [payload] if payload else []
+
+
+def format_eval_metrics_table(task_metrics) -> str:
+    """Render autoregressive evaluation metrics as a compact terminal table."""
+    if not task_metrics:
+        return ""
+    lines = []
+    for task_name, metrics in task_metrics.items():
+        dataset_names = sorted(
+            {
+                key.removeprefix("dataset/").rsplit("/", 1)[0]
+                for key in metrics
+                if key.startswith("dataset/") and key.endswith("/count")
+            }
+        )
+        rows = []
+        for dataset in dataset_names:
+            rows.append(
+                [
+                    dataset,
+                    *(f"{metrics.get(f'dataset/{dataset}/{key}', 0.0):.4f}"
+                      for key in ("em", "f1", "rouge_l")),
+                    "-",
+                    "-",
+                    f"{metrics.get(f'dataset/{dataset}/count', 0.0):.0f}",
+                ]
+            )
+        rows.append(
+            [
+                "overall",
+                *(f"{metrics.get(key, 0.0):.4f}" for key in ("em", "f1", "rouge_l")),
+                f"{metrics['first_token_em']:.4f}" if "first_token_em" in metrics else "-",
+                f"{metrics['accuracy']:.4f}" if "accuracy" in metrics else "-",
+                f"{sum(float(row[-1]) for row in rows):.0f}",
+            ]
+        )
+        headers = ["dataset", "EM", "F1", "ROUGE-L", "first_token_em", "accuracy", "count"]
+        widths = [
+            max(len(headers[index]), *(len(row[index]) for row in rows))
+            for index in range(len(headers))
+        ]
+        separator = "+-" + "-+-".join("-" * width for width in widths) + "-+"
+        lines.append(f"[eval] {task_name}")
+        lines.append(separator)
+        lines.append("| " + " | ".join(
+            header.ljust(widths[index]) for index, header in enumerate(headers)
+        ) + " |")
+        lines.append(separator)
+        for row in rows:
+            lines.append("| " + " | ".join(
+                value.rjust(widths[index]) if index else value.ljust(widths[index])
+                for index, value in enumerate(row)
+            ) + " |")
+        lines.append(separator)
+    return "\n".join(lines)
 
 
 def _test_ids(path: Path) -> set[tuple[str, str]]:
@@ -556,19 +610,20 @@ def main() -> None:
                         f"max_new_tokens={cfg.evaluation.max_new_tokens})",
                         flush=True,
                     )
-                with EvalResourceMonitor(
-                    cfg.checkpoint.output_dir, step=step, device=device
-                ):
-                    metrics = evaluator.compare_reader_tasks(
-                        base_model,
-                        validation_loader,
-                        device,
-                        max_qa=cfg.evaluation.evaluation_max_samples,
-                        row_loader=validation_row_loader,
-                        include_recon=False,
-                    )
+                metrics = evaluator.compare_reader_tasks(
+                    base_model,
+                    validation_loader,
+                    device,
+                    max_qa=cfg.evaluation.evaluation_max_samples,
+                    row_loader=validation_row_loader,
+                    include_recon=False,
+                )
                 if is_main:
-                    print(f"[eval] step={step}: QA validation complete", flush=True)
+                    print(
+                        f"\n[eval] step={step}: validation complete\n"
+                        f"{format_eval_metrics_table(metrics)}",
+                        flush=True,
+                    )
             if run and is_main:
                 for payload in eval_log_payloads(metrics):
                     for name, value in payload.items():

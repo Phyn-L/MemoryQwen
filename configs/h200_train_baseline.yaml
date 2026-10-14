@@ -46,20 +46,20 @@ data:
     # 训练样本数上限，null 表示不限制
     train_max_samples: null
     # 验证样本数上限，null 表示不限制
-    validation_max_samples: 1280
+    validation_max_samples: 2560
     validation_source_file: contexts/1qa/1qa-validation.jsonl
     validation_datasets: [squad, msmarcov1.1, msmarcov2.1, hotpotqa(distractor), race]
     validation_max_context_tokens: 1536
     validation_sampling_workers: 4
     validation_max_samples_per_dataset:
-      squad: 256
-      msmarcov1.1: 256
-      msmarcov2.1: 256
-      hotpotqa(distractor): 256
-      race: 256
+      squad: 512
+      msmarcov1.1: 512
+      msmarcov2.1: 512
+      hotpotqa(distractor): 512
+      race: 512
 evaluation:
-  autoregressive_every: 500  # 自回归验证的训练步间隔
-  evaluation_max_samples: 1280  # 自回归评估的全局 validation QA 条数
+  autoregressive_every: 250  # 自回归验证的训练步间隔
+  evaluation_max_samples: 2560  # 自回归评估的全局 validation QA 条数
   max_new_tokens: 64  # 自回归验证生成 token 上限
   qa_batch_size: 24  # QA 验证批大小
 logging:
@@ -122,7 +122,7 @@ optimizer:
   weight_decay: 0.01  # 权重衰减系数
 scheduler:
   name: cosine  # 优化器或调度器名称
-  warmup_steps: 500  # 学习率预热步数
+  warmup_steps: 250  # 学习率预热步数
 training:
   batch_size: 24  # 每个进程的训练批大小
   epochs: 1  # 训练轮数

@@ -42,6 +42,34 @@ def test_evaluation_does_not_log_losses_or_empty_results():
     ]
 
 
+def test_eval_metrics_table_groups_datasets_and_metrics():
+    table = train.format_eval_metrics_table(
+        {
+            "qa_task": {
+                "em": 0.25,
+                "f1": 0.5,
+                "rouge_l": 0.75,
+                "first_token_em": 0.9,
+                "accuracy": 0.8,
+                "dataset/squad/em": 0.2,
+                "dataset/squad/f1": 0.4,
+                "dataset/squad/rouge_l": 0.6,
+                "dataset/squad/count": 10,
+                "dataset/foo/bar/em": 0.3,
+                "dataset/foo/bar/f1": 0.5,
+                "dataset/foo/bar/rouge_l": 0.7,
+                "dataset/foo/bar/count": 2,
+            }
+        }
+    )
+    assert all(label in table for label in ("dataset", "EM", "F1", "ROUGE-L", "first_token_em", "accuracy", "count"))
+    assert "| foo/bar " in table
+    assert "| squad " in table
+    assert "| overall " in table
+    assert "0.9000" in table
+    assert "0.8000" in table
+
+
 def test_window_progress_total_counts_only_batches_intersecting_rank_rows():
     from src.evaluator import _window_batch_count, row_window
 

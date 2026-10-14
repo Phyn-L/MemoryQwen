@@ -25,37 +25,29 @@ data:
     train_tasks: mix
     recon_ratio: 0.5
     recon_schedule: decay
-    # 比例调度曲线
     recon_schedule_curve: cosine
-    # 调度起始 reconstruction 比例
     recon_ratio_start: 1.0
-    # 调度结束 reconstruction 比例
     recon_ratio_end: 0.1
-    # reconstruction 比例下限
     recon_ratio_min: 0.1
-    # 每个 context 采样的 QA 数量
     qa_per_context: 8
     # sortish bucket 相对 batch size 的倍数
     sortish_bucket_multiplier: 50
-    # 训练数据集，all 表示使用全部数据集
     train_datasets: all
-    # 训练样本数上限，null 表示不限制
     train_max_samples: null
-    # 验证样本数上限，null 表示不限制
-    validation_max_samples: 1280
+    validation_max_samples: 2560
     validation_source_file: contexts/1qa/1qa-validation.jsonl
     validation_datasets: [squad, msmarcov1.1, msmarcov2.1, hotpotqa(distractor), race]
     validation_max_context_tokens: 1536
     validation_sampling_workers: 4
     validation_max_samples_per_dataset:
-      squad: 256
-      msmarcov1.1: 256
-      msmarcov2.1: 256
-      hotpotqa(distractor): 256
-      race: 256
+      squad: 512
+      msmarcov1.1: 512
+      msmarcov2.1: 512
+      hotpotqa(distractor): 512
+      race: 512
 evaluation:
   autoregressive_every: 5000  # 自回归验证的训练步间隔
-  evaluation_max_samples: 1280  # 自回归评估的全局 validation QA 条数
+  evaluation_max_samples: 2560  # 自回归评估的全局 validation QA 条数
   max_new_tokens: 64  # 自回归验证生成 token 上限
   qa_batch_size: 4  # QA 验证批大小
 logging:
