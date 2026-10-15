@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
 import os
-from pathlib import Path
 import re
-from typing import Any, Mapping
+import sys
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -52,14 +54,59 @@ def _load_yaml_with_base(path: Path, stack: tuple[Path, ...] = ()) -> dict[str, 
     return _deep_merge(merged, raw)
 
 
+#: Data settings that no longer exist, with what to use instead: a config from an older tree
+#: must say *which* field moved rather than unfold it into unrelated keywords.
+REMOVED_DATA_FIELDS = {
+    "validation_max_samples_per_dataset": (
+        "the evaluation does not sample any more; bound it with validation_max_samples and "
+        "evaluation.max_eval_sample_per_dataset"
+    ),
+    "validation_source_file": "validation always reads <data.files.root>/1qa/cache/validation.jsonl",
+    "validation_output_dir": "there is no sampled validation subset any more",
+    "validation_sampling_workers": "there is no validation sampling any more",
+}
+
+
+def drop_removed_data_fields(data: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Remove fields that no longer exist from a *saved* config; returns the names dropped.
+
+    Only for configs written by an older version of this project (a checkpoint's embedded
+    config). A live YAML still fails loudly -- see :func:`_flatten_data_groups`.
+    """
+    dropped: list[str] = []
+
+    def collect(mapping: Mapping[str, Any]) -> None:
+        for key, value in mapping.items():
+            if key in REMOVED_DATA_FIELDS:
+                dropped.append(str(key))
+            elif isinstance(value, Mapping):
+                collect(value)
+
+    def clean(mapping: Mapping[str, Any]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for key, value in mapping.items():
+            if key in REMOVED_DATA_FIELDS:
+                continue
+            out[key] = clean(value) if isinstance(value, Mapping) else value
+        return out
+
+    collect(data)
+    return clean(data), dropped
+
+
 def _flatten_data_groups(data: Mapping[str, Any]) -> dict[str, Any]:
-    """Accept grouped YAML data settings while keeping the flat DataConfig API."""
+    """Accept grouped YAML data settings while keeping the flat DataConfig API.
+
+    A key that is a ``DataConfig`` field keeps its value (even a mapping); any other mapping is
+    a group (``files``/``limits``/``loader``/``task``) and is unfolded. Field-aware unfolding is
+    what makes the removed-field check below possible: a stale mapping cannot silently scatter
+    its entries into the data namespace.
+    """
     flattened: dict[str, Any] = {}
     for key, value in data.items():
-        if key == "validation_max_samples_per_dataset" and isinstance(value, Mapping):
-            flattened[key] = dict(value)
-            continue
-        if isinstance(value, Mapping):
+        if key in REMOVED_DATA_FIELDS:
+            raise ValueError(f"data.{key} was removed: {REMOVED_DATA_FIELDS[key]}")
+        if isinstance(value, Mapping) and key not in DataConfig.__dataclass_fields__:
             nested = _flatten_data_groups(value)
             duplicate = set(flattened).intersection(nested)
             if duplicate:
@@ -69,6 +116,15 @@ def _flatten_data_groups(data: Mapping[str, Any]) -> dict[str, Any]:
             if key in flattened:
                 raise ValueError(f"duplicate data field: {key}")
             flattened[key] = value
+    if not flattened:
+        return flattened
+    unknown = sorted(set(flattened) - set(DataConfig.__dataclass_fields__))
+    if unknown:
+        hints = [
+            f"{name} ({REMOVED_DATA_FIELDS[name]})" if name in REMOVED_DATA_FIELDS else name
+            for name in unknown
+        ]
+        raise ValueError(f"unknown data field(s): {', '.join(hints)}")
     return flattened
 
 
@@ -76,7 +132,7 @@ def expand_env(value: str, overrides: Mapping[str, str] | None = None) -> str:
     """Expand ``${VAR}`` and ``${VAR:-default}`` references in one configuration string.
 
     Machine-specific locations must not be baked into tracked files. The model directory and
-    the aggregated data root live somewhere different on every cluster, and editing the YAML
+    the data root live somewhere different on every cluster, and editing the YAML
     there turns every ``git pull`` into a conflict -- which is exactly what happened. Writing
     them as ``${MODEL_ROOT:-/data/lz/hf_cache/hub}`` keeps the default valid where it was
     written and lets another machine override it, either through the environment (a gitignored
@@ -149,20 +205,6 @@ class ModelConfig:
 @dataclass
 class MemoryConfig:
     memory_length: int = 8
-    qa_weight: float = 1.0
-    recon_weight: float = 1.0
-    # Distil the *full-context* distribution into the memory-conditioned one:
-    # T^2 * KL(p_teacher || p_student) where the teacher is the plain causal LM over the
-    # context (free: the encoder pass's context rows) and the student is the memory-prefixed
-    # autoencoding pass. 0 = off. Runs the prefix-KV path independently of its CE weight.
-    distill_weight: float = 0.0
-    distill_temperature: float = 1.0
-    # Positions scored by the distillation objective; <= 0 scores every position.
-    distill_positions: int = 256
-    # Weight each position by the teacher's own entropy instead of uniformly.
-    distill_entropy_weight: bool = False
-    # Truncate the teacher distribution to its k most likely tokens (0 = keep all).
-    distill_topk: int = 0
     # Per-question read-out over the cached (question-agnostic) memory: R learnable latents
     # cross-attend over the question and the memory and are inserted as R extra input
     # positions between the question and the answer. 0 = off (the historical behaviour).
@@ -184,9 +226,45 @@ class MemoryConfig:
 
 
 @dataclass
+class LossConfig:
+    """Every knob the objective reads.
+
+    Kept apart from :class:`MemoryConfig` so that the *architecture* (slots, resampler
+    width, read-out) and the *objective* (weights, distillation budget, logits chunk size)
+    can be read, swept and diffed independently.
+    """
+
+    qa_weight: float = 1.0
+    recon_weight: float = 1.0
+    # Distil the *full-context* distribution into the memory-conditioned one:
+    # T^2 * KL(p_teacher || p_student) where the teacher is the plain causal LM over the
+    # context (free: the encoder pass's context rows) and the student is the memory-prefixed
+    # autoencoding pass. 0 = off. Runs the prefix-KV path independently of its CE weight.
+    distill_weight: float = 0.0
+    distill_temperature: float = 1.0
+    # Positions scored by the distillation objective; <= 0 scores every position.
+    distill_positions: int = 256
+    # Weight each position by the teacher's own entropy instead of uniformly.
+    distill_entropy_weight: bool = False
+    # Truncate the teacher distribution to its k most likely tokens (0 = keep all).
+    distill_topk: int = 0
+    # Vocabulary rows projected per chunk. Bounds the [rows, vocab] logits that stay alive
+    # for the backward pass; the whole batch is still projected in one flattened pass, so
+    # this only trades peak memory against kernel count.
+    max_logits_rows: int = 256
+
+
+@dataclass
 class DataConfig:
-    root: str = "/data/lz/contexts"
-    conversation_file: str | None = "/data/lz/contexts/ift_c1qa.jsonl"
+    """Where the JSONL data lives and how it is filtered.
+
+    ``root`` is the data tree produced by ``scripts/data/``; the 1QA splits are read from
+    ``<root>/1qa/1qa-{train,validation,test}.jsonl`` unless a split overrides its path.
+    """
+
+    root: str = "contexts"
+    # Explicit per-split sources; None means "use <root>/1qa/1qa-<split>.jsonl".
+    conversation_file: str | None = None
     train_conversation_file: str | None = None
     validation_conversation_file: str | None = None
     test_conversation_file: str | None = None
@@ -213,12 +291,15 @@ class DataConfig:
     max_conversation_tokens: int = 768
     max_samples: int | None = None
     train_max_samples: int | None = None
+    #: Deterministic cap on the validation contexts loaded (``None`` = all of them). The
+    #: autoregressive budget (``evaluation.max_eval_sample_per_dataset``) bounds decoding; the
+    #: evaluation takes the first capped QA rows of each dataset in file order.
     validation_max_samples: int | None = None
-    validation_source_file: str | None = None
-    validation_output_dir: str | None = None
-    validation_max_context_tokens: int | None = None
-    validation_max_samples_per_dataset: dict[str, int] | None = None
-    validation_sampling_workers: int = 4
+    #: Where the loader's own preprocessing caches go (filtered rows for a file that is not the
+    #: built cache, and the per-context lengths the sortish sampler buckets by). ``None`` puts
+    #: them under ``<root>/1qa/cache/loader``; set it to local scratch when the data root is a
+    #: slow network filesystem.
+    preprocess_cache_dir: str | None = None
     filter_long_context: bool = True
     filter_no_qa: bool = True
     tokenizer_filter_batch_size: int = 2048
@@ -237,6 +318,51 @@ class DataConfig:
     persistent_workers: bool = True
     # "append" writes EOS after the last answer token; the legacy "overwrite" mode
     # overwrites that token whenever the answer is the longest in the batch.
+
+    SPLIT_DIRNAME = "1qa"
+
+    def meta_file(self, split: str) -> Path:
+        """The raw, unfiltered split ``scripts/data/build_1qa.py`` writes.
+
+        One line per context with every QA pair of that context: no length cap and no
+        per-dataset row cap.
+        """
+        if split not in {"train", "validation", "test"}:
+            raise ValueError(f"unknown data split: {split!r}")
+        return Path(self.root) / self.SPLIT_DIRNAME / "meta" / f"meta_{split}.json"
+
+    def cache_file(self, split: str) -> Path:
+        """The filtered split ``scripts/data/build_cache.py`` writes from the meta file."""
+        if split not in {"train", "validation"}:
+            raise ValueError(
+                f"only train and validation have a filtered cache (asked {split!r})"
+            )
+        return Path(self.root) / self.SPLIT_DIRNAME / "cache" / f"{split}.jsonl"
+
+    def split_file(self, split: str) -> str:
+        """The file a training or evaluation run reads for one split.
+
+        ``train`` and ``validation`` resolve to the filtered cache (built from the meta file
+        with this config's filters); ``test`` resolves to the raw meta file because there is no
+        filtered test product. An explicit ``<split>_conversation_file`` always wins
+        (``conversation_file`` is the legacy alias for the train split).
+        """
+        if split not in {"train", "validation", "test"}:
+            raise ValueError(f"unknown data split: {split!r}")
+        explicit = {
+            "train": self.train_conversation_file or self.conversation_file,
+            "validation": self.validation_conversation_file,
+            "test": self.test_conversation_file,
+        }[split]
+        if explicit:
+            return str(explicit)
+        if split in {"train", "validation"}:
+            return str(self.cache_file(split))
+        return str(self.meta_file(split))
+
+    def validation_source(self) -> str:
+        """Validation file a run evaluates on: the filtered cache."""
+        return self.split_file("validation")
 
 
 @dataclass
@@ -259,17 +385,24 @@ class EvaluationConfig:
     autoregressive_every: int = 4000
     max_new_tokens: int = 128
     qa_batch_size: int = 4
-    # QA rows the *whole* autoregressive evaluation decodes, split into contiguous windows
-    # of the validation split's row order (src/evaluator.py::row_window). A global budget
-    # rather than a per-rank one, so changing the GPU count changes neither the scored rows
-    # nor the noise level; per-rank work still shrinks as ranks grow, which is what keeps the
-    # evaluation inside the NCCL watchdog timeout (10 minutes).
-    evaluation_max_samples: int = 1280
+    # Teacher-forced reconstruction score on the unique contexts referenced by the
+    # selected QA sample. One memory-prefixed forward per context, no decoding.
+    recon_metrics: bool = True
+    # Autoregressive context reconstruction (``max_context_tokens`` decodes per context).
+    # Off by default; ``recon_metrics`` is the cheap stand-in.
+    recon_autoregressive: bool = False
+    # Seeded QA sample per dataset, across all ranks. No combined QA sample cap.
+    # Selection is deterministic and independent of the number of GPUs.
+    max_eval_sample_per_dataset: int = 1280
 
 
 @dataclass
 class TrainingConfig:
     batch_size: int = 2
+    # Micro-batches per optimizer step: the effective batch is
+    # ``batch_size * gradient_accumulation_steps * world_size``. 1 keeps the historical
+    # behaviour (one optimizer step per DataLoader batch).
+    gradient_accumulation_steps: int = 1
     epochs: int = 1
     max_grad_norm: float = 1.0
     seed: int = 42
@@ -301,6 +434,7 @@ class LoggingConfig:
 class TrainConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
+    loss: LossConfig = field(default_factory=LossConfig)
     data: DataConfig = field(default_factory=DataConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
@@ -313,7 +447,7 @@ class TrainConfig:
     machine: str | None = None
 
     @classmethod
-    def from_file(cls, path: str | Path, machine: str | None = None) -> "TrainConfig":
+    def from_file(cls, path: str | Path, machine: str | None = None) -> TrainConfig:
         """Load a config, resolving machine-specific paths.
 
         ``machine`` (or ``machine:`` in the file, or ``MACHINE`` in the environment) selects
@@ -322,9 +456,6 @@ class TrainConfig:
         recognised from the hostname just fills in what the environment did not set.
         """
         path = Path(path)
-        from utils.config_paths import resolve_config_path
-
-        path = resolve_config_path(path)
         if path.suffix.lower() not in {".yaml", ".yml"}:
             raise ValueError(
                 f"configuration must be a YAML file (.yaml/.yml), got: {path}"
@@ -334,8 +465,9 @@ class TrainConfig:
 
     @classmethod
     def from_dict(
-        cls, raw: Mapping[str, Any], machine: str | None = None
-    ) -> "TrainConfig":
+        cls, raw: Mapping[str, Any], machine: str | None = None,
+        tolerate_removed_data_fields: bool = False,
+    ) -> TrainConfig:
         unknown = set(raw) - set(cls.__dataclass_fields__)
         if unknown:
             raise ValueError(f"Unknown configuration sections: {sorted(unknown)}")
@@ -345,14 +477,17 @@ class TrainConfig:
             overrides = fill_missing(overrides, os.environ)
         values = expand_env_values(raw, overrides)
         values = dict(values)
+        if tolerate_removed_data_fields:
+            values = dict(values)
+            cleaned, dropped = drop_removed_data_fields(values.get("data", {}))
+            if dropped:
+                print(
+                    "warning: ignoring removed data field(s) in the saved config: "
+                    + ", ".join(sorted(set(dropped))),
+                    file=sys.stderr,
+                )
+            values["data"] = cleaned
         data_values = _flatten_data_groups(values.get("data", {}))
-        # Conversation files are the only supported training source. Keep the default
-        # machine-aware so a legacy YAML without an explicit path still resolves to the
-        # current JSONL location.
-        data_values.setdefault(
-            "conversation_file",
-            f"{overrides.get('DATA_ROOT', '/data/lz/contexts')}/ift_c1qa.jsonl",
-        )
         for key in ("train_datasets", "validation_datasets", "test_datasets"):
             if isinstance(data_values.get(key), list):
                 data_values[key] = tuple(data_values[key])
@@ -363,20 +498,62 @@ class TrainConfig:
         if isinstance(model_values.get("target_modules"), list):
             model_values["target_modules"] = tuple(model_values["target_modules"])
         memory_values = dict(values.get("memory", {}))
+        # ``off`` is a YAML 1.1 boolean, so a bare `readout_mode: off` arrives as False and
+        # used to fail validation with "invalid memory.readout_mode". The documented value is
+        # the string name; accept the boolean spelling too.
+        if memory_values.get("readout_mode") is False:
+            memory_values["readout_mode"] = "off"
         if isinstance(memory_values.get("context_layer_indices"), list):
             memory_values["context_layer_indices"] = tuple(
                 memory_values["context_layer_indices"]
             )
+        # The objective moved out of ``memory:``; a stale YAML must say so instead of
+        # silently training with the default weights.
+        moved = sorted(
+            set(memory_values).intersection(LossConfig.__dataclass_fields__)
+        )
+        if moved:
+            raise ValueError(
+                f"memory.{', memory.'.join(moved)} moved to the loss section; "
+                f"move {'these fields' if len(moved) > 1 else 'this field'} under `loss:`"
+            )
         checkpoint_values = dict(values.get("checkpoint", {}))
         # Legacy checkpoints embed this removed scheduling field.
         checkpoint_values.pop("save_every_steps", None)
+        evaluation_values = dict(values.get("evaluation", {}))
+        if "recon_max_contexts" in evaluation_values:
+            if not tolerate_removed_data_fields:
+                raise ValueError(
+                    "evaluation.recon_max_contexts was removed; Recon now uses contexts "
+                    "from the sampled QA rows"
+                )
+            evaluation_values.pop("recon_max_contexts")
+            print(
+                "warning: ignoring saved evaluation.recon_max_contexts; Recon now uses "
+                "contexts from the sampled QA rows",
+                file=sys.stderr,
+            )
+        if "evaluation_max_samples" in evaluation_values:
+            if not tolerate_removed_data_fields:
+                raise ValueError(
+                    "evaluation.evaluation_max_samples was replaced by "
+                    "evaluation.max_eval_sample_per_dataset (QA cap per dataset)"
+                )
+            previous = evaluation_values.pop("evaluation_max_samples")
+            evaluation_values.setdefault("max_eval_sample_per_dataset", previous)
+            print(
+                "warning: saved evaluation.evaluation_max_samples is now interpreted as "
+                "evaluation.max_eval_sample_per_dataset (QA cap per dataset)",
+                file=sys.stderr,
+            )
         return cls(
             model=ModelConfig(**model_values),
             memory=MemoryConfig(**memory_values),
+            loss=LossConfig(**values.get("loss", {})),
             data=DataConfig(**data_values),
             optimizer=OptimizerConfig(**optimizer_values),
             scheduler=SchedulerConfig(**values.get("scheduler", {})),
-            evaluation=EvaluationConfig(**values.get("evaluation", {})),
+            evaluation=EvaluationConfig(**evaluation_values),
             training=TrainingConfig(**values.get("training", {})),
             checkpoint=CheckpointConfig(**checkpoint_values),
             logging=LoggingConfig(**values.get("logging", {})),
@@ -387,20 +564,13 @@ class TrainConfig:
         return asdict(self)
 
     def validate(self) -> None:
-        d, m = self.data, self.memory
+        d, m, loss = self.data, self.memory, self.loss
         if self.model.attn_implementation not in {"sdpa", "eager"}:
             raise ValueError("model.attn_implementation must be sdpa or eager")
         if d.max_context_tokens <= 0:
             raise ValueError("data.max_context_tokens must be positive")
-        if not (
-            d.conversation_file
-            or d.train_conversation_file
-            or d.validation_conversation_file
-            or d.test_conversation_file
-        ):
-            raise ValueError(
-                "conversation data requires at least one conversation file"
-            )
+        if not str(d.root).strip():
+            raise ValueError("data.root must point at the scripts/data output tree")
         if d.max_input_tokens <= 0:
             raise ValueError("data.max_input_tokens must be positive")
         if d.max_input_tokens < d.max_context_tokens:
@@ -491,16 +661,18 @@ class TrainConfig:
             raise ValueError(
                 "memory.reader_memory_source must be memory_hidden, memory_embedding or layer_mean"
             )
-        if m.distill_weight < 0:
-            raise ValueError("memory.distill_weight must be non-negative")
-        if m.distill_temperature <= 0:
-            raise ValueError("memory.distill_temperature must be positive")
-        if m.distill_positions < 0:
+        if loss.distill_weight < 0:
+            raise ValueError("loss.distill_weight must be non-negative")
+        if loss.distill_temperature <= 0:
+            raise ValueError("loss.distill_temperature must be positive")
+        if loss.distill_positions < 0:
             raise ValueError(
-                "memory.distill_positions must be >= 0 (0 scores every position)"
+                "loss.distill_positions must be >= 0 (0 scores every position)"
             )
-        if m.distill_topk < 0:
-            raise ValueError("memory.distill_topk must be >= 0")
+        if loss.distill_topk < 0:
+            raise ValueError("loss.distill_topk must be >= 0")
+        if loss.max_logits_rows <= 0:
+            raise ValueError("loss.max_logits_rows must be positive")
         if m.readout_mode not in {
             "memory_question",
             "memory_only",
@@ -530,25 +702,27 @@ class TrainConfig:
                 raise ValueError(
                     "memory.readout_hidden_size must be divisible by readout_heads"
                 )
-        if m.qa_weight < 0 or m.recon_weight < 0:
+        if loss.qa_weight < 0 or loss.recon_weight < 0:
             raise ValueError("loss weights must be non-negative")
         qa_active = d.train_tasks in {"qa", "mix"}
         recon_active = d.train_tasks in {"recon", "mix"}
-        if qa_active and m.qa_weight <= 0:
-            raise ValueError("QA training requires memory.qa_weight > 0")
-        if recon_active and m.recon_weight <= 0:
-            raise ValueError("Recon training requires memory.recon_weight > 0")
+        if qa_active and loss.qa_weight <= 0:
+            raise ValueError("QA training requires loss.qa_weight > 0")
+        if recon_active and loss.recon_weight <= 0:
+            raise ValueError("Recon training requires loss.recon_weight > 0")
         t = self.training
         if t.batch_size <= 0 or t.epochs <= 0:
             raise ValueError("batch_size and epochs must be positive")
+        if t.gradient_accumulation_steps <= 0:
+            raise ValueError("training.gradient_accumulation_steps must be positive")
         if t.max_grad_norm <= 0:
             raise ValueError("training.max_grad_norm must be positive")
         if self.evaluation.autoregressive_every <= 0:
             raise ValueError("evaluation.autoregressive_every must be positive")
         if self.evaluation.qa_batch_size <= 0:
             raise ValueError("evaluation.qa_batch_size must be positive")
-        if self.evaluation.evaluation_max_samples <= 0:
-            raise ValueError("evaluation.evaluation_max_samples must be positive")
+        if self.evaluation.max_eval_sample_per_dataset <= 0:
+            raise ValueError("evaluation.max_eval_sample_per_dataset must be positive")
         if self.logging.log_every <= 0:
             raise ValueError("logging.log_every must be positive")
 

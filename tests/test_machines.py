@@ -17,8 +17,8 @@ Run with `python tests/test_machines.py` or `pytest tests`.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -30,7 +30,6 @@ from utils.machines import (  # noqa: E402
     machine_environ,
     machine_names,
     resolve_aim_repo_path,
-    resolve_machine,
 )
 
 REPO = Path(__file__).resolve().parent.parent
@@ -70,10 +69,13 @@ def test_the_table_holds_both_machines_with_distinct_paths():
     for name, entry in MACHINES.items():
         assert entry["MODEL_ROOT"].startswith("/"), name
         assert entry["DATA_ROOT"].startswith("/"), name
-        assert entry["DATA_ROOT"].endswith(("aggregated", "contexts")), name
+        # The deprecated `<root>/aggregated` tree must not come back as a default.
+        assert not entry["DATA_ROOT"].endswith("aggregated"), name
     assert MACHINES["4090"]["MODEL_ROOT"] != MACHINES["h200"]["MODEL_ROOT"]
-    assert MACHINES["4090"]["DATA_ROOT"] == "/data/lz/contexts"
-    assert MACHINES["h200"]["DATA_ROOT"] == "/home/lijie/proj2/xmu/lz/contexts"
+    # DATA_ROOT is the tree that holds the 1QA splits, i.e. the repository's contexts/
+    # directory, which is what scripts/data/ writes into.
+    assert MACHINES["4090"]["DATA_ROOT"] == "/data/lz/MemoryQwen/contexts"
+    assert MACHINES["h200"]["DATA_ROOT"] == "/home/lijie/proj2/xmu/lz/MemoryQwen/contexts"
     assert MACHINES["4090"]["AIM_REPO"] == "/data/lz/MemoryQwen/.aim"
     assert MACHINES["h200"]["AIM_REPO"] == "/home/lijie/proj2/xmu/lz/MemoryQwen/.aim"
 
@@ -111,11 +113,18 @@ def test_an_explicit_machine_supplies_the_paths_even_over_an_exported_one():
 
 def test_the_machine_field_in_the_config_is_honoured(tmp_path):
     with _Hidden("no-such-machine"):
-        text = CONFIG.read_text(encoding="utf-8").replace(
-            "model:", "machine: h200\nmodel:", 1
-        )
+        # A standalone config: copying a preset would break on its `_base_` files, and this
+        # test is about the `machine:` field, not about composition.
         path = tmp_path / "with_machine.yaml"
-        path.write_text(text, encoding="utf-8")
+        path.write_text(
+            "machine: h200\n"
+            "model:\n"
+            "  name_or_path: ${MODEL_ROOT:-/fallback}/models--Qwen--Qwen3-1.7B/snapshots/x\n"
+            "data:\n"
+            "  files:\n"
+            "    root: ${DATA_ROOT:-contexts}\n",
+            encoding="utf-8",
+        )
         cfg = TrainConfig.from_file(path)
         assert cfg.machine == "h200"
         assert cfg.data.root == MACHINES["h200"]["DATA_ROOT"]
@@ -176,7 +185,9 @@ def test_an_unrecognised_hostname_changes_nothing():
     with _Hidden(hostname="some-other-box"):
         cfg = TrainConfig.from_file(CONFIG)
         assert cfg.machine is None
-        assert cfg.data.root == "/data/lz/contexts/aggregated"
+        # The shipped default is the repo-relative tree scripts/data/ writes.
+        assert cfg.data.root == "contexts"
+        assert cfg.data.split_file("train") == "contexts/1qa/cache/train.jsonl"
         assert cfg.model.name_or_path.startswith("/data/lz/hf_cache/hub/models--")
 
 

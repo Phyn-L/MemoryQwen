@@ -3,9 +3,10 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 
 def compute_fingerprint(payload: dict[str, Any]) -> str:

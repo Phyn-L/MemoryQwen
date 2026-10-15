@@ -9,9 +9,9 @@ source array in memory.
 from __future__ import annotations
 
 import argparse
-from concurrent.futures import ProcessPoolExecutor
 import json
 from collections import deque
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 from tqdm import tqdm

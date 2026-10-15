@@ -1,0 +1,30 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  cpu-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          grep -v -e '^#' -e '^torch==' requirements.lock > /tmp/req-cpu.txt || true
+          pip install -r /tmp/req-cpu.txt
+      - name: ruff
+        run: pip install ruff && ruff check .
+      - name: pytest
+        env:
+          # Pin hash randomisation: the collate keys its deterministic turn sampling on a
+          # blake2s digest, and python's own hash() salt must not leak into anything else.
+          PYTHONHASHSEED: "0"
+        run: pytest -q

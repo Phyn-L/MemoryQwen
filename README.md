@@ -77,7 +77,6 @@ bash scripts/sync_remote.sh all
 | memory、KV cache、梯度、dtype、辅助目标 | [方法与实现](docs/guides/METHOD.md) |
 | reader 开关及约束 | [reader 选项](docs/guides/READER_OPTIONS.md) |
 | 每份 YAML 的用途 | [配置索引](configs/README.md) |
-| A/B、压缩比、8B 的实验记录 | [实验索引](docs/experiments/README.md) |
 | 历史修复与可视化 | [文档导航](docs/README.md) |
 
 ## 代码位置
@@ -89,6 +88,6 @@ bash scripts/sync_remote.sh all
 - `configs/`：按模型规模组织的完整 YAML。
 - `outputs/`、`logs/`、`wandb/`：本地运行产物，保持现有路径并由 Git 忽略。
 
-文档中的历史实验数字不代表当前重新测量；当前使用说明、历史证据和待验证计划分别索引。目录整理范围见[整理方案](docs/REPOSITORY_LAYOUT_PLAN.md)。
+文档中的历史实验数字不代表当前重新测量；当前使用说明、历史证据和待验证计划分别索引。
 
 当前推荐 checkpoint 编排入口为 `bash scripts/evaluation/test_all_suite.sh`。旧 shell wrappers 和 `scripts/archive/` 已删除；文中的历史配置路径需按 configs/README.md 选择当前配置。

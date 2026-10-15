@@ -1,27 +1,9 @@
-# 消融配置；未列出的字段继承训练基线。
-_base_: ../train_baseline.yaml
+# 消融配置：本文件只声明一个科学变量，其余 harness 设置继承
+# `_ablation_common.yaml`（它再继承 `../train_baseline.yaml`）。
+_base_:
+- ../train_baseline.yaml
+- _ablation_common.yaml
 checkpoint:
-  output_dir: outputs/ablation_memory_length  # 输出目录
-data:
-  limits:
-    max_context_tokens: 2048  # 覆盖 context token 上限
-  task:
-    # 测试数据集覆盖项
-    test_datasets:  # 覆盖测试数据集
-    - squad
-    # 验证数据集覆盖项
-    validation_datasets:  # 覆盖验证数据集
-    - squad
-evaluation:
-  autoregressive_every: 400  # 自回归验证间隔
-  evaluation_max_samples: 1024  # 自回归验证 QA 上限
-  max_new_tokens: 32  # 生成 token 上限
-  qa_batch_size: 4  # QA 验证批大小
+  output_dir: outputs/ablation_memory_length
 memory:
-  memory_length: 32  # memory slot 数
-  readout_length: 8  # readout token 数
-scheduler:
-  warmup_steps: 200  # 预热步数
-training:
-  batch_size: 1  # 训练批大小
-  deterministic: false  # 是否启用确定性算法
+  memory_length: 32  # 消融变量：memory slot 数

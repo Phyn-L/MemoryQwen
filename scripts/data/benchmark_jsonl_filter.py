@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 from tqdm.auto import tqdm
@@ -275,12 +275,10 @@ def main() -> None:
 
     cfg = _optional_config(args.config, args.machine)
     path = args.path or (
-        Path(cfg.data.conversation_file)
-        if cfg is not None and cfg.data.conversation_file
-        else None
+        Path(cfg.data.split_file("train")) if cfg is not None else None
     )
     if path is None:
-        parser.error("--path is required unless --config supplies data.conversation_file")
+        parser.error("--path is required unless --config resolves a train split path")
     model = args.model or (cfg.model.name_or_path if cfg is not None else None)
     filter_long_context = not args.no_long_context_filter
     tokenizer = _load_tokenizer(model) if filter_long_context else None

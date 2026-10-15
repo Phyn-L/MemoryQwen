@@ -53,7 +53,7 @@ from utils.config import TrainConfig
 
 base_path = Path(os.environ["BASE_CONFIG"])
 out_root = Path(os.environ["OUTPUT_ROOT"])
-base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
+base = TrainConfig.from_file(base_path).to_dict()
 
 # Context and memory lengths are fixed for all three independent runs.
 base.setdefault("data", {})["max_context_tokens"] = 1024

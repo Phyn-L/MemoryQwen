@@ -6,6 +6,8 @@
 - `test.py`：统一入口依赖的 checkpoint evaluator。
 - `evaluation/test_all_suite.sh`：统一 checkpoint 多数据集评测入口；`evaluation/test_icl_suite.py`：独立 ICL 基线。
 - `experiments/`：研究消融与实验编排脚本。
+- `data/build_1qa.py`：从本地 HF cache 重建原始 `1qa/meta/`（不依赖配置）。
+- `data/build_cache.py`：按训练 YAML 过滤出 `1qa/cache/{train,validation}.jsonl`（训练启动时会自动补建）。
 - `data/`：数据下载与准备。
 - `sync_h200.sh`：以本地为准同步 H200。
 

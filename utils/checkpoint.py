@@ -1,9 +1,55 @@
-from pathlib import Path
-import os
 import math
+import os
 import random
 import shutil
+from pathlib import Path
+
 import torch
+
+
+def _capture_rng_state():
+    """Python, NumPy, torch CPU and every CUDA device RNG state.
+
+    The torch *CPU* state alone is not enough. ``losses.sample_positions`` draws on the device
+    RNG (CUDA during training) and dropout uses it too, so a resumed run would otherwise
+    sample a different distillation subset -- and different dropout masks -- than the
+    uninterrupted run it is continuing, with ``deterministic: true`` unable to help because
+    deterministic algorithms only fix the *operators*, not the random stream.
+    """
+    state = {"python": random.getstate(), "torch": torch.get_rng_state()}
+    try:
+        import numpy as np
+    except ImportError:  # pragma: no cover - numpy is optional for this project
+        pass
+    else:
+        state["numpy"] = np.random.get_state()
+    if torch.cuda.is_available():
+        state["torch_cuda"] = torch.cuda.get_rng_state_all()
+    return state
+
+
+def _restore_rng_state(state):
+    if not state:
+        return
+    if state.get("python") is not None:
+        random.setstate(state["python"])
+    if state.get("torch") is not None:
+        torch.set_rng_state(state["torch"])
+    if state.get("numpy") is not None:
+        try:
+            import numpy as np
+        except ImportError:  # pragma: no cover
+            pass
+        else:
+            np.random.set_state(state["numpy"])
+    cuda = state.get("torch_cuda")
+    if cuda and torch.cuda.is_available():
+        # A checkpoint written on an 8-GPU node cannot restore 8 device generators on a
+        # 4-GPU one; resuming with a different device count is already a different run (the
+        # sampler and the data sharding differ too), so keep the devices that do match.
+        if len(cuda) == torch.cuda.device_count():
+            torch.cuda.set_rng_state_all(cuda)
+
 
 class CheckpointManager:
     def __init__(self, output_dir):
@@ -23,7 +69,16 @@ class CheckpointManager:
         # Only trainable tensors are stored: the frozen Qwen backbone is ~1.7B parameters
         # that never change, so saving it would multiply checkpoint size by roughly ten.
         trainable = {n: p.detach().cpu() for n,p in model.named_parameters() if p.requires_grad}
-        state = {"model": trainable, "optimizer": optimizer.state_dict(), "scheduler": scheduler.state_dict(), "step": step, "config": config, "aim_run_id": aim_run_id, "world_size": int(world_size), "rng": {"python": random.getstate(), "torch": torch.get_rng_state()}}
+        state = {
+            "model": trainable,
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "step": step,
+            "config": config,
+            "aim_run_id": aim_run_id,
+            "world_size": int(world_size),
+            "rng": _capture_rng_state(),
+        }
         score = None if validation_f1 is None else float(validation_f1)
         improved = score is not None and math.isfinite(score) and (
             self.best_f1 is None or score > self.best_f1
@@ -106,10 +161,12 @@ class CheckpointManager:
                 )
             print(f"[checkpoint] WARNING: {detail}")
 
-        if optimizer is not None and state.get("optimizer") is not None: optimizer.load_state_dict(state["optimizer"])
-        if scheduler is not None and state.get("scheduler") is not None: scheduler.load_state_dict(state["scheduler"])
+        if optimizer is not None and state.get("optimizer") is not None:
+            optimizer.load_state_dict(state["optimizer"])
+        if scheduler is not None and state.get("scheduler") is not None:
+            scheduler.load_state_dict(state["scheduler"])
         if restore_rng and state.get("rng"):
-            random.setstate(state["rng"]["python"]); torch.set_rng_state(state["rng"]["torch"])
+            _restore_rng_state(state["rng"])
         self.best_f1 = state.get("best_f1")
         self.best_step = state.get("best_step")
         self.loaded = {

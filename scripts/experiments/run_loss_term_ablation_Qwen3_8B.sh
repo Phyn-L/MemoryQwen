@@ -54,12 +54,18 @@ import yaml
 
 from utils.config import TrainConfig
 
+# Objective knobs live in `loss:`; everything else is architecture (`memory:`).
+LOSS_KEYS = {
+    "qa_weight", "recon_weight", "distill_weight", "distill_temperature",
+    "distill_positions", "distill_entropy_weight", "distill_topk", "max_logits_rows",
+}
+
 base_path = Path(os.environ["BASE_CONFIG"])
 out_root = Path(os.environ["OUTPUT_ROOT"])
-base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
+base = TrainConfig.from_file(base_path).to_dict()
 
 # with 256 positions and entropy weighting disabled. Other objectives are off.
-base.setdefault("memory", {}).update(
+base.setdefault("loss", {}).update(
     qa_weight=1.0,
     distill_weight=0.0,
     distill_entropy_weight=False,
@@ -72,8 +78,11 @@ runs = {
 
 for name, overrides in runs.items():
     config = copy.deepcopy(base)
-    memory = config.setdefault("memory", {})
-    memory.update(overrides)
+    loss_overrides = {k: v for k, v in overrides.items() if k in LOSS_KEYS}
+    memory_overrides = {k: v for k, v in overrides.items() if k not in LOSS_KEYS}
+    for section, values in (("loss", loss_overrides), ("memory", memory_overrides)):
+        if values:
+            config.setdefault(section, {}).update(values)
     config.setdefault("checkpoint", {})["output_dir"] = str(out_root)
     logging = config.setdefault("logging", {})
     logging["aim_run_name"] = name
@@ -105,5 +114,3 @@ for name in "${RUNS[@]}"; do
 done
 
 echo "[ablation] all runs finished; outputs: $OUTPUT_ROOT"
-
-python /home/sean/burn.py

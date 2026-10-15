@@ -79,7 +79,7 @@ from utils.config import TrainConfig
 
 base_path = Path(os.environ["BASE_CONFIG"])
 out_root = Path(os.environ["OUTPUT_ROOT"])
-base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
+base = TrainConfig.from_file(base_path).to_dict()
 
 # Resource contract for 8x H200. Four contexts per rank gives global batch 32.
 # The new Shine JSONL is much larger than the old aggregated corpus, so the default
@@ -108,7 +108,7 @@ base.setdefault("evaluation", {}).update(
     # 250k contexts × two mixed tasks / global batch 32 ≈ 15.6k steps.
     # AR every 2000 gives eight checkpoints plus the mandatory final evaluation.
     autoregressive_every=int(os.environ["AR_EVERY"]),
-    autoregressive_max_qa=1024,
+    max_eval_sample_per_dataset=1024,
     qa_batch_size=4,
     max_new_tokens=32,
 )
@@ -117,12 +117,14 @@ base.setdefault("logging", {}).update(log_every=25)
 # These are legacy auxiliary branches.  Keep them off in every v2 arm so the
 # comparison measures the new writer and task mixture rather than a second loss.
 base.setdefault("memory", {}).update(
-    distill_weight=0.0,
     readout_length=8,
     context_layer_indices=[-1],
     memory_resampler_layers=2,
     memory_resampler_heads=4,
     memory_resampler_hidden_size=256,
+)
+base.setdefault("loss", {}).update(
+    distill_weight=0.0,
 )
 
 runs = {

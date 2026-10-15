@@ -142,3 +142,68 @@ def test_question_and_answer_lengths_are_filtered_before_caching(tmp_path: Path)
     )
 
     assert len(dataset) == 1
+
+
+def test_the_serial_and_parallel_filters_keep_the_same_rows(tmp_path: Path):
+    """One filter implementation, two drivers: the rows must be identical.
+
+    The rules used to be written twice (once for the process pool, once for the in-process
+    path), which is exactly how a filter drifts between them -- the pool version stopped
+    checking conversation length while the serial one still did, or the reverse.
+    """
+    source = tmp_path / "conversation.jsonl"
+    source.write_text(
+        "\n".join(
+            json.dumps(row)
+            for row in [_row(f"one two three {index}") for index in range(6)]
+            + [_row("one two", False), _row(""), _row("one" * 9)]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def load(workers):
+        return ConversationDataset(
+            source,
+            tokenizer=_Tokenizer(),
+            max_context_tokens=4,
+            max_input_tokens=8,
+            max_conversation_tokens=16,
+            allow_empty=True,
+            num_workers=workers,
+        )
+
+    serial, parallel = load(0), load(3)
+    assert len(serial) == len(parallel)
+    assert [record.context for record in serial] == [record.context for record in parallel]
+
+
+def test_the_process_pool_filter_keeps_the_same_rows_in_the_same_order(tmp_path):
+    """The loader's parallel filter and the cache build share one driver; order must hold.
+
+    ``ConversationDataset(num_workers=2)`` sends chunks through a process pool, and the dataset
+    order decides which context a batch belongs to, so the accepted rows must come back exactly
+    as the serial path returns them.
+    """
+    path = tmp_path / "rows.jsonl"
+    rows = []
+    for index in range(12):
+        row = _row(f"context {index} " + "x" * index, assistant=index % 4 != 0)
+        row["dataset"] = "squad"
+        row["id"] = f"squad:{index}"
+        rows.append(row)
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+
+    def contexts(num_workers):
+        dataset = ConversationDataset(
+            path, tokenizer=_Tokenizer(), max_context_tokens=64, cache_dir=None,
+            num_workers=num_workers,
+        )
+        return [record.context for record in dataset]
+
+    serial = contexts(0)
+    parallel = contexts(2)
+    assert serial and serial == parallel
+    assert len(serial) == 9, "the rows without an assistant turn are dropped in both modes"

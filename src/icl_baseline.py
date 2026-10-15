@@ -5,28 +5,34 @@ import math
 import random
 import re
 from collections import Counter
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
 
 from .metrics import METRIC_KEYS, answer_line, best_reference_metrics, normalize_answer
 
-DEFAULT_SYSTEM_PROMPT = "You are a precise question-answering system. Use only the provided passage and follow the requested output format exactly."
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a precise question-answering system. Use only the provided passage and follow "
+    "the requested output format exactly."
+)
 
+# Keyed by the dataset name used everywhere else now (src/eval_data.py). The old aggregated
+# corpus shared one ``ms_marco`` directory between v1.1 and v2.1 and needed a source-version
+# argument to pick the prompt; the 1QA build writes one file per dataset, so the name decides.
 SYSTEM_PROMPTS = {
     "squad": (
         "Use only the provided passage to answer the question. Return the shortest supported "
         "answer span, with no explanation or extra formatting."
     ),
-    "ms_marco_v1": (
+    "msmarcov1.1": (
         "Use only the provided passage to answer the question. Give a concise, direct answer "
         "that is supported by the passage, with no explanation or extra formatting."
     ),
-    "ms_marco_v2": (
+    "msmarcov2.1": (
         "Use only the provided passage to answer the question. Synthesize the most direct "
         "answer supported by the passage, with no explanation or extra formatting."
     ),
-    "hotpotqa": (
+    "hotpotqa(distractor)": (
         "Use all relevant parts of the provided passage to reason about the question. "
         "Combine evidence when needed and return only a concise answer, with no explanation "
         "or extra formatting."
@@ -35,11 +41,6 @@ SYSTEM_PROMPTS = {
         "Use only the provided passage to solve the multiple-choice question. Choose the "
         "single best option and return only its uppercase letter: A, B, C, or D."
     ),
-}
-
-_MS_MARCO_PROMPT_KEYS = {
-    "ms_marco_v1_1": "ms_marco_v1",
-    "ms_marco_v2_1": "ms_marco_v2",
 }
 
 
@@ -54,21 +55,39 @@ class ICLExample:
     answer_letter: str = ""
 
 
-def iter_examples(path: str | Path, dataset: str):
-    """Yield ``(flat_row, line_number, index_within_line)`` from an aggregated file.
+def iter_examples(path: str | Path, dataset: str | None = None):
+    """Yield ``(flat_row, line_number, index_within_line)`` from a JSONL file.
 
-    Every file uses one context and a ``conversations`` list. Each user message is paired
-    with the following assistant message and yielded as one evaluation example.
+    Two schemas come out of ``scripts/data/`` and both are accepted here:
+
+    * the per-dataset evaluation files hold one context per line with a ``conversations``
+      list (each user message paired with the assistant message that follows it);
+    * the shared training file holds one context per line with a ``qa_pairs`` list, and all
+      datasets in the same file -- ``dataset`` then filters the rows, which is how the ICL
+      baseline samples its demonstrations without materializing a 1.15M-row split per dataset.
     """
     with Path(path).open(encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, 1):
             if not line.strip():
                 continue
             row = json.loads(line)
+            row_dataset = str(row.get("dataset", ""))
+            if dataset and row_dataset and row_dataset != dataset:
+                continue
+            pairs = row.get("qa_pairs")
+            if isinstance(pairs, list):
+                for index, pair in enumerate(pairs):
+                    if not isinstance(pair, dict):
+                        continue
+                    flat = _flat_row_from_pair(row, pair, dataset)
+                    if flat is not None:
+                        yield flat, line_number, index
+                continue
             conversations = row.get("conversations")
             if not isinstance(conversations, list):
                 raise ValueError(
-                    f"{path}:{line_number} has no 'conversations'; expected the conversation schema"
+                    f"{path}:{line_number} has neither 'conversations' nor 'qa_pairs'; "
+                    "expected a scripts/data JSONL row"
                 )
             pending = None
             index = 0
@@ -84,7 +103,7 @@ def iter_examples(path: str | Path, dataset: str):
                         "question": pending.get("content", ""),
                         "answers": references,
                         "context": row.get("context", ""),
-                        "dataset": row.get("dataset", dataset),
+                        "dataset": row_dataset or dataset or "",
                         "context_id": row.get("context_id", row.get("id", "")),
                     }
                     metadata = dict(message.get("metadata") or {})
@@ -96,20 +115,43 @@ def iter_examples(path: str | Path, dataset: str):
                     pending = None
 
 
-def load_jsonl(
-    path: str | Path, dataset: str, source_version: str | None = None
-) -> list[ICLExample]:
+def _flat_row_from_pair(row: dict, pair: dict, dataset: str | None):
+    """One ``qa_pairs`` entry in the flat shape ``_from_row``/``sample_jsonl`` expect."""
+    if not isinstance(pair.get("metadata"), dict):
+        pair = {**pair, "metadata": row.get("metadata") or {}}
+    question = str(pair.get("question", "")).strip()
+    if not question:
+        return None
+    references = pair.get("answers") or ()
+    if isinstance(references, str):
+        references = (references,)
+    references = [value for value in references if str(value).strip()]
+    answer = str(pair.get("answer") or (references[0] if references else "")).strip()
+    if not references and answer:
+        references = [answer]
+    if not references:
+        return None
+    return {
+        "question": question,
+        "answers": references,
+        "context": row.get("context", ""),
+        "dataset": str(row.get("dataset", "")) or (dataset or ""),
+        "context_id": row.get("context_id", row.get("id", "")),
+        "metadata": dict(pair.get("metadata") or {}),
+        "id": str(pair.get("id") or row.get("id") or ""),
+    }
+
+
+def load_jsonl(path: str | Path, dataset: str) -> list[ICLExample]:
     """Load an evaluation file, skipping questions that have no gold answer.
 
-    The aggregated files are SQuAD v2.0-shaped, i.e. they also carry the unanswerable
-    questions; the training pipeline drops those (`filter_no_qa`), so scoring them here would
-    compare the baseline against a different question set. Skipping them keeps the two
-    harnesses on exactly the same questions.
+    The source files are SQuAD v2.0-shaped, i.e. they also carry the unanswerable questions;
+    the training pipeline drops those (`filter_no_qa`), so scoring them here would compare the
+    baseline against a different question set. Skipping them keeps the two harnesses on
+    exactly the same questions.
     """
     records = []
     for row, line_number, index in iter_examples(path, dataset):
-        if source_version and str(row.get("source_dataset", "")) != source_version:
-            continue
         example = _from_row(row, dataset, line_number, index)
         if not example.references:
             continue
@@ -176,31 +218,44 @@ def sample_context_rows(records, max_contexts=None, qa_per_context=None, seed=42
     return sampled
 
 
-def sample_jsonl(
-    path: str | Path, dataset: str, count: int, seed: int
-) -> list[ICLExample]:
-    """Reservoir-sample demonstrations without materializing the train split."""
-    if count <= 0:
-        return []
-    rng = random.Random(seed)
-    reservoir: list[ICLExample] = []
-    seen = 0
-    for row, line_number, index in iter_examples(path, dataset):
+def sample_jsonl_many(
+    path: str | Path, datasets: Sequence[str], count: int, seed: int = 42
+) -> dict[str, list[ICLExample]]:
+    """Reservoir-sample demonstrations for several datasets in **one** pass.
+
+    The 1QA training split holds every dataset (1.15M contexts, several GB), so sampling it
+    once per dataset would read it once per dataset. Each dataset keeps its own reservoir and
+    its own RNG -- seeded from ``(seed, dataset)`` so a dataset's demonstrations do not depend
+    on which other datasets were requested -- and ``count == 0`` returns before opening the
+    file, which is the common zero-shot case.
+    """
+    datasets = list(datasets)
+    if count <= 0 or not datasets:
+        return {dataset: [] for dataset in datasets}
+    reservoirs: dict[str, list[ICLExample]] = {dataset: [] for dataset in datasets}
+    rngs = {dataset: random.Random(f"{seed}:{dataset}") for dataset in datasets}
+    seen = {dataset: 0 for dataset in datasets}
+    for row, line_number, index in iter_examples(path, None):
+        dataset = str(row.get("dataset", ""))
+        if dataset not in reservoirs:
+            continue
         example = _from_row(row, dataset, line_number, index)
         if not example.references or (dataset == "race" and not example.answer_letter):
             continue
-        seen += 1
+        seen[dataset] += 1
+        reservoir = reservoirs[dataset]
         if len(reservoir) < count:
             reservoir.append(example)
         else:
-            position = rng.randrange(seen)
+            position = rngs[dataset].randrange(seen[dataset])
             if position < count:
                 reservoir[position] = example
-    if len(reservoir) < count:
+    short = sorted(dataset for dataset, rows in reservoirs.items() if len(rows) < count)
+    if short:
         raise ValueError(
-            f"Requested {count} demonstrations from {path}, found {len(reservoir)}"
+            f"Requested {count} demonstrations from {path}, found fewer for {short}"
         )
-    return reservoir
+    return reservoirs
 
 
 def _from_row(row: dict, dataset: str, line_number: int, index: int = 0) -> ICLExample:
@@ -215,11 +270,11 @@ def _from_row(row: dict, dataset: str, line_number: int, index: int = 0) -> ICLE
     metadata = row.get("metadata") or {}
     options = tuple(str(value).strip() for value in metadata.get("options", []))
     letter = str(metadata.get("answer_letter", "")).strip().upper()
-    # ``index`` disambiguates the several questions that share one aggregated context line.
+    # ``index`` disambiguates the several questions that share one context line.
     identifier = str(row.get("id") or f"{dataset}-{line_number}-{index}")
-    # The aggregated MS MARCO context is constructed upstream from passages with
-    # is_selected=1. Keep the ICL path on that canonical context so it matches the
-    # MemoryQwen evaluator and the selected-passage protocol used by this project.
+    # The MS MARCO context is constructed upstream from passages with is_selected=1. Keeping
+    # the ICL path on that canonical context is what makes it match the MemoryQwen evaluator
+    # and the selected-passage protocol used by this project.
     context = str(row["context"]).strip()
     return ICLExample(
         id=identifier,
@@ -252,19 +307,9 @@ def format_prompt(example: ICLExample, demonstrations: Sequence[ICLExample]) -> 
     return "\n\n".join(blocks)
 
 
-def system_prompt_for(dataset: str, source_version: str | None = None) -> str:
-    """Resolve the dataset-specific chat system prompt.
-
-    MS MARCO v1.1 and v2.1 share the on-disk ``ms_marco`` directory, so their source
-    version is part of prompt selection. Other datasets use their directory name directly.
-    Unknown datasets retain a strict generic QA prompt instead of failing evaluation.
-    """
-    prompt_key = (
-        _MS_MARCO_PROMPT_KEYS.get(str(source_version), dataset)
-        if dataset == "ms_marco"
-        else dataset
-    )
-    return SYSTEM_PROMPTS.get(prompt_key, DEFAULT_SYSTEM_PROMPT)
+def system_prompt_for(dataset: str) -> str:
+    """Dataset-specific chat system prompt; unknown datasets keep the strict generic one."""
+    return SYSTEM_PROMPTS.get(dataset, DEFAULT_SYSTEM_PROMPT)
 
 
 def render_prompt(
@@ -272,7 +317,6 @@ def render_prompt(
     example: ICLExample,
     demonstrations: Sequence[ICLExample],
     use_chat_template: bool = True,
-    source_version: str | None = None,
 ) -> str:
     prompt = format_prompt(example, demonstrations)
     if not use_chat_template or not getattr(tokenizer, "apply_chat_template", None):
@@ -280,7 +324,7 @@ def render_prompt(
     messages = [
         {
             "role": "system",
-            "content": system_prompt_for(example.dataset, source_version),
+            "content": system_prompt_for(example.dataset),
         },
         {"role": "user", "content": prompt},
     ]
@@ -305,7 +349,8 @@ def _question_block(example: ICLExample) -> str:
                 f"RACE example {example.id} has {len(example.options)} options, expected 4"
             )
         choices = "\n".join(
-            f"{letter}. {option}" for letter, option in zip("ABCD", example.options)
+            f"{letter}. {option}"
+            for letter, option in zip("ABCD", example.options, strict=True)
         )
         block += f"\nOptions:\n{choices}"
     return block
@@ -357,7 +402,7 @@ def corpus_bleu(
     clipped = [0] * max_order
     totals = [0] * max_order
     predicted_length = reference_length = 0
-    for prediction, sample_references in zip(predictions, references):
+    for prediction, sample_references in zip(predictions, references, strict=True):
         prediction_tokens = normalize_answer(prediction).split()
         reference_tokens = [
             normalize_answer(value).split() for value in (sample_references or [""])
@@ -383,7 +428,9 @@ def corpus_bleu(
             totals[order - 1] += sum(prediction_counts.values())
     if predicted_length == 0:
         return 0.0
-    precisions = [(match + 1) / (total + 1) for match, total in zip(clipped, totals)]
+    precisions = [
+        (match + 1) / (total + 1) for match, total in zip(clipped, totals, strict=True)
+    ]
     brevity_penalty = (
         1.0
         if predicted_length > reference_length

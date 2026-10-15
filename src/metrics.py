@@ -16,11 +16,10 @@ official SQuAD token-level F1, so a number from here is directly comparable with
 SQuAD results and with ``icl_baseline``.
 """
 
-from collections import Counter
-from typing import Sequence
 import re
 import string
-
+from collections import Counter
+from collections.abc import Sequence
 
 # The answer-level metrics, in the order every consumer must use them. The distributed
 # reduction flattens them into a list, so a key appearing in a different order on

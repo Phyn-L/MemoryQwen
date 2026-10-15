@@ -13,17 +13,14 @@ MACHINE=${MACHINE:-4090}
 NUM_PROCESSES=${NUM_PROCESSES:-}
 DRY_RUN=0
 
+# The token/embedding-reconstruction arms this phase once listed no longer exist: the current
+# objective is QA CE + Recon CE + distribution distillation. Keep the arms that are generated.
 RUNS=(
   10_qa_only_control
   11_distill03_entropy_true
   12_distill03_entropy_false
   13_distill01_entropy_true
   14_distill01_entropy_false
-  15_token_distill_entropy_true
-  16_token_distill_entropy_false
-  17_causal_distill_entropy_true
-  18_causal_distill_entropy_false
-  19_token_causal
 )
 
 usage() {
@@ -68,12 +65,12 @@ from utils.config import TrainConfig
 
 base_path = Path(os.environ["BASE_CONFIG"])
 out_root = Path(os.environ["OUTPUT_ROOT"])
-base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
+base = TrainConfig.from_file(base_path).to_dict()
 
 # Phase 3: shortlist AR candidates and pair entropy settings within each background.
 # QA is always active; embedding reconstruction is always disabled.
 # T/C use weight 1 as in phases 1/2. D uses 0.3 or the lighter 0.1.
-base.setdefault("memory", {}).update(
+base.setdefault("loss", {}).update(
     qa_weight=1.0,
     distill_weight=0.0,
     distill_entropy_weight=False,
@@ -91,8 +88,8 @@ runs = {
 
 for name, overrides in runs.items():
     config = copy.deepcopy(base)
-    memory = config.setdefault("memory", {})
-    memory.update(overrides)
+    loss = config.setdefault("loss", {})
+    loss.update(overrides)
     config.setdefault("checkpoint", {})["output_dir"] = str(out_root / name)
     logging = config.setdefault("logging", {})
     logging["aim_run_name"] = f"{out_root.name}_{name}"

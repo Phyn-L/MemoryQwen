@@ -1,10 +1,11 @@
 """Validated YAML defaults for the existing ICL evaluator."""
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+
 import yaml
 
-from .model_paths import machine_paths
 from .config import expand_env_values
+from .model_paths import machine_paths
 
 
 @dataclass
@@ -18,7 +19,7 @@ class ICLData:
     datasets: list[str] = field(default_factory=lambda: ['squad'])
     split: str = 'validation'
     demo_split: str = 'train'
-    root: str = '${DATA_ROOT:-/data/lz/contexts/aggregated}'
+    root: str = '${DATA_ROOT:-contexts}'
     max_samples: int | None = None
     max_contexts: int | None = None
     max_context_tokens: int | None = None
@@ -36,8 +37,7 @@ class ICLInference:
 
 
 def load_icl_defaults(path, machine=None):
-    from utils.config_paths import resolve_config_path
-    raw = yaml.safe_load(resolve_config_path(path).read_text())
+    raw = yaml.safe_load(Path(path).read_text())
     if not isinstance(raw, dict):
         raise ValueError('ICL config must be a mapping')
     unknown = set(raw) - {'model', 'data', 'inference', 'output_dir', 'machine'}
@@ -48,7 +48,11 @@ def load_icl_defaults(path, machine=None):
     model = ICLModel(**raw.get('model', {}))
     data = ICLData(**raw.get('data', {}))
     inference = ICLInference(**raw.get('inference', {}))
-    if not isinstance(data.datasets, list) or not data.datasets or any(not isinstance(x, str) or not x or '/' in x or x in ('.', '..') for x in data.datasets):
+    invalid = any(
+        not isinstance(name, str) or not name or '/' in name or name in ('.', '..')
+        for name in (data.datasets or [])
+    )
+    if not isinstance(data.datasets, list) or not data.datasets or invalid:
         raise ValueError('data.datasets must be a non-empty list of dataset directory names')
     if data.split not in ('train', 'validation', 'test') or data.demo_split != 'train':
         raise ValueError('Use split train/validation/test and demo_split=train')

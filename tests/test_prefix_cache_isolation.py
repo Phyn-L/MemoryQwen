@@ -1,12 +1,15 @@
 """Reconstruction must not mutate a prefix reused by validation QA chunks."""
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
+
 from src.model import ContextMemoryModel
 
 
 def test_reconstruction_preserves_prefix():
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    dtype = torch.bfloat16 if device.type == 'cuda' else torch.float32
+    # Deliberately CPU: this micro-model gains nothing from a GPU, and picking one whenever
+    # torch.cuda.is_available() made the test fail with "CUDA out of memory" on a shared box.
+    device = torch.device('cpu')
+    dtype = torch.float32
     torch.manual_seed(7)
     cfg = Qwen3Config(vocab_size=128, hidden_size=32, intermediate_size=64,
                       num_hidden_layers=2, num_attention_heads=4,
@@ -27,7 +30,7 @@ def test_reconstruction_preserves_prefix():
                                                     embed(answer), answer.bool(), answer)
             recon = model._distillation_student_hidden(prefix, embed(context), context.bool())
             assert prefix.memory_cache.get_seq_length() == 4
-            for layer, (keys, values) in zip(prefix.memory_cache.layers, saved):
+            for layer, (keys, values) in zip(prefix.memory_cache.layers, saved, strict=True):
                 torch.testing.assert_close(layer.keys, keys)
                 torch.testing.assert_close(layer.values, values)
             for _ in range(2):

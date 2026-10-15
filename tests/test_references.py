@@ -1,9 +1,10 @@
 """Every gold answer must survive the dataset and be used by the evaluator.
 
 The evaluator used to score against the first reference only, while the ICL baseline took
-the max over all of them. On SQuAD that is a systematic gap: of the 16498 answered QA pairs
-in `aggregated/squad/validation.jsonl`, 12728 carry 3 references, 2092 carry 5 and 1384
-carry 4 -- so the evaluator was stricter than the baseline it is compared against.
+the max over all of them. On SQuAD that is a systematic gap: most answered QA pairs carry
+three or more references (the counts per file are in
+`contexts/1qa/1qa-clean-splits.manifest.json`), so the evaluator was stricter than the
+baseline it is compared against.
 
 `first_token_em` had the same kind of quiet strictness: it compared raw token ids, so a
 correct word encoded with a leading space (` cat`, what the model generates) never matched
@@ -12,15 +13,16 @@ the gold token (`cat`, what tokenizing the answer alone yields).
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
-import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data import _messages_from_row  # noqa: E402
 from src.evaluator import Evaluator  # noqa: E402
 from src.metrics import best_reference_metrics  # noqa: E402
+
 
 def test_messages_keep_every_non_empty_gold_answer():
     messages = _messages_from_row({

@@ -9,10 +9,7 @@
 | 模型如何编码、读取 memory 和传播梯度？ | [METHOD](guides/METHOD.md) |
 | reader 选项如何配置？ | [READER_OPTIONS](guides/READER_OPTIONS.md) |
 | 应选哪份配置？ | [配置索引](../configs/README.md) |
-| 已做过哪些实验，证据在哪里？ | [实验索引](experiments/README.md) |
-| 过去修复了什么？ | [工程记录](history/ENGINEERING.md)、[诊断与改进](history/IMPROVEMENTS.md) |
-| reader 升级的设计与实施过程？ | [历史计划及实施记录](history/PLAN_reader_upgrade.md) |
-| 整理边界与后续候选？ | [目录方案](REPOSITORY_LAYOUT_PLAN.md) |
+| 接手本轮改造看什么？ | [交接文档](HANDOVER.md)（数据链、配置分层、评估/训练启动改造的动机、实测数据与遗留项） |
 
 ## 可视化快照
 

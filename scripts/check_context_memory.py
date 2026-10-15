@@ -4,9 +4,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import sys
 import time
+from pathlib import Path
 
 import torch
 from torch import distributed as dist
@@ -16,7 +16,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.losses import qa_loss
+from src.losses import objective_total, supervision_objectives
 from src.model import ContextMemoryModel, load_model
 from utils.config import TrainConfig
 
@@ -52,7 +52,7 @@ def main():
         model = ContextMemoryModel(
             Qwen3ForCausalLM(qcfg), rank=2, memory_length=8,
             context_layer_indices=(-1, -2), memory_resampler_hidden_size=32,
-            readout_length=2, readout_hidden_size=32, 
+            readout_length=2, readout_hidden_size=32,
             context_gradient_checkpointing=True,
         )
     else:
@@ -74,19 +74,44 @@ def main():
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
     started = time.perf_counter()
-    for _ in trange(args.steps, desc="context memory", disable=rank != 0):
+    for step in trange(args.steps, desc="context memory", disable=rank != 0):
         if args.backward:
             optimizer.zero_grad(set_to_none=True)
+            # Both supervision branches the trainer runs: the QA row and the Recon row that
+            # reconstructs the same context. Without the Recon row ``recon_task_embedding``
+            # would never receive a gradient, which is what this smoke test asserts.
+            batch_contexts = context.size(0)
+            recon_batch = {
+                "context_indices": torch.arange(batch_contexts, device=device),
+                "context_embeds": context,
+                "context_mask": mask,
+                "labels": ids,
+            }
+            generator = torch.Generator(device=device.type).manual_seed(
+                cfg.training.seed + step
+            )
             output = wrapped(
                 context, mask, question, torch.ones_like(question_ids, dtype=torch.bool),
                 answer, torch.ones_like(answer_ids, dtype=torch.bool), answer_ids,
-                context_ids=ids, objective_config=cfg.memory if not args.tiny else None,
+                context_ids=ids, loss_config=cfg.loss, loss_only=True,
+                recon_batch=recon_batch, generator=generator,
             )
-            loss = qa_loss(output.logits, output.labels)
+            # Same objective the trainer builds: per-row means, both tasks, distill on top.
+            task_ids = torch.cat([
+                torch.ones(batch_contexts, dtype=torch.long, device=device),
+                torch.zeros(batch_contexts, dtype=torch.long, device=device),
+            ])
+            supervised, terms = supervision_objectives(
+                output.supervision_losses,
+                task_ids,
+                cfg.loss,
+                row_mask=output.supervision_mask,
+            )
+            loss = supervised
             if output.objective_terms:
-                from src.losses import objective_total
-                loss = objective_total(loss, output.objective_terms, cfg.memory)
+                loss = loss + objective_total(supervised * 0, output.objective_terms, cfg.loss)
             assert torch.isfinite(loss), loss
+            assert torch.isfinite(terms["qa_loss"]) and torch.isfinite(terms["recon_loss"]), terms
             loss.backward()
             missing = [name for name, p in model.named_parameters() if p.requires_grad and p.grad is None]
             assert not missing, missing

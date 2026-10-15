@@ -1,5 +1,6 @@
 """Checkpoint selection, retention and alias integrity on CPU."""
 import torch
+
 from utils.checkpoint import CheckpointManager
 from utils.config import TrainConfig
 
@@ -45,3 +46,40 @@ def test_best_retention_resume_and_final_alias_integrity(tmp_path):
 def test_legacy_save_cadence_is_removed_from_resolved_config():
     cfg = TrainConfig.from_dict({'checkpoint': {'save_every_steps': 42}})
     assert 'save_every_steps' not in cfg.to_dict()['checkpoint']
+
+
+def test_a_checkpoint_carries_and_restores_python_numpy_and_device_rng(tmp_path):
+    """A resumed run must continue the *same* random stream, on every device.
+
+    ``losses.sample_positions`` draws on the device RNG during training, so restoring only the
+    torch CPU state made a resumed run sample a different distillation subset than the run it
+    was continuing -- ``deterministic: true`` cannot help, because it pins operators, not the
+    random stream.
+    """
+    import random
+
+    import numpy as np
+
+    model = torch.nn.Linear(1, 1)
+    optimizer = torch.optim.AdamW(model.parameters())
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
+    manager = CheckpointManager(tmp_path)
+
+    random.seed(1)
+    np.random.seed(1)
+    torch.manual_seed(1)
+    manager.save(model, optimizer, scheduler, 1, {})
+
+    state = torch.load(tmp_path / 'step-1.pt', weights_only=False)['rng']
+    assert {'python', 'torch', 'numpy'} <= set(state)
+    if torch.cuda.is_available():
+        assert 'torch_cuda' in state
+
+    expected = (random.random(), float(np.random.rand()), torch.rand(3))
+    # Burn the streams, then resume: load() restores every captured generator.
+    random.random(), np.random.rand(), torch.rand(5)
+    manager.load(tmp_path / 'step-1.pt', model, optimizer, scheduler)
+    got = (random.random(), float(np.random.rand()), torch.rand(3))
+    assert got[0] == expected[0]
+    assert got[1] == expected[1]
+    assert torch.equal(got[2], expected[2])

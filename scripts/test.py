@@ -3,24 +3,29 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import yaml
 from pathlib import Path
-from utils.config_paths import resolve_config_path
+
 import torch
+import yaml
 from torch.utils.data import DataLoader
 
 from src.evaluator import Evaluator
 from src.model import load_model
-from src.pipeline import make_collate, make_context_dataset
+from src.pipeline import (
+    evaluation_window_loader,
+    format_evaluation_sample_counts,
+    make_collate,
+    make_context_dataset,
+)
+from utils.checkpoint import CheckpointManager
 from utils.config import TrainConfig
 from utils.machines import machine_names
-from utils.checkpoint import CheckpointManager
 from utils.model_paths import relocate_saved_paths
 
 
 def evaluation_config(checkpoint, config=None, machine=None):
     if config:
-        raw_config = yaml.safe_load(resolve_config_path(config).read_text())
+        raw_config = yaml.safe_load(Path(config).read_text())
         if 'test' not in raw_config:
             return TrainConfig.from_file(config, machine=machine)
     state = torch.load(checkpoint, map_location="cpu", weights_only=False)
@@ -30,7 +35,12 @@ def evaluation_config(checkpoint, config=None, machine=None):
     # The machine that wrote the checkpoint is provenance, not the current execution host.
     raw = dict(raw)
     raw.pop("machine", None)
-    return TrainConfig.from_dict(relocate_saved_paths(raw, machine), machine=machine)
+    # A checkpoint's config was written by whatever version trained it, so removed fields are
+    # dropped with a warning instead of making the checkpoint unevaluable.
+    return TrainConfig.from_dict(
+        relocate_saved_paths(raw, machine), machine=machine,
+        tolerate_removed_data_fields=True,
+    )
 
 
 def main():
@@ -48,6 +58,11 @@ def main():
     parser.add_argument("--checkpoint", "--ckpt", required=True)
     parser.add_argument("--split", choices=("validation", "test"), default="validation")
     parser.add_argument("--no-filter-long-context", action="store_true")
+    parser.add_argument(
+        "--data-file",
+        help="Evaluate exactly this JSONL instead of the config's <split> file. Used by "
+             "scripts/evaluation/test_all_suite.py to score one dataset at a time.",
+    )
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--max-context-tokens", type=int)
     parser.add_argument(
@@ -77,7 +92,7 @@ def main():
     bootstrap.add_argument("--config")
     preliminary, _ = bootstrap.parse_known_args()
     if preliminary.config:
-        raw = yaml.safe_load(resolve_config_path(preliminary.config).read_text())
+        raw = yaml.safe_load(Path(preliminary.config).read_text())
         if 'test' in raw:
             if set(raw) - {'test', 'machine'}:
                 parser.error("Test YAML supports only test and machine sections")
@@ -92,6 +107,12 @@ def main():
     if args.max_samples is not None and args.max_samples <= 0:
         parser.error("max-samples must be positive")
     cfg = evaluation_config(args.checkpoint, args.config, args.machine)
+    if args.data_file:
+        setattr(
+            cfg.data,
+            f"{args.split}_conversation_file",
+            str(Path(args.data_file).expanduser().resolve()),
+        )
     if args.max_context_tokens is not None:
         cfg.data.max_context_tokens = args.max_context_tokens
     for name, value in (
@@ -129,9 +150,9 @@ def main():
 
         accelerator = Accelerator(gradient_accumulation_steps=1, mixed_precision="no")
         device = accelerator.device
-    except ImportError:
+    except ImportError as error:
         if int(os.environ.get("WORLD_SIZE", "1")) > 1:
-            raise RuntimeError("Multi-GPU evaluation requires accelerate")
+            raise RuntimeError("Multi-GPU evaluation requires accelerate") from error
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer, model = load_model(cfg)
     CheckpointManager(cfg.checkpoint.output_dir).load(
@@ -152,7 +173,27 @@ def main():
         pin_memory=cfg.data.pin_memory,
         persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
     )
-    row_loader = loader
+    # Match training: sample QA turns once from the global seed, then reuse their unique
+    # contexts for Recon. Each selected loader is partitioned across ranks.
+    world = 1 if accelerator is None else int(accelerator.num_processes)
+    rank = 0 if accelerator is None else int(accelerator.process_index)
+    loader_options = dict(
+        num_workers=cfg.data.num_workers,
+        pin_memory=cfg.data.pin_memory,
+        persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
+    )
+    row_loader, row_base = evaluation_window_loader(
+        ds, make_collate(cfg, tokenizer, sample_qa=False),
+        budget=cfg.evaluation.max_eval_sample_per_dataset, unit="rows",
+        seed=cfg.training.seed,
+        rank=rank, world=world, batch_size=cfg.training.batch_size, **loader_options,
+    )
+    recon_row_loader, recon_base = evaluation_window_loader(
+        ds, make_collate(cfg, tokenizer, sample_qa=False),
+        budget=cfg.evaluation.max_eval_sample_per_dataset, unit="selected_contexts",
+        selection=row_loader.evaluation_selection,
+        rank=rank, world=world, batch_size=cfg.training.batch_size, **loader_options,
+    )
     if accelerator is not None:
         loader = accelerator.prepare(loader)
     is_main = accelerator is None or accelerator.is_main_process
@@ -175,12 +216,24 @@ def main():
     started = time.time()
     if is_main:
         print("[eval] autoregressive pass (headline) ...", flush=True)
+        print(
+            format_evaluation_sample_counts(
+                row_loader.evaluation_selection,
+                seed=cfg.training.seed,
+                recon_enabled=cfg.evaluation.recon_metrics or cfg.evaluation.recon_autoregressive,
+            ),
+            flush=True,
+        )
     task_metrics = evaluator.compare_reader_tasks(
         model,
         loader,
         device,
-        max_qa=cfg.evaluation.evaluation_max_samples,
+        max_qa=cfg.evaluation.max_eval_sample_per_dataset,
         row_loader=row_loader,
+        row_base=row_base,
+        recon_row_loader=recon_row_loader,
+        recon_base=recon_base,
+        pre_windowed=True,
     )
     if is_main:
         print(f"[eval] autoregressive done in {time.time() - started:.1f}s", flush=True)
@@ -188,8 +241,7 @@ def main():
         print("autoregressive by task embedding:", task_metrics)
     if is_main:
         report = {"checkpoint": str(checkpoint_path), "split": args.split,
-                  "conversation_file": getattr(cfg.data, f"{args.split}_conversation_file", None)
-                  or cfg.data.conversation_file,
+                  "conversation_file": cfg.data.split_file(args.split),
                   "config": cfg.to_dict(), **task_metrics}
         if args.report_file:
             report_path = Path(args.report_file)

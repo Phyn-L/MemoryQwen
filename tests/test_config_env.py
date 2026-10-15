@@ -10,15 +10,15 @@ written, and another machine overrides it through the environment or a gitignore
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from utils.config import TrainConfig, expand_env, expand_env_values  # noqa: E402
-
-CONFIGS = sorted((REPO / "configs").glob("*/train.yaml"))
 
 
 def test_default_is_used_when_the_variable_is_unset():
@@ -70,19 +70,24 @@ def _without_machine_variables():
 
     Without this the test only passes where the variables happen to be unset -- on the H200,
     where scripts/env.local.sh exports them, the shipped defaults are correctly overridden and
-    the assertion failed. A test must not depend on the ambient environment.
-
-    ``MACHINE`` is hidden for the same reason (and the hostname is pinned by the caller where
-    it matters, see tests/test_machines.py): utils/machines.py would otherwise resolve this
-    host to a machine entry and change the roots the defaults resolve to.
+    the assertion failed. A test must not depend on the ambient environment, and the *hostname*
+    is part of that environment: utils/machines.py recognises this box and would supply
+    DATA_ROOT before the config default is even consulted.
     """
     saved = {name: os.environ.pop(name, None) for name in MACHINE_VARIABLES}
 
     class _Restore:
         def __enter__(self):
+            import socket
+
+            self.gethostname = socket.gethostname
+            socket.gethostname = lambda: "no-such-machine"
             return self
 
         def __exit__(self, *exc):
+            import socket
+
+            socket.gethostname = self.gethostname
             for name, value in saved.items():
                 if value is None:
                     os.environ.pop(name, None)
@@ -93,29 +98,91 @@ def _without_machine_variables():
     return _Restore()
 
 
+#: Runnable presets: an experiment file that combines the harness and one model layer. The
+#: bases themselves (`harness.yaml`, `models/*.yaml`) are checked separately below -- they are
+#: intentionally incomplete, so validating them as presets would assert nothing.
+BASE_ONLY = {"harness.yaml"}
+TRAINING_CONFIGS = [
+    path
+    for path in (
+        sorted((REPO / "configs").glob("*.yaml"))
+        + sorted((REPO / "configs" / "ablations").glob("*.yaml"))
+    )
+    if path.name not in {"test.yaml", "icl_zeroshot.yaml", *BASE_ONLY}
+    and not path.name.startswith("_")
+]
+
+
+def test_the_training_config_set_is_not_empty():
+    assert TRAINING_CONFIGS, "the default-resolution tests below would pass vacuously"
+
+
+def test_per_dataset_eval_cap_is_validated_and_serialized():
+    cfg = TrainConfig()
+    cfg.evaluation.max_eval_sample_per_dataset = 17
+    assert cfg.to_dict()["evaluation"]["max_eval_sample_per_dataset"] == 17
+    cfg.evaluation.max_eval_sample_per_dataset = 0
+    with pytest.raises(ValueError, match="max_eval_sample_per_dataset"):
+        cfg.validate()
+
+
+def test_old_eval_budget_is_migrated_only_for_saved_configs(capsys):
+    raw = {"evaluation": {"evaluation_max_samples": 37}}
+    with pytest.raises(ValueError, match="was replaced"):
+        TrainConfig.from_dict(raw)
+    cfg = TrainConfig.from_dict(raw, tolerate_removed_data_fields=True)
+    assert cfg.evaluation.max_eval_sample_per_dataset == 37
+    assert "QA cap per dataset" in capsys.readouterr().err
+
+
+def test_removed_recon_context_budget_only_migrates_from_saved_configs(capsys):
+    raw = {"evaluation": {"recon_max_contexts": 19}}
+    with pytest.raises(ValueError, match="recon_max_contexts was removed"):
+        TrainConfig.from_dict(raw)
+    cfg = TrainConfig.from_dict(raw, tolerate_removed_data_fields=True)
+    assert not hasattr(cfg.evaluation, "recon_max_contexts")
+    assert "Recon now uses contexts from the sampled QA rows" in capsys.readouterr().err
+
+
 def test_cloud_defaults_resolve_without_any_environment():
     with _without_machine_variables():
-        for config in CONFIGS:
+        for config in TRAINING_CONFIGS:
             cfg = TrainConfig.from_file(config)
             cfg.validate()
             assert cfg.model.name_or_path.startswith("/data/lz/hf_cache/hub/models--Qwen--"), config
-            assert cfg.data.root == "/data/lz/contexts/aggregated", config
+            # scripts/data/ writes the 1QA splits under the repo's contexts/ tree; the two
+            # conversation configs name their own SHINE-derived training file.
+            assert cfg.data.root == "contexts", config
+            train_file = cfg.data.split_file("train")
+            if cfg.data.train_conversation_file or cfg.data.conversation_file:
+                # The two conversation configs name their own SHINE-derived training file;
+                # the 1QA tree is still what the validation split resolves against.
+                assert train_file.endswith(("ift_c1qa.jsonl", "ift_pwc.jsonl")), config
+            else:
+                assert train_file == "contexts/1qa/cache/train.jsonl", config
+            assert cfg.data.split_file("validation") == "contexts/1qa/cache/validation.jsonl", config
 
 
 def test_the_same_config_files_resolve_to_another_machine():
     """The exact H200 override, applied to every shipped config."""
     os.environ["MODEL_ROOT"] = "/home/lijie/proj2/xmu/lz"
-    os.environ["DATA_ROOT"] = "/home/lijie/proj2/xmu/lz/aggregated"
+    os.environ["DATA_ROOT"] = "/home/lijie/proj2/xmu/lz/contexts"
     try:
-        for config in CONFIGS:
+        for config in TRAINING_CONFIGS:
             cfg = TrainConfig.from_file(config)
             cfg.validate()
             assert cfg.model.name_or_path.startswith("/home/lijie/proj2/xmu/lz/models--Qwen--"), config
             assert "/snapshots/" in cfg.model.name_or_path, config
-            assert cfg.data.root == "/home/lijie/proj2/xmu/lz/aggregated", config
+            assert cfg.data.root == "/home/lijie/proj2/xmu/lz/contexts", config
     finally:
         for name in MACHINE_VARIABLES:
             os.environ.pop(name, None)
+
+
+def test_no_shipped_config_points_at_the_deprecated_aggregated_tree():
+    """`<root>/aggregated` is the old corpus; the training configs must not resolve to it."""
+    for config in TRAINING_CONFIGS + [REPO / "configs/icl_zeroshot.yaml"]:
+        assert "aggregated" not in config.read_text(encoding="utf-8"), config
 
 
 def test_the_icl_baseline_defaults_follow_the_same_variables():
@@ -142,3 +209,73 @@ if __name__ == "__main__":
                 print(f"ok   {name}")
     print("\nVERDICT:", "ALL PASSED" if not failures else f"{failures} FAILED")
     raise SystemExit(1 if failures else 0)
+
+
+def test_the_objective_has_its_own_config_section():
+    """Loss knobs must not live under `memory:` any more, and a stale YAML must say so."""
+    cfg = TrainConfig.from_dict({"loss": {"qa_weight": 0.25, "max_logits_rows": 64}})
+    cfg.validate()
+    assert cfg.loss.qa_weight == 0.25
+    assert cfg.loss.max_logits_rows == 64
+    assert not hasattr(cfg.memory, "qa_weight")
+    assert not hasattr(cfg.memory, "distill_weight")
+    with pytest.raises(ValueError, match="loss section"):
+        TrainConfig.from_dict({"memory": {"qa_weight": 1.0}})
+    with pytest.raises(ValueError, match="loss section"):
+        TrainConfig.from_dict({"memory": {"distill_weight": 0.3}})
+
+
+def test_a_bare_off_readout_mode_is_accepted_as_the_string_mode():
+    """PyYAML reads `readout_mode: off` as False; the config must still mean "off"."""
+    import yaml
+
+    raw = yaml.safe_load("memory:\n  readout_mode: off\n")
+    assert raw["memory"]["readout_mode"] is False
+    cfg = TrainConfig.from_dict(raw)
+    cfg.validate()
+    assert cfg.memory.readout_mode == "off"
+
+
+def test_the_harness_and_model_layers_are_bases_not_presets():
+    """The layering is structural: one harness file, one model file per model, thin presets."""
+    import yaml
+
+    harness = yaml.safe_load((REPO / "configs/harness.yaml").read_text(encoding="utf-8"))
+    assert "model" not in harness, "the model layer belongs in configs/models/*.yaml"
+    assert "memory" not in harness, "the architecture stays with the experiment"
+    model_files = sorted((REPO / "configs/models").glob("*.yaml"))
+    assert model_files, "expected one model layer per shipped model"
+    for path in model_files:
+        assert set(yaml.safe_load(path.read_text(encoding="utf-8"))) == {"model"}, path
+
+    # ... and every preset really does combine them.
+    for path in TRAINING_CONFIGS:
+        cfg = TrainConfig.from_file(path)
+        cfg.validate()
+        assert cfg.memory.memory_length > 0, path
+        assert "Qwen" in cfg.model.name_or_path, path
+
+    # The model layer a preset names is the one that wins.
+    four_b = TrainConfig.from_file(REPO / "configs/train_baseline_qwen3_4b.yaml")
+    assert "Qwen3-4B" in four_b.model.name_or_path
+    eight_b = TrainConfig.from_file(REPO / "configs/train_baseline_qwen3_8b.yaml")
+    assert "Qwen3-8B" in eight_b.model.name_or_path
+    baseline = TrainConfig.from_file(REPO / "configs/train_baseline.yaml")
+    assert "Qwen3-1.7B" in baseline.model.name_or_path
+    # An experiment file changes the architecture, never the harness defaults it does not name.
+    assert four_b.evaluation.max_new_tokens == 32 and baseline.evaluation.max_new_tokens == 64
+    assert four_b.logging.log_every == baseline.logging.log_every == 100
+
+
+def test_a_saved_config_may_still_carry_removed_fields():
+    """A checkpoint's embedded config is history: dropped with a warning, not an error."""
+    full = TrainConfig.from_file(REPO / "configs/train_baseline.yaml").to_dict()
+    full["data"]["validation_source_file"] = "/old/val.jsonl"
+    full["data"]["validation_max_samples_per_dataset"] = {"squad": 4}
+
+    with pytest.raises(ValueError, match="validation_source_file was removed"):
+        TrainConfig.from_dict(full)
+
+    tolerant = TrainConfig.from_dict(full, tolerate_removed_data_fields=True)
+    assert tolerant.data.split_file("validation").endswith("cache/validation.jsonl")
+    assert not hasattr(tolerant.data, "validation_source_file")

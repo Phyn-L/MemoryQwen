@@ -77,7 +77,7 @@ from utils.config import TrainConfig
 
 base_path = Path(os.environ["BASE_CONFIG"])
 out_root = Path(os.environ["OUTPUT_ROOT"])
-base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
+base = TrainConfig.from_file(base_path).to_dict()
 
 # 8x H200 resource contract for Qwen3-1.7B.  The per-rank batch is deliberately
 # conservative for the longest 4096-token contexts; global batch is 4 * 8 = 32.
@@ -109,7 +109,7 @@ base.setdefault("evaluation", {}).update(
     # 250k contexts x two mixed tasks / global batch 32 ~= 15.6k steps.
     # AR every 2000 gives several checkpoints plus the mandatory final evaluation.
     autoregressive_every=int(os.environ["AR_EVERY"]),
-    autoregressive_max_qa=1024,
+    max_eval_sample_per_dataset=1024,
     qa_batch_size=8,
     max_new_tokens=32,
 )
@@ -118,12 +118,14 @@ base.setdefault("logging", {}).update(log_every=25)
 # Keep the old auxiliary branches off in every v2 arm.  The only varied factors
 # below are the new context writer and the QA/Recon supervision mixture.
 base.setdefault("memory", {}).update(
-    distill_weight=0.0,
     readout_length=8,
     context_layer_indices=[-1],
     memory_resampler_layers=2,
     memory_resampler_heads=4,
     memory_resampler_hidden_size=256,
+)
+base.setdefault("loss", {}).update(
+    distill_weight=0.0,
 )
 
 runs = {

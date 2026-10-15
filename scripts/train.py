@@ -1,34 +1,37 @@
 from __future__ import annotations
 
 import argparse
-import json
+import math
 import os
-import time
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from utils.config import TrainConfig, dtype_from_name
-from utils.machines import machine_names, resolve_aim_repo_path
+from src.cache_build import DEFAULT_BUILD_WORKERS as BUILD_WORKERS
+from src.cache_build import ensure_cache
 from src.data import SortishSampler
 from src.evaluator import Evaluator
 from src.losses import objective_total, scheduled_task_weights, supervision_objectives
 from src.model import load_model
-from src.metrics import METRIC_KEYS
 from src.pipeline import (
+    data_cache_dir,
+    evaluation_window_loader,
+    format_evaluation_sample_counts,
     make_collate,
     make_context_dataset,
-    data_cache_dir,
     new_run_name,
     resolve_split_limit,
 )
-from src.data_sampling import sample_validation_by_dataset
 from utils import CheckpointManager, build_optimizer, build_scheduler, seed_everything
+from utils.config import TrainConfig, dtype_from_name
+from utils.machines import machine_names, resolve_aim_repo_path
 
 AUTOREGRESSIVE_SECTION = "val_autoregressive"
-ANSWER_METRIC_KEYS = (*METRIC_KEYS, "first_token_em", "accuracy")
+# Aim key spelling for the answer metrics; the reconstruction metrics keep their own names.
+METRIC_LABELS = {"em": "EM", "f1": "F1", "rouge_l": "ROUGE-L"}
 
 
 def resume_plan(step: int, steps_per_epoch: int, epochs: int) -> tuple[int, int]:
@@ -48,6 +51,30 @@ def resume_plan(step: int, steps_per_epoch: int, epochs: int) -> tuple[int, int]
     return epoch, step - epoch * steps_per_epoch
 
 
+def optimizer_steps(micro_batches: int, accumulation: int) -> int:
+    """Optimizer steps one epoch of ``micro_batches`` micro-batches produces.
+
+    With accumulation the loop still consumes every batch, but only every ``accumulation``-th
+    one closes an optimizer step (the scheduler, the evaluation cadence, the checkpoint step
+    and ``total_steps`` all count optimizer steps).
+    """
+    if micro_batches <= 0:
+        return 0
+    return -(-int(micro_batches) // max(1, int(accumulation)))
+
+
+def micro_batch_skip(step: int, steps_per_epoch: int, accumulation: int) -> int:
+    """Micro-batches of the resume epoch that a run starting at optimizer ``step`` already saw.
+
+    ``resume_plan`` reports the position in *optimizer* steps while the loop counts
+    micro-batches; a checkpoint is only ever written on a group boundary, so the product is
+    exact and the resumed run continues in the middle of no group.
+    """
+    if steps_per_epoch <= 0:
+        return 0
+    return (step % steps_per_epoch) * max(1, int(accumulation))
+
+
 def should_evaluate(step: int, every: int, total_steps: int) -> bool:
     """Whether an evaluation runs at ``step``.
 
@@ -57,6 +84,48 @@ def should_evaluate(step: int, every: int, total_steps: int) -> bool:
     for. The last step is therefore always evaluated, whatever the cadence says.
     """
     return step % every == 0 or step >= total_steps
+
+
+def _world_size(accelerator) -> int:
+    """Ranks in this run; 1 when training without accelerate."""
+    return 1 if accelerator is None else int(accelerator.num_processes)
+
+
+def _process_index(accelerator) -> int:
+    """This rank's index; 0 when training without accelerate."""
+    return 0 if accelerator is None else int(accelerator.process_index)
+
+
+def step_postfix(terms: dict[str, float], micro_batches: int, max_ppl_exponent: float = 20.0):
+    """The tqdm fields for the accumulation group that is currently running.
+
+    Values are sums over the group, so the display is the step's *mean* rather than the last
+    micro-batch. It is one dict on purpose: ``set_postfix`` **replaces** the displayed fields,
+    and a second call carrying only ``loss`` used to wipe the perplexity immediately after every
+    optimizer step (with the default accumulation of 1, that was every step). It is returned as a
+    plain dict in display order and passed positionally, because tqdm sorts keyword arguments.
+    """
+    means = {name: value / max(micro_batches, 1) for name, value in terms.items()}
+    postfix = {"loss": f"{means.get('loss', 0.0):.4f}"}
+    if "qa_loss" in means:
+        postfix["qa"] = f"{means['qa_loss']:.4f}"
+    if "recon_loss" in means:
+        postfix["recon"] = f"{means['recon_loss']:.4f}"
+    if "qa_loss" in means:
+        # Same definition as `loss/ppl` in the Aim payload: perplexity of the QA objective.
+        postfix["ppl"] = f"{math.exp(min(means['qa_loss'], max_ppl_exponent)):.2f}"
+    return postfix
+
+
+def accumulation_context(accelerator, model):
+    """The context that turns a micro-batch into part of one optimizer step.
+
+    ``accelerator.accumulate`` also drives the counter behind ``accelerator.sync_gradients``
+    and wraps the model in ``no_sync`` so DDP all-reduces gradients once per group instead of
+    once per micro-batch. Without accelerate there is nothing to defer: the loop divides the
+    loss and steps the optimizer on the group boundary itself.
+    """
+    return accelerator.accumulate(model) if accelerator is not None else nullcontext()
 
 
 def _gradient_norm(parameters) -> torch.Tensor:
@@ -71,26 +140,84 @@ def _gradient_norm(parameters) -> torch.Tensor:
 
 
 def eval_log_payloads(task_metrics=None):
-    """Log generated-answer metrics, with a separate group per task embedding."""
+    """Log every scalar an evaluation returns, one Aim group per task.
+
+    Generic on purpose: the QA pass reports answer metrics and the teacher-forced
+    reconstruction pass reports reconstruction metrics, and a new metric must not need a
+    second list of names here before it becomes visible in Aim.
+    """
     if task_metrics is None:
         return []
     payload = {}
     for task_name, metrics in task_metrics.items():
         section = f"{AUTOREGRESSIVE_SECTION}_{task_name}"
         for key, value in metrics.items():
-            if key in ANSWER_METRIC_KEYS:
-                payload[f"{section}/{key}"] = value
-            elif key.startswith("dataset/") and key.rsplit("/", 1)[-1] in {
-                *METRIC_KEYS,
-                "count",
-            }:
+            if key.startswith("dataset/"):
                 dataset, metric = key.removeprefix("dataset/").rsplit("/", 1)
                 dataset = dataset.replace("/", "_").replace("(", "_").replace(")", "")
-                metric = {"em": "EM", "f1": "F1", "rouge_l": "ROUGE-L"}.get(
-                    metric, metric
-                )
-                payload[f"{section}/{dataset}_{metric}"] = value
+                payload[f"{section}/{dataset}_{METRIC_LABELS.get(metric, metric)}"] = value
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                # Overall keys keep their snake_case spelling: the answer metrics have been
+                # logged as ``f1``/``em``/``rouge_l`` since the first run and renaming them
+                # would break every existing Aim curve. Only the per-dataset keys are
+                # prettified, exactly as before.
+                payload[f"{section}/{key}"] = value
     return [payload] if payload else []
+
+
+def _render_table(headers, rows) -> list[str]:
+    """Fixed-width ASCII table used by both evaluation reports."""
+    widths = [
+        max(len(headers[index]), *(len(row[index]) for row in rows))
+        for index in range(len(headers))
+    ]
+    separator = "+-" + "-+-".join("-" * width for width in widths) + "-+"
+    lines = [
+        separator,
+        "| " + " | ".join(
+            header.ljust(widths[index]) for index, header in enumerate(headers)
+        ) + " |",
+        separator,
+    ]
+    for row in rows:
+        lines.append("| " + " | ".join(
+            value.rjust(widths[index]) if index else value.ljust(widths[index])
+            for index, value in enumerate(row)
+        ) + " |")
+    lines.append(separator)
+    return lines
+
+
+def _format_recon_table(task_name, metrics) -> list[str]:
+    """Teacher-forced reconstruction report: neither column decodes anything."""
+    dataset_names = sorted({
+        key.removeprefix("dataset/").rsplit("/", 1)[0]
+        for key in metrics
+        if key.startswith("dataset/") and key.endswith("/contexts")
+    })
+    rows = []
+    for dataset in dataset_names:
+        ce = float(metrics.get(f"dataset/{dataset}/recon_ce", 0.0))
+        rows.append([
+            dataset,
+            f"{ce:.4f}",
+            f"{math.exp(min(ce, 20.0)):.2f}",
+            f"{metrics.get(f'dataset/{dataset}/recon_token_accuracy', 0.0):.4f}",
+            f"{metrics.get(f'dataset/{dataset}/contexts', 0.0):.0f}",
+        ])
+    rows.append([
+        "overall",
+        f"{metrics.get('recon_ce', 0.0):.4f}",
+        f"{metrics.get('recon_ppl', 0.0):.2f}",
+        f"{metrics.get('recon_token_accuracy', 0.0):.4f}",
+        f"{metrics.get('contexts', 0.0):.0f}",
+    ])
+    return [
+        f"[eval] {task_name} (teacher-forced, no generation)",
+        *_render_table(
+            ["dataset", "recon_ce", "recon_ppl", "token_acc", "contexts"], rows
+        ),
+    ]
 
 
 def format_eval_metrics_table(task_metrics) -> str:
@@ -99,6 +226,9 @@ def format_eval_metrics_table(task_metrics) -> str:
         return ""
     lines = []
     for task_name, metrics in task_metrics.items():
+        if "recon_ce" in metrics:
+            lines.extend(_format_recon_table(task_name, metrics))
+            continue
         dataset_names = sorted(
             {
                 key.removeprefix("dataset/").rsplit("/", 1)[0]
@@ -127,36 +257,13 @@ def format_eval_metrics_table(task_metrics) -> str:
                 f"{sum(float(row[-1]) for row in rows):.0f}",
             ]
         )
-        headers = ["dataset", "EM", "F1", "ROUGE-L", "first_token_em", "accuracy", "count"]
-        widths = [
-            max(len(headers[index]), *(len(row[index]) for row in rows))
-            for index in range(len(headers))
-        ]
-        separator = "+-" + "-+-".join("-" * width for width in widths) + "-+"
         lines.append(f"[eval] {task_name}")
-        lines.append(separator)
-        lines.append("| " + " | ".join(
-            header.ljust(widths[index]) for index, header in enumerate(headers)
-        ) + " |")
-        lines.append(separator)
-        for row in rows:
-            lines.append("| " + " | ".join(
-                value.rjust(widths[index]) if index else value.ljust(widths[index])
-                for index, value in enumerate(row)
-            ) + " |")
-        lines.append(separator)
+        lines.extend(_render_table(
+            ["dataset", "EM", "F1", "ROUGE-L", "first_token_em", "accuracy", "count"],
+            rows,
+        ))
     return "\n".join(lines)
 
-
-def _test_ids(path: Path) -> set[tuple[str, str]]:
-    result = set()
-    if path.exists():
-        with path.open(encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    row = json.loads(line)
-                    result.add((str(row.get("dataset", "")), str(row.get("id", ""))))
-    return result
 
 
 def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> None:
@@ -194,6 +301,11 @@ def main() -> None:
     )
     parser.add_argument("--resume")
     parser.add_argument(
+        "--data-root",
+        help="Override data.files.root: the tree scripts/data/ writes "
+        "(<root>/1qa/1qa-{train,validation,test}.jsonl).",
+    )
+    parser.add_argument(
         "--init-from",
         help="Initialize model weights only; start a new optimizer, schedule and run.",
     )
@@ -201,6 +313,8 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = TrainConfig.from_file(args.config, machine=args.machine)
+    if args.data_root:
+        cfg.data.root = args.data_root
     if args.init_from:
         cfg.checkpoint.init_from = str(Path(args.init_from).resolve())
     if args.resume and cfg.checkpoint.init_from:
@@ -222,64 +336,55 @@ def main() -> None:
             torch.bfloat16: "bf16",
         }[configured_dtype]
         accelerator = Accelerator(
-            gradient_accumulation_steps=1,
+            gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
             mixed_precision=mixed_precision if torch.cuda.is_available() else "no",
         )
         device = accelerator.device
-    except ImportError:
+    except ImportError as error:
         if int(os.environ.get("WORLD_SIZE", "1")) > 1:
-            raise RuntimeError("Multi-GPU training requires accelerate")
+            raise RuntimeError("Multi-GPU training requires accelerate") from error
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    data_dir = Path(__file__).resolve().parents[1] / "contexts" / "1qa"
-    validation_source = Path(
-        cfg.data.validation_source_file or data_dir / "1qa-validation.jsonl"
-    )
-    validation_dir = Path(cfg.data.validation_output_dir or data_dir / "1qa-val")
-    sampled_validation = validation_dir / "1qa-val.jsonl"
-    validation_counts = None
-    datasets = tuple(cfg.data.validation_datasets or ())
-    default_per_dataset = (cfg.data.validation_max_samples or 1280) // max(
-        len(datasets) or 5, 1
-    )
-    sample_limits = cfg.data.validation_max_samples_per_dataset or {
-        dataset: default_per_dataset for dataset in datasets
-    }
-    if not sample_limits:
-        sample_limits = {
-            "squad": 256,
-            "msmarcov1.1": 256,
-            "msmarcov2.1": 256,
-            "hotpotqa(distractor)": 256,
-            "race": 256,
-        }
-    validation_context_limit = cfg.data.validation_max_context_tokens
-    if validation_context_limit:
-        cfg.data.max_context_tokens = validation_context_limit
-    test_ids = _test_ids(data_dir / "1qa-test.jsonl")
-    if accelerator is None or accelerator.is_main_process:
-        sampled_validation, validation_counts = sample_validation_by_dataset(
-            validation_source,
-            validation_dir,
-            samples_per_dataset=sample_limits,
-            seed=cfg.training.seed,
-            excluded_ids=test_ids,
-            tokenizer=tokenizer,
-            data_config=cfg.data,
-            datasets=datasets or None,
-            num_workers=cfg.data.validation_sampling_workers,
+    # The filtered cache (`cache/train.jsonl` + `cache/validation.jsonl`) is built from the
+    # raw meta splits with this config's filters. Building it here keeps "which rows does this
+    # run see" in one place; the work happens once (file-locked) no matter how many ranks start
+    # together, and `scripts/data/build_cache.py` produces the same files by hand.
+    if not cfg.data.train_conversation_file and not cfg.data.conversation_file:
+        built = ensure_cache(
+            cfg.data,
+            tokenizer,
+            splits=("train", "validation"),
+            quiet=accelerator is not None and not accelerator.is_main_process,
+            # One pool for the whole run: the file lock means only one rank builds.
+            num_workers=BUILD_WORKERS,
         )
-    if accelerator is not None:
-        accelerator.wait_for_everyone()
-    cfg.data.train_conversation_file = str(data_dir / "1qa-train.jsonl")
-    cfg.data.validation_conversation_file = str(sampled_validation)
-    cfg.data.conversation_file = cfg.data.train_conversation_file
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+        if built and accelerator is not None and accelerator.is_main_process:
+            print(f"[cache] rebuilt: {', '.join(built)}", flush=True)
+
+    train_file = Path(cfg.data.split_file("train"))
+    validation_source = Path(cfg.data.validation_source())
+    for path, what, build_with in (
+        (train_file, "training", "train"),
+        (validation_source, "validation", "validation"),
+    ):
+        if not path.is_file():
+            hint = (
+                f"  python scripts/data/build_cache.py --config <this config> --splits {build_with}"
+            )
+            if not Path(cfg.data.meta_file(build_with)).is_file():
+                hint = f"  python scripts/data/build_1qa.py   # raw meta splits first\n{hint}"
+            raise FileNotFoundError(
+                f"{what} data not found: {path}\n"
+                f"scripts/data/build_cache.py writes it from the raw meta split; run:\n{hint}"
+            )
     model.to(device)
     if accelerator is not None:
         accelerator.wait_for_everyone()
 
     _configure_run_paths(cfg, accelerator, args.resume)
-    cache_dir = data_cache_dir()
+    cache_dir = data_cache_dir(cfg)
 
     train_dataset = make_context_dataset(
         cfg,
@@ -289,6 +394,7 @@ def main() -> None:
         num_workers=cfg.data.num_workers,
     )
     train_collate = make_collate(cfg, tokenizer, sample_qa=True, training=True)
+    validation_collate = make_collate(cfg, tokenizer, sample_qa=False)
     sampler = SortishSampler(
         train_dataset,
         tokenizer,
@@ -297,6 +403,11 @@ def main() -> None:
         cfg.training.seed,
         cfg.data.chat_template_enable_thinking,
         cache_dir if cfg.data.cache_sortish_lengths else None,
+        # Deliberately no `num_workers` here, unlike the DataLoader below. This pass is one
+        # batched tokenizer call over the contexts, which the tokenizer already parallelizes
+        # internally: measured on 20k real contexts, 14224 context/s serial versus 4433 with 2
+        # forked workers and 9985 with 8 (the batches are the whole context text, so pickling
+        # them costs more than the tokenizing). It is cached after the first run either way.
     )
     train_loader = DataLoader(
         train_dataset,
@@ -319,33 +430,42 @@ def main() -> None:
         validation_dataset,
         batch_size=cfg.training.batch_size,
         shuffle=False,
-        collate_fn=make_collate(cfg, tokenizer, sample_qa=False),
+        collate_fn=validation_collate,
         num_workers=cfg.data.num_workers,
         pin_memory=cfg.data.pin_memory,
         persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
     )
-    # A second, deliberately *unprepared* loader over the same dataset. The evaluation
-    # budget (`evaluation.evaluation_max_samples`) is global, and the evaluator slices it into
-    # contiguous windows of the global row order; `accelerator.prepare` shards by batch, so
-    # the prepared loader cannot express "rows 1024..2047 of the split". Skipping the
-    # batches outside a window happens before any compute, so this costs iteration only.
-    validation_row_loader = DataLoader(
-        validation_dataset,
-        batch_size=cfg.training.batch_size,
-        shuffle=False,
-        collate_fn=make_collate(cfg, tokenizer, sample_qa=False),
+    # QA gets one seeded sample per dataset. Recon reuses the sample's unique contexts.
+    # Both loaders are sharded manually, so accelerator.prepare must not touch them.
+    loader_options = dict(
         num_workers=cfg.data.num_workers,
         pin_memory=cfg.data.pin_memory,
         persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
+    )
+    validation_row_loader, validation_row_base = evaluation_window_loader(
+        validation_dataset, validation_collate,
+        budget=cfg.evaluation.max_eval_sample_per_dataset, unit="rows",
+        seed=cfg.training.seed,
+        rank=_process_index(accelerator), world=_world_size(accelerator),
+        batch_size=cfg.training.batch_size, **loader_options,
+    )
+    recon_row_loader, recon_row_base = evaluation_window_loader(
+        validation_dataset, validation_collate,
+        budget=cfg.evaluation.max_eval_sample_per_dataset, unit="selected_contexts",
+        selection=validation_row_loader.evaluation_selection,
+        rank=_process_index(accelerator), world=_world_size(accelerator),
+        batch_size=cfg.training.batch_size, **loader_options,
     )
     evaluator = Evaluator(tokenizer, cfg)
-    effective_loader_len = len(train_loader)
+    # Micro-batches per rank, then optimizer steps per epoch (see optimizer_steps).
+    accumulation = cfg.training.gradient_accumulation_steps
+    micro_batches_per_rank = len(train_loader)
     if accelerator is not None and accelerator.num_processes > 1:
-        effective_loader_len = (
-            effective_loader_len + accelerator.num_processes - 1
+        micro_batches_per_rank = (
+            micro_batches_per_rank + accelerator.num_processes - 1
         ) // accelerator.num_processes
-    # One optimizer step per DataLoader batch: gradient accumulation is not used.
-    total_steps = max(1, effective_loader_len * cfg.training.epochs)
+    steps_per_epoch = optimizer_steps(micro_batches_per_rank, accumulation)
+    total_steps = max(1, steps_per_epoch * cfg.training.epochs)
     optimizer = build_optimizer(model, cfg.optimizer)
     scheduler = build_scheduler(optimizer, cfg.scheduler, total_steps)
     # Echo the resolved schedule once. On a single-epoch run every cadence and the warm-up
@@ -359,9 +479,9 @@ def main() -> None:
             f"machine={cfg.machine or 'config-defaults'} "
             f"steps={total_steps} (epochs={cfg.training.epochs}) "
             f"batch={cfg.training.batch_size}x{ranks} ranks={cfg.training.batch_size * ranks} "
+            f"accum={accumulation} effective_batch={cfg.training.batch_size * ranks * accumulation} "
             f"warmup={cfg.scheduler.warmup_steps} "
             f"autoregressive_every={cfg.evaluation.autoregressive_every} "
-            f"checkpoint_every={cfg.evaluation.autoregressive_every} "
             f"log_every={cfg.logging.log_every} "
             f"output_dir={cfg.checkpoint.output_dir}",
             flush=True,
@@ -391,13 +511,12 @@ def main() -> None:
                 f"ones this run saw.",
                 flush=True,
             )
-    start_epoch, skip_batches = resume_plan(
-        step, effective_loader_len, cfg.training.epochs
-    )
+    start_epoch, skip_batches = resume_plan(step, steps_per_epoch, cfg.training.epochs)
+    skip_micro_batches = micro_batch_skip(step, steps_per_epoch, accumulation)
     if step:
         print(
             f"resume: step {step}/{total_steps} -> epoch {start_epoch + 1}/{cfg.training.epochs}, "
-            f"skipping {skip_batches} already-consumed batches",
+            f"skipping {skip_micro_batches} already-consumed micro-batches",
             flush=True,
         )
     finished = False
@@ -443,6 +562,14 @@ def main() -> None:
             pass
 
     model.train()
+    # Deterministic objective sampling: the distillation position subset is drawn from a
+    # generator reseeded with (training.seed, step), so it is recomputable from the step
+    # number alone -- and therefore identical after a resume (see losses.sample_positions).
+    sampling_generator = torch.Generator(device=device.type)
+    # Scalar sums of the micro-batches in the group that is currently accumulating; the step
+    # that closes the group logs and resets them.
+    group_terms: dict[str, float] = {}
+    group_micro_batches = 0
     progress = tqdm(
         total=total_steps,
         desc="Training",
@@ -453,145 +580,168 @@ def main() -> None:
     )
     for epoch in range(start_epoch, cfg.training.epochs):
         sampler.set_epoch(epoch)
+        # Keep the deterministic QA-turn sampling of the collate on the same epoch.
+        train_collate.set_epoch(epoch)
         for batch_index, batch in enumerate(train_loader):
-            if epoch == start_epoch and batch_index < skip_batches:
+            if epoch == start_epoch and batch_index < skip_micro_batches:
                 continue
             if step >= total_steps:
                 finished = True
                 break
-            ids = {k: v.to(device) for k, v in batch.items() if k != "records"}
-            if device.type == "cuda":
-                torch.cuda.synchronize(device)
-            step_started = time.perf_counter()
-            base_model = (
-                accelerator.unwrap_model(model) if accelerator is not None else model
+            # Accumulation: `accumulate` defers the DDP gradient all-reduce to the step
+            # that closes the group (and tracks `sync_gradients`); without accelerate the
+            # loop below does the same arithmetic by hand.
+            sync_now = (
+                (batch_index + 1) % accumulation == 0
+                or batch_index + 1 >= micro_batches_per_rank
             )
-            embedding = base_model.qwen.get_input_embeddings()
-            recon_batch = {
-                "context_indices": ids["recon_context_indices"],
-                "context_embeds": embedding(ids["recon_target_ids"]),
-                "context_mask": ids["recon_target_mask"],
-                "labels": ids["recon_labels"],
-            }
-            output = model(
-                embedding(ids["context_ids"]),
-                ids["context_mask"],
-                embedding(ids["qa_input_ids"]),
-                ids["qa_input_mask"],
-                embedding(ids["qa_target_ids"]),
-                ids["qa_target_mask"],
-                ids["qa_labels"],
-                ids["qa_context_indices"],
-                context_ids=ids["context_ids"],
-                objective_config=cfg.memory,
-                loss_only=True,
-                recon_batch=recon_batch,
-            )
-            task_ids = torch.cat(
-                [
-                    torch.ones(
-                        ids["qa_input_ids"].size(0), dtype=torch.long, device=device
-                    ),
-                    torch.zeros(
-                        ids["recon_target_ids"].size(0), dtype=torch.long, device=device
-                    ),
-                ]
-            )
-            qa_weight, recon_weight, effective_ratio = scheduled_task_weights(
-                step, total_steps, cfg.data
-            )
-            supervised, task_terms = supervision_objectives(
-                output.supervision_losses,
-                task_ids,
-                cfg.memory,
-                qa_weight=qa_weight * cfg.memory.qa_weight,
-                recon_weight=recon_weight * cfg.memory.recon_weight,
-            )
-            auxiliary_terms = output.objective_terms or {}
-            total = supervised + objective_total(
-                supervised * 0, auxiliary_terms, cfg.memory
-            )
-            terms = {
-                **auxiliary_terms,
-                **task_terms,
-                "loss": total,
-                "qa_weight": total.detach() * 0 + qa_weight * cfg.memory.qa_weight,
-                "recon_weight": total.detach() * 0
-                + recon_weight * cfg.memory.recon_weight,
-                "recon_ratio": total.detach() * 0 + effective_ratio,
-            }
-            if accelerator is not None:
-                accelerator.backward(total)
-            else:
-                total.backward()
-            named_parameters = list(base_model.named_parameters())
-            resampler_grad_norm = _gradient_norm(
-                parameter
-                for name, parameter in named_parameters
-                if name.startswith("context_resampler.") and "layer_gates" not in name
-            )
-            metalora_grad_norm = _gradient_norm(
-                parameter
-                for name, parameter in named_parameters
-                if "lora_A" in name or "lora_B" in name
-            )
-            layer_gates_grad_norm = _gradient_norm(
-                parameter
-                for name, parameter in named_parameters
-                if name == "context_resampler.layer_gates"
-            )
-            recon_task_embedding_grad_norm = (
-                base_model.recon_task_embedding.grad.detach().float().norm()
-                if base_model.recon_task_embedding.grad is not None
-                else torch.zeros((), device=device)
-            )
-            step_grad_norm = torch.nn.utils.clip_grad_norm_(
-                model.parameters(),
-                cfg.training.max_grad_norm,
-            )
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad(set_to_none=True)
-            if device.type == "cuda":
-                torch.cuda.synchronize(device)
-            step_seconds = max(time.perf_counter() - step_started, 1e-9)
-            step += 1
-            progress.update(1)
-            progress.set_postfix(
-                loss=f"{float(total.detach()):.4f}",
-                ppl=f"{float(torch.exp(terms['qa_loss'].detach().float().clamp(max=20))):.4f}",
-            )
-
-            if run and step % cfg.logging.log_every == 0:
-                # `train/lr` is logged next to the losses on purpose: the LR schedule is
-                # the one training-side scalar that silently went wrong before (accelerate
-                # stepping it once per rank, see the prepare() comment), and without this
-                # key a distorted schedule is invisible in the run history.
-                payload = {
-                    "loss/total": float(terms["loss"].detach()),
-                    "loss/qa": float(terms["qa_loss"].detach()),
-                    "loss/recon": float(terms["recon_loss"].detach()),
-                    "loss/distill": float(terms["distill_loss"].detach()),
-                    "train/lr": float(scheduler.get_last_lr()[0]),
-                    "loss/ppl": float(
-                        torch.exp(terms["qa_loss"].detach().float().clamp(max=20))
-                    ),
-                    "loss/qa_ppl": float(
-                        torch.exp(terms["qa_loss"].detach().float().clamp(max=20))
-                    ),
-                    "loss/recon_ppl": float(
-                        torch.exp(terms["recon_loss"].detach().float().clamp(max=20))
-                    ),
-                    "grad_norm/total": float(step_grad_norm.detach()),
-                    "grad_norm/resampler": float(resampler_grad_norm),
-                    "grad_norm/metalora": float(metalora_grad_norm),
-                    "grad_norm/layer_gates": float(layer_gates_grad_norm),
-                    "grad_norm/recon_task_embedding": float(recon_task_embedding_grad_norm),
-                    "data/qa_probability": float(1.0 - effective_ratio),
-                    "data/recon_probability": float(effective_ratio),
+            with accumulation_context(accelerator, model):
+                sampling_generator.manual_seed(
+                    cfg.training.seed + step * accumulation + (batch_index % accumulation)
+                )
+                ids = {k: v.to(device) for k, v in batch.items() if k != "records"}
+                base_model = (
+                    accelerator.unwrap_model(model) if accelerator is not None else model
+                )
+                embedding = base_model.qwen.get_input_embeddings()
+                recon_batch = {
+                    "context_indices": ids["recon_context_indices"],
+                    "context_embeds": embedding(ids["recon_target_ids"]),
+                    "context_mask": ids["recon_target_mask"],
+                    "labels": ids["recon_labels"],
                 }
-                for name, value in payload.items():
-                    run.track(value, name=name, step=step)
+                output = model(
+                    embedding(ids["context_ids"]),
+                    ids["context_mask"],
+                    embedding(ids["qa_input_ids"]),
+                    ids["qa_input_mask"],
+                    embedding(ids["qa_target_ids"]),
+                    ids["qa_target_mask"],
+                    ids["qa_labels"],
+                    ids["qa_context_indices"],
+                    context_ids=ids["context_ids"],
+                    loss_config=cfg.loss,
+                    loss_only=True,
+                    recon_batch=recon_batch,
+                    generator=sampling_generator,
+                )
+                task_ids = torch.cat(
+                    [
+                        torch.ones(
+                            ids["qa_input_ids"].size(0), dtype=torch.long, device=device
+                        ),
+                        torch.zeros(
+                            ids["recon_target_ids"].size(0), dtype=torch.long, device=device
+                        ),
+                    ]
+                )
+                qa_weight, recon_weight, effective_ratio = scheduled_task_weights(
+                    step, total_steps, cfg.data
+                )
+                supervised, task_terms = supervision_objectives(
+                    output.supervision_losses,
+                    task_ids,
+                    cfg.loss,
+                    qa_weight=qa_weight * cfg.loss.qa_weight,
+                    recon_weight=recon_weight * cfg.loss.recon_weight,
+                    row_mask=output.supervision_mask,
+                )
+                auxiliary_terms = output.objective_terms or {}
+                total = supervised + objective_total(
+                    supervised * 0, auxiliary_terms, cfg.loss
+                )
+                terms = {
+                    **auxiliary_terms,
+                    **task_terms,
+                    "loss": total,
+                    "qa_weight": total.detach() * 0 + qa_weight * cfg.loss.qa_weight,
+                    "recon_weight": total.detach() * 0
+                    + recon_weight * cfg.loss.recon_weight,
+                    "recon_ratio": total.detach() * 0 + effective_ratio,
+                }
+                if accelerator is not None:
+                    accelerator.backward(total)
+                else:
+                    # accelerate divides by gradient_accumulation_steps inside backward();
+                    # the manual path has to do it here so the group is a true average.
+                    (total / accumulation).backward()
+                boundary = (
+                    accelerator.sync_gradients if accelerator is not None else sync_now
+                )
+                for name, value in terms.items():
+                    if isinstance(value, torch.Tensor):
+                        group_terms[name] = group_terms.get(name, 0.0) + float(value.detach())
+                group_micro_batches += 1
+                # Positional (ordered) dict on purpose: tqdm sorts `**kwargs` alphabetically,
+                # which would print loss/ppl/qa/recon instead of loss/qa/recon/ppl.
+                progress.set_postfix(step_postfix(group_terms, group_micro_batches))
+                if not boundary:
+                    # Still accumulating: no optimizer step, no scheduler step, no evaluation.
+                    continue
+                named_parameters = list(base_model.named_parameters())
+                resampler_grad_norm = _gradient_norm(
+                    parameter
+                    for name, parameter in named_parameters
+                    if name.startswith("context_resampler.") and "layer_gates" not in name
+                )
+                metalora_grad_norm = _gradient_norm(
+                    parameter
+                    for name, parameter in named_parameters
+                    if "lora_A" in name or "lora_B" in name
+                )
+                layer_gates_grad_norm = _gradient_norm(
+                    parameter
+                    for name, parameter in named_parameters
+                    if name == "context_resampler.layer_gates"
+                )
+                recon_task_embedding_grad_norm = (
+                    base_model.recon_task_embedding.grad.detach().float().norm()
+                    if base_model.recon_task_embedding.grad is not None
+                    else torch.zeros((), device=device)
+                )
+                step_grad_norm = torch.nn.utils.clip_grad_norm_(
+                    model.parameters(),
+                    cfg.training.max_grad_norm,
+                )
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                step += 1
+                progress.update(1)
+                # Every logged scalar is the mean over the micro-batches of this step, which
+                # is what the optimizer step actually optimised.
+                logged = {
+                    name: value / group_micro_batches for name, value in group_terms.items()
+                }
+                group_terms.clear()
+                micro_batches_in_step = group_micro_batches
+                group_micro_batches = 0
+
+                if run and step % cfg.logging.log_every == 0:
+                    # `train/lr` is logged next to the losses on purpose: the LR schedule is
+                    # the one training-side scalar that silently went wrong before (accelerate
+                    # stepping it once per rank, see the prepare() comment), and without this
+                    # key a distorted schedule is invisible in the run history.
+                    payload = {
+                        "loss/total": logged["loss"],
+                        "loss/qa": logged["qa_loss"],
+                        "loss/recon": logged["recon_loss"],
+                        "loss/distill": logged["distill_loss"],
+                        "train/lr": float(scheduler.get_last_lr()[0]),
+                        "loss/ppl": float(math.exp(min(logged["qa_loss"], 20.0))),
+                        "loss/qa_ppl": float(math.exp(min(logged["qa_loss"], 20.0))),
+                        "loss/recon_ppl": float(math.exp(min(logged["recon_loss"], 20.0))),
+                        "grad_norm/total": float(step_grad_norm.detach()),
+                        "grad_norm/resampler": float(resampler_grad_norm),
+                        "grad_norm/metalora": float(metalora_grad_norm),
+                        "grad_norm/layer_gates": float(layer_gates_grad_norm),
+                        "grad_norm/recon_task_embedding": float(recon_task_embedding_grad_norm),
+                        "data/qa_probability": float(1.0 - effective_ratio),
+                        "data/recon_probability": float(effective_ratio),
+                        "data/micro_batches_per_step": float(micro_batches_in_step),
+                    }
+                    for name, value in payload.items():
+                        run.track(value, name=name, step=step)
             is_main = accelerator is None or accelerator.is_main_process
             # Validation runs on EVERY rank.  accelerator.prepare shards the validation
             # loader, so evaluating only on the main process would (a) score one shard
@@ -606,17 +756,31 @@ def main() -> None:
                 if is_main:
                     print(
                         f"\n[eval] step={step}: starting QA autoregressive validation "
-                        f"(max_samples={cfg.evaluation.evaluation_max_samples}, "
+                        f"(max_samples_per_dataset={cfg.evaluation.max_eval_sample_per_dataset}, "
                         f"max_new_tokens={cfg.evaluation.max_new_tokens})",
+                        flush=True,
+                    )
+                    print(
+                        format_evaluation_sample_counts(
+                            validation_row_loader.evaluation_selection,
+                            seed=cfg.training.seed,
+                            recon_enabled=cfg.evaluation.recon_metrics
+                            or cfg.evaluation.recon_autoregressive,
+                        ),
                         flush=True,
                     )
                 metrics = evaluator.compare_reader_tasks(
                     base_model,
                     validation_loader,
                     device,
-                    max_qa=cfg.evaluation.evaluation_max_samples,
+                    max_qa=cfg.evaluation.max_eval_sample_per_dataset,
                     row_loader=validation_row_loader,
-                    include_recon=False,
+                    row_base=validation_row_base,
+                    recon_row_loader=recon_row_loader,
+                    recon_base=recon_row_base,
+                    pre_windowed=True,
+                    include_recon=cfg.evaluation.recon_metrics
+                    or cfg.evaluation.recon_autoregressive,
                 )
                 if is_main:
                     print(

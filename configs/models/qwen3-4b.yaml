@@ -1,0 +1,18 @@
+# 模型层：只放预训练权重与 LoRA/dtype 设置。实验配置通过 `_base_` 组合它。
+model:
+  name_or_path: ${MODEL_ROOT:-/data/lz/hf_cache/hub}/models--Qwen--Qwen3-4B/snapshots/1cfa9a7208912126459214e8b04321603b3df60c
+  torch_dtype: bfloat16  # 冻结骨干模型的数据类型
+  attn_implementation: sdpa  # 注意力实现
+  context_gradient_checkpointing: true  # 是否对 context 前向启用梯度检查点
+  trainable_dtype: float32  # 可训练参数的数据类型
+  lora_rank: 8  # LoRA 秩
+  lora_alpha: 16.0  # LoRA 缩放系数
+  lora_dropout: 0.0  # LoRA dropout 概率
+  target_modules:  # 注入 LoRA 的模块名称
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj

@@ -2,19 +2,20 @@
 import argparse
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import torch
 
 
 def worker(args):
     from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    from src.losses import objective_total, supervision_objectives
     from src.model import ContextMemoryModel, is_trainable_parameter_name
-    from src.losses import qa_loss, objective_total
-    from utils.config import MemoryConfig
     from utils import seed_everything
+    from utils.config import LossConfig
 
     torch.set_num_threads(2)
     seed_everything(args.seed, deterministic=args.deterministic)
@@ -31,8 +32,8 @@ def worker(args):
         p.requires_grad_(is_trainable_parameter_name(name))
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=1e-3)
-    objective = MemoryConfig(distill_weight=0.3,
-                             distill_positions=8, distill_entropy_weight=True)
+    objective = LossConfig(distill_weight=0.3,
+                           distill_positions=8, distill_entropy_weight=True)
     # Inputs stay identical even in the different-seed control.
     generator = torch.Generator().manual_seed(123)
     batches = [[torch.randint(2, 128, (2, length), generator=generator).to(args.device)
@@ -41,14 +42,24 @@ def worker(args):
         return torch.cat([p.detach().float().cpu().reshape(-1) for p in values])
     initial = snapshot(params)
     trajectory = []
-    for context, question, answer in batches:
+    for step, (context, question, answer) in enumerate(batches):
         embedding = model.qwen.get_input_embeddings()
+        # The distillation position sampling is driven by an explicit generator seeded from
+        # (seed, step), exactly like the training loop: reproducible by construction, and
+        # unaffected by any other consumer of the global RNG.
+        sampling = torch.Generator(device=args.device).manual_seed(args.seed + step)
         out = model(embedding(context), torch.ones_like(context, dtype=torch.bool),
                     embedding(question), torch.ones_like(question, dtype=torch.bool),
                     embedding(answer), torch.ones_like(answer, dtype=torch.bool), answer,
                     torch.arange(2, device=args.device), context_ids=context,
-                    objective_config=objective)
-        loss = objective_total(qa_loss(out.logits, out.labels), out.objective_terms, objective)
+                    loss_config=objective, loss_only=True, generator=sampling)
+        supervised, _ = supervision_objectives(
+            out.supervision_losses,
+            torch.ones(out.supervision_losses.size(0), dtype=torch.long, device=args.device),
+            objective,
+            row_mask=out.supervision_mask,
+        )
+        loss = supervised + objective_total(supervised * 0, out.objective_terms, objective)
         loss.backward()
         gradients = snapshot([p.grad for p in params if p.grad is not None])
         optimizer.step()
@@ -96,8 +107,14 @@ def main():
             print(f'{name}: {"failed" if result.returncode else "completed"}', flush=True)
     def compare(a, b):
         return {'initial_equal': torch.equal(a['initial'], b['initial']), **{
-            key: {'all_steps_equal': all(torch.equal(x[key], y[key]) for x, y in zip(a['trajectory'], b['trajectory'])),
-                  'max_abs_diff': max(float((x[key] - y[key]).abs().max()) for x, y in zip(a['trajectory'], b['trajectory']))}
+            key: {'all_steps_equal': all(
+                torch.equal(x[key], y[key])
+                for x, y in zip(a['trajectory'], b['trajectory'], strict=True)
+            ),
+                  'max_abs_diff': max(
+                float((x[key] - y[key]).abs().max())
+                for x, y in zip(a['trajectory'], b['trajectory'], strict=True)
+            )}
             for key in ('loss', 'gradients', 'parameters')}}
     pairs = [(f'{mode}-0', f'{mode}-{i}') for mode in ('off', 'on') for i in (1, 2, 3)]
     pairs.append(('off-0', 'on-0'))

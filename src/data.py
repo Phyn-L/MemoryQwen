@@ -18,21 +18,34 @@ from utils.ddp import is_main_process
 
 from . import cache_utils
 
-
 _FILTER_WORKER_TOKENIZER = None
 _FILTER_WORKER_OPTIONS = None
+_FILTER_WORKER_WITH_LENGTHS = False
 _SORTISH_WORKER_TOKENIZER = None
 
 
-def _init_filter_worker(tokenizer, options):
-    global _FILTER_WORKER_TOKENIZER, _FILTER_WORKER_OPTIONS
+def _init_filter_worker(tokenizer, options, with_lengths=False):
+    global _FILTER_WORKER_TOKENIZER, _FILTER_WORKER_OPTIONS, _FILTER_WORKER_WITH_LENGTHS
     _FILTER_WORKER_TOKENIZER = tokenizer
     _FILTER_WORKER_OPTIONS = options
+    _FILTER_WORKER_WITH_LENGTHS = with_lengths
 
 
-def _filter_row_batch(rows):
-    tokenizer = _FILTER_WORKER_TOKENIZER
-    max_context_tokens, filter_long_context, filter_no_conversation, max_conversation_tokens, max_question_tokens, max_answer_tokens = _FILTER_WORKER_OPTIONS
+def filter_rows_batch(rows, tokenizer, options, lengths_out: list[int] | None = None):
+    """The one filter implementation; called in-process and inside the process pool.
+
+    It is a module-level function of its arguments (rather than of worker globals) so the
+    serial and the parallel driver run *the same* rules: the rules used to be written twice,
+    once per driver, which is exactly how a filter silently drifts between them.
+    """
+    (
+        max_context_tokens,
+        filter_long_context,
+        filter_no_conversation,
+        max_conversation_tokens,
+        max_question_tokens,
+        max_answer_tokens,
+    ) = options
     accepted = []
     for raw in rows:
         context = str(raw.get("context", "")).strip()
@@ -41,22 +54,38 @@ def _filter_row_batch(rows):
         messages = _messages_from_row(raw)
         if filter_no_conversation and not any(m.role == "assistant" for m in messages):
             continue
-        turns = ContextRecord("", messages, independent_qa=True).turns() if raw.get("qa_pairs") else ContextRecord("", messages).turns()
+        turns = (
+            ContextRecord("", messages, independent_qa=True).turns()
+            if raw.get("qa_pairs")
+            else ContextRecord("", messages).turns()
+        )
         if not turns:
             continue
         if tokenizer is not None:
+            length: int | None = None
             if filter_long_context:
                 length = len(tokenizer(context, add_special_tokens=False,
                                        truncation=True, max_length=max_context_tokens + 1).input_ids)
                 if not 0 < length <= max_context_tokens:
                     continue
-            questions = [render_conversation(tokenizer, t.messages) if getattr(tokenizer, "apply_chat_template", None) else t.question for t in turns]
-            qids = tokenizer(questions, add_special_tokens=False, truncation=True, max_length=max_question_tokens + 1).input_ids
-            aids = tokenizer([t.answer for t in turns], add_special_tokens=False, truncation=True, max_length=max_answer_tokens + 1).input_ids
+            questions = [
+                render_conversation(tokenizer, t.messages)
+                if getattr(tokenizer, "apply_chat_template", None)
+                else t.question
+                for t in turns
+            ]
+            qids = tokenizer(
+                questions, add_special_tokens=False, truncation=True,
+                max_length=max_question_tokens + 1,
+            ).input_ids
+            aids = tokenizer(
+                [t.answer for t in turns], add_special_tokens=False, truncation=True,
+                max_length=max_answer_tokens + 1,
+            ).input_ids
             if any(
                 not 0 < len(q) <= max_question_tokens
                 or not 0 < len(a) <= max_answer_tokens
-                for q, a in zip(qids, aids)
+                for q, a in zip(qids, aids, strict=True)
             ) and not raw.get("qa_pairs"):
                 continue
             if (
@@ -65,7 +94,38 @@ def _filter_row_batch(rows):
             ):
                 continue
         accepted.append(raw)
+        if lengths_out is not None:
+            # Every accepted row satisfies `length <= max_context_tokens`, so the truncated
+            # count *is* the context's true token length (which is what the sortish sampler
+            # buckets by). ``-1`` means "not measured" (no tokenizer / filter_long_context off).
+            lengths_out.append(length if length is not None else -1)
     return accepted
+
+
+def _filter_row_batch_in_worker(rows):
+    """Process-pool entry point: read the tokenizer/options the initializer installed."""
+    if not _FILTER_WORKER_WITH_LENGTHS:
+        return filter_rows_batch(rows, _FILTER_WORKER_TOKENIZER, _FILTER_WORKER_OPTIONS)
+    lengths: list[int] = []
+    accepted = filter_rows_batch(
+        rows, _FILTER_WORKER_TOKENIZER, _FILTER_WORKER_OPTIONS, lengths
+    )
+    return accepted, lengths
+
+
+def filter_options(
+    max_context_tokens, filter_long_context, filter_no_conversation,
+    max_conversation_tokens, max_question_tokens, max_answer_tokens,
+):
+    """The rule set :func:`filter_rows_batch` expects, in one place.
+
+    Kept as a tuple so it can also cross a process-pool boundary; ``scripts/data/build_cache.py``
+    uses this to apply exactly the filter the loader applies.
+    """
+    return (
+        max_context_tokens, filter_long_context, filter_no_conversation,
+        max_conversation_tokens, max_question_tokens, max_answer_tokens,
+    )
 
 
 def _init_sortish_worker(tokenizer):
@@ -92,6 +152,63 @@ def _sortish_length_batch(contexts):
     return [len(ids) for ids in input_ids]
 
 
+def context_lengths(contexts, tokenizer, num_workers: int = 0, batch_size: int = 1024,
+                    on_batch=None):
+    """Token counts of ``contexts``, batched and in order.
+
+    ``num_workers > 1`` sends the batches through the same pool the sortish sampler uses. Used
+    by ``SortishSampler`` and available to ``scripts/data/build_cache.py`` (which gets its
+    lengths straight out of the filter instead; see :func:`filter_rows_batch`).
+    """
+    lengths: list[int] = []
+    pending: list[str] = []
+
+    def flush():
+        if not pending:
+            return
+        encoded = tokenizer(pending, add_special_tokens=False, truncation=False, padding=False)
+        input_ids = encoded.input_ids if hasattr(encoded, "input_ids") else encoded["input_ids"]
+        if len(input_ids) != len(pending):
+            raise ValueError(
+                "tokenizer returned a different number of rows for sortish lengths"
+            )
+        lengths.extend(len(ids) for ids in input_ids)
+        if on_batch is not None:
+            on_batch(len(pending))
+        pending.clear()
+
+    if num_workers <= 1:
+        for context in contexts:
+            pending.append(context)
+            if len(pending) >= batch_size:
+                flush()
+        flush()
+        return lengths
+
+    def batches():
+        batch = []
+        for context in contexts:
+            batch.append(context)
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+
+    with ProcessPoolExecutor(
+        max_workers=num_workers,
+        initializer=_init_sortish_worker,
+        initargs=(tokenizer,),
+    ) as executor:
+        for batch_lengths in _bounded_process_map(
+            executor, _sortish_length_batch, batches(), num_workers * 2
+        ):
+            lengths.extend(batch_lengths)
+            if on_batch is not None:
+                on_batch(len(batch_lengths))
+    return lengths
+
+
 def _bounded_process_map(executor, function, items, max_pending):
     """Yield ordered results while keeping only a small number of tasks in flight."""
     iterator = iter(items)
@@ -110,7 +227,37 @@ def _bounded_process_map(executor, function, items, max_pending):
             continue
 
 
-def _progress_enabled() -> bool:
+def filter_row_chunks(chunks, tokenizer, options, num_workers: int = 0, with_lengths=False):
+    """Yield the accepted rows of each chunk, **in input order**.
+
+    One driver for both callers of :func:`filter_rows_batch`: the dataset loader and
+    ``src/cache_build.py``. Serial for ``num_workers <= 1``, otherwise a bounded process pool
+    running the *same* chunk function, so the two modes cannot drift apart. Order is preserved
+    (the pool map is bounded and drained in submission order), which is what keeps a parallel
+    cache build byte-identical to a serial one.
+
+    With ``with_lengths`` each item is ``(accepted_rows, context_lengths)`` instead of just the
+    rows; the lengths come from the rule check the filter already ran, so they cost nothing.
+    """
+    if num_workers > 1:
+        with ProcessPoolExecutor(
+            max_workers=num_workers,
+            initializer=_init_filter_worker,
+            initargs=(tokenizer, options, with_lengths),
+        ) as executor:
+            yield from _bounded_process_map(
+                executor, _filter_row_batch_in_worker, chunks, num_workers * 2
+            )
+    else:
+        for chunk in chunks:
+            if with_lengths:
+                lengths: list[int] = []
+                yield filter_rows_batch(chunk, tokenizer, options, lengths), lengths
+            else:
+                yield filter_rows_batch(chunk, tokenizer, options)
+
+
+def progress_enabled() -> bool:
     """Only the main process draws progress bars; one shared rank check, not a second one."""
     return is_main_process()
 
@@ -309,21 +456,84 @@ def _messages_from_row(row: dict[str, Any]) -> tuple[ConversationMessage, ...]:
     return tuple(messages)
 
 
+#: Sidecar ``scripts/data/build_cache.py`` writes: the context token lengths of the filtered
+#: rows, for free (the filter already measured them). Versioned so a stale file is ignored.
+CONTEXT_LENGTHS_VERSION = 1
+
+
+def context_lengths_path(source) -> Path:
+    """``train.jsonl`` -> ``train.jsonl.lengths.json``."""
+    return Path(str(source) + ".lengths.json")
+
+
+def read_context_lengths(dataset, tokenizer):
+    """The recorded context lengths for this dataset, or ``None`` when it has to be measured.
+
+    Validated against the file it describes (size + mtime), the tokenizer and the context limit,
+    and required to cover every row of the dataset; anything else falls back to measuring.
+    """
+    source = getattr(dataset, "source_path", None)
+    if source is None:
+        return None
+    path = context_lengths_path(source)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("version") != CONTEXT_LENGTHS_VERSION:
+        return None
+    stat = Path(source).stat()
+    if payload.get("size") != stat.st_size or payload.get("mtime_ns") != stat.st_mtime_ns:
+        return None
+    if payload.get("tokenizer") != cache_utils.tokenizer_fingerprint(tokenizer):
+        return None
+    lengths = payload.get("lengths")
+    if not isinstance(lengths, list) or not lengths or len(lengths) < len(dataset):
+        return None
+    if any(not isinstance(value, int) or value <= 0 for value in lengths):
+        return None
+    metadata = getattr(dataset, "cache_metadata", {}) or {}
+    limit = metadata.get("max_context_tokens")
+    if limit is not None and payload.get("max_context_tokens") != limit:
+        return None
+    return lengths[: len(dataset)]
+
+
 class ConversationDataset(Dataset):
     """Materialized conversation dataset backed by a filtered JSONL cache."""
 
     CACHE_VERSION = 4
+    #: Files at least this large get a "Reading <file>" progress bar. The rows are parsed in
+    #: this process before training starts, which for the built cache is ~18 s on a 1.6 GB
+    #: train.jsonl; without the bar that gap looks like a hang between the `[data]` line and
+    #: the first training step.
+    READ_BAR_MIN_BYTES = 64 * 1024 * 1024
+    #: How often the bar refreshes its row count (set_postfix builds a dict).
+    READ_BAR_POSTFIX_EVERY = 4096
 
     def __init__(self, path: str | Path, tokenizer=None, max_context_tokens=2048,
                  max_input_tokens=40960, max_samples=None, filter_long_context=True,
                  filter_no_conversation=True, cache_dir: str | Path | None = None,
                  allow_empty=False, tokenizer_filter_batch_size=2048,
                  max_conversation_tokens=768, max_question_tokens=96,
-                 max_answer_tokens=64, num_workers=0):
+                 max_answer_tokens=64, num_workers=0, pre_filtered: bool = False):
+        """``pre_filtered`` says the file was already built with *these* filter options.
+
+        It is set by ``pipeline.make_context_dataset`` for ``cache/train.jsonl`` /
+        ``cache/validation.jsonl`` when ``scripts/data/build_cache.py``'s fingerprint for this
+        config still matches (see ``pipeline.uses_filtered_cache``). Without it the loader
+        re-tokenizes every row of a file that was produced by that same filter and writes a
+        second copy under ``data_cache_dir()`` -- minutes of I/O and a duplicate ``.jsonl``.
+        """
         self.source_path = Path(path)
+        self.pre_filtered = bool(pre_filtered)
         if num_workers < 0:
             raise ValueError("num_workers must be non-negative")
-        if self.source_path.suffix != '.jsonl':
+        # `.json` is accepted because the raw meta splits (`meta_<split>.json`) are
+        # line-delimited too; the check is there to catch a wrong file, not an extension.
+        if self.source_path.suffix not in {'.jsonl', '.json'}:
             raise ValueError(f'conversation loader expects JSONL: {self.source_path}')
         if not self.source_path.exists():
             raise FileNotFoundError(self.source_path)
@@ -345,8 +555,12 @@ class ConversationDataset(Dataset):
         fingerprint = cache_utils.compute_fingerprint(self.cache_metadata)
         cache_path = (Path(cache_dir) / f'conversation_filtered-{fingerprint}.jsonl'
                       if cache_dir else None)
-        if cache_path and cache_path.exists():
-            self._rows = self._read_rows(cache_path)
+        if self.pre_filtered:
+            # Already filtered by the same rules (the cache fingerprint is a hash of exactly
+            # those rules plus the source file and tokenizer), so only the sample cap is left.
+            self._rows = self._read_rows(self.source_path, max_samples)
+        elif cache_path and cache_path.exists():
+            self._rows = self._read_rows(cache_path, max_samples)
         else:
             self._rows = self._filter_rows(
                 tokenizer, max_context_tokens, max_samples, filter_long_context,
@@ -355,16 +569,48 @@ class ConversationDataset(Dataset):
                 num_workers)
             if cache_path:
                 self._write_rows(cache_path, self._rows)
-                if _progress_enabled():
+                if progress_enabled():
                     print(f'Saved filtered conversation data: {cache_path} '
                           f'(contexts={len(self._rows)})', flush=True)
         if not self._rows and not allow_empty:
             raise RuntimeError(f'No usable conversation rows found in {self.source_path}')
 
-    @staticmethod
-    def _read_rows(path):
-        with path.open(encoding='utf-8') as handle:
-            return [json.loads(line) for line in handle if line.strip()]
+    @classmethod
+    def _read_rows(cls, path, limit=None):
+        """Read a JSONL file, stopping after ``limit`` rows.
+
+        The limit matters for a capped run over the full cache (``--max-samples``): reading a
+        1.6 GB file to keep 20k rows would be minutes of work for nothing. A large uncapped
+        read shows a bar, because it happens before the first training step.
+        """
+        rows = []
+        size = path.stat().st_size
+        bar = (
+            tqdm(total=size, desc=f"Reading {path.name}", unit="B", unit_scale=True)
+            if (
+                limit is None
+                and size >= cls.READ_BAR_MIN_BYTES
+                and progress_enabled()
+            )
+            else None
+        )
+        try:
+            with path.open(encoding='utf-8') as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    rows.append(json.loads(line))
+                    if bar is not None:
+                        bar.update(len(line.encode('utf-8')))
+                        if len(rows) % cls.READ_BAR_POSTFIX_EVERY == 0:
+                            bar.set_postfix(rows=len(rows), refresh=False)
+                    if limit is not None and len(rows) >= limit:
+                        break
+        finally:
+            if bar is not None:
+                bar.set_postfix(rows=len(rows))
+                bar.close()
+        return rows
 
     @staticmethod
     def _write_rows(path, rows):
@@ -379,74 +625,13 @@ class ConversationDataset(Dataset):
                      filter_long_context, filter_no_conversation, batch_size,
                      max_conversation_tokens, max_question_tokens, max_answer_tokens,
                      num_workers):
-        if num_workers > 1:
-            return self._filter_rows_parallel(
-                tokenizer, max_context_tokens, max_samples, filter_long_context,
-                filter_no_conversation, batch_size, max_conversation_tokens,
-                max_question_tokens, max_answer_tokens, num_workers
-            )
-        rows = []
-        progress = tqdm(
-            total=max_samples,
-            desc=f"Filtering {self.source_path.name}",
-            unit="context",
-            disable=not _progress_enabled(),
-        )
-        scan_progress = tqdm(
-            total=self.source_path.stat().st_size,
-            desc=f"Reading {self.source_path.name}",
-            unit="B",
-            unit_scale=True,
-            disable=not _progress_enabled(),
-        )
-        with self.source_path.open(encoding='utf-8') as handle:
-            for line in handle:
-                scan_progress.update(len(line.encode("utf-8")))
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                context = str(row.get('context', '')).strip()
-                if not context:
-                    continue
-                messages = _messages_from_row(row)
-                if filter_no_conversation and not any(m.role == 'assistant' for m in messages):
-                    continue
-                turns = ContextRecord("", messages, independent_qa=True).turns() if row.get("qa_pairs") else ContextRecord("", messages).turns()
-                if not turns:
-                    continue
-                if tokenizer is not None:
-                    if filter_long_context:
-                        length = len(tokenizer(context, add_special_tokens=False,
-                                               truncation=True, max_length=max_context_tokens + 1).input_ids)
-                        if not 0 < length <= max_context_tokens:
-                            continue
-                    questions = [render_conversation(tokenizer, t.messages) if getattr(tokenizer, 'apply_chat_template', None) else t.question for t in turns]
-                    qids = tokenizer(questions, add_special_tokens=False, truncation=True, max_length=max_question_tokens + 1).input_ids
-                    aids = tokenizer([t.answer for t in turns], add_special_tokens=False, truncation=True, max_length=max_answer_tokens + 1).input_ids
-                    if any(
-                        not 0 < len(q) <= max_question_tokens
-                        or not 0 < len(a) <= max_answer_tokens
-                        for q, a in zip(qids, aids)
-                    ) and not row.get("qa_pairs"):
-                        continue
-                    if (
-                        sum(map(len, qids)) + sum(map(len, aids))
-                        > max_conversation_tokens
-                        and not row.get("qa_pairs")
-                    ):
-                        continue
-                rows.append(row)
-                if max_samples is not None and len(rows) >= max_samples:
-                    break
-        progress.close()
-        scan_progress.close()
-        return rows
+        """Read the JSONL once and keep the rows that pass ``filter_rows_batch``.
 
-    def _filter_rows_parallel(self, tokenizer, max_context_tokens, max_samples,
-                              filter_long_context, filter_no_conversation, batch_size,
-                              max_conversation_tokens, max_question_tokens,
-                              max_answer_tokens, num_workers):
-        options = (
+        One implementation, two drivers: with ``num_workers > 1`` the chunks go through a
+        process pool, otherwise the identical chunk function runs in-process. The reading,
+        progress reporting and sample cap are shared, so the two modes cannot diverge.
+        """
+        options = filter_options(
             max_context_tokens, filter_long_context, filter_no_conversation,
             max_conversation_tokens, max_question_tokens, max_answer_tokens,
         )
@@ -456,15 +641,16 @@ class ConversationDataset(Dataset):
             total=max_samples,
             desc=f"Filtering {self.source_path.name}",
             unit="context",
-            disable=not _progress_enabled(),
+            disable=not progress_enabled(),
         )
         scan_progress = tqdm(
             total=self.source_path.stat().st_size,
             desc=f"Reading {self.source_path.name}",
             unit="B",
             unit_scale=True,
-            disable=not _progress_enabled(),
+            disable=not progress_enabled(),
         )
+
         def iter_chunks():
             with self.source_path.open(encoding="utf-8") as handle:
                 chunk = []
@@ -479,19 +665,17 @@ class ConversationDataset(Dataset):
                 if chunk:
                     yield chunk
 
+        def keep(accepted):
+            rows.extend(accepted)
+            progress.update(len(accepted))
+            return max_samples is not None and len(rows) >= max_samples
+
         try:
-            with ProcessPoolExecutor(
-                max_workers=num_workers,
-                initializer=_init_filter_worker,
-                initargs=(tokenizer, options),
-            ) as executor:
-                for accepted in _bounded_process_map(
-                    executor, _filter_row_batch, iter_chunks(), num_workers * 2
-                ):
-                    rows.extend(accepted)
-                    progress.update(len(accepted))
-                    if max_samples is not None and len(rows) >= max_samples:
-                        return rows[:max_samples]
+            for accepted in filter_row_chunks(
+                iter_chunks(), tokenizer, options, num_workers
+            ):
+                if keep(accepted):
+                    return rows[:max_samples]
         finally:
             progress.close()
             scan_progress.close()
@@ -544,19 +728,6 @@ class TrainingTaskDataset(Dataset):
             )
         return self.source[index]
 
-    def sample_indices(self, seed):
-        """Retained for callers inspecting historical candidate ratios; unused in training."""
-        if self.mode != "mix":
-            return list(range(len(self.source)))
-        rng = random.Random(seed)
-        n = len(self.source)
-        recon = round(n * self.recon_ratio)
-        qa = list(range(0, 2 * n, 2))
-        rc = list(range(1, 2 * n, 2))
-        rng.shuffle(qa)
-        rng.shuffle(rc)
-        return qa[: n - recon] + rc[:recon]
-
 
 class SortishSampler(Sampler[int]):
     CACHE_VERSION = 5
@@ -605,78 +776,37 @@ class SortishSampler(Sampler[int]):
         return payload
 
     def _build_lengths(self, tokenizer, enable_thinking, num_workers=0):
-        lengths = []
-        batch_size = max(
-            1, int(getattr(self.dataset, "tokenizer_filter_batch_size", 1024))
-        )
-        pending_contexts = []
         progress = tqdm(
             total=len(self.dataset),
             desc="Preparing sortish lengths",
             unit="context",
-            disable=not _progress_enabled(),
+            disable=not progress_enabled(),
         )
-
-        def encode_batch(contexts):
-            encoded = tokenizer(
-                contexts,
-                add_special_tokens=False,
-                truncation=False,
-                padding=False,
-            )
-            input_ids = (
-                encoded.input_ids
-                if hasattr(encoded, "input_ids")
-                else encoded["input_ids"]
-            )
-            if len(input_ids) != len(contexts):
-                raise ValueError(
-                    "tokenizer returned a different number of rows for sortish lengths"
-                )
-            return [len(ids) for ids in input_ids]
-
-        def flush() -> None:
-            if not pending_contexts:
-                return
-            lengths.extend(encode_batch(pending_contexts))
-            progress.update(len(pending_contexts))
-            pending_contexts.clear()
-
         try:
-            if num_workers <= 1:
-                for record in self.dataset:
-                    pending_contexts.append(record.context)
-                    if len(pending_contexts) >= batch_size:
-                        flush()
-                flush()
-            else:
-                def batches():
-                    batch = []
-                    for record in self.dataset:
-                        batch.append(record.context)
-                        if len(batch) >= batch_size:
-                            yield batch
-                            batch = []
-                    if batch:
-                        yield batch
-
-                with ProcessPoolExecutor(
-                    max_workers=num_workers,
-                    initializer=_init_sortish_worker,
-                    initargs=(tokenizer,),
-                ) as executor:
-                    for batch_lengths in _bounded_process_map(
-                        executor, _sortish_length_batch, batches(), num_workers * 2
-                    ):
-                        lengths.extend(batch_lengths)
-                        progress.update(len(batch_lengths))
+            return context_lengths(
+                (record.context for record in self.dataset),
+                tokenizer,
+                num_workers,
+                batch_size=max(
+                    1, int(getattr(self.dataset, "tokenizer_filter_batch_size", 1024))
+                ),
+                on_batch=progress.update,
+            )
         finally:
             progress.close()
-        return lengths
 
     def _load_or_build_lengths(
         self, tokenizer, enable_thinking, cache_dir, metadata, num_workers=0
     ):
+        recorded = read_context_lengths(self.dataset, tokenizer)
+        if recorded is not None:
+            if progress_enabled():
+                print(
+                    f"[data] reusing {len(recorded)} context lengths recorded next to "
+                    f"{getattr(self.dataset, 'source_path', '')} (no sortish pass)",
+                    flush=True,
+                )
+            return recorded
         if cache_dir is None:
             return self._build_lengths(tokenizer, enable_thinking, num_workers)
         cache_dir.mkdir(parents=True, exist_ok=True)
@@ -744,6 +874,29 @@ def _encode(tokenizer, texts, max_length, padding_side=None):
         tokenizer.padding_side = previous
 
 
+def _turn_rng(record, epoch):
+    """Deterministic RNG for the QA turns of one context in one epoch.
+
+    Keyed on the record (dataset + id + context text) and the epoch, so which QA turns a
+    context contributes no longer depends on which DataLoader worker happened to pick it up,
+    nor on how many workers there are. ``random.sample`` on the process-global stream did
+    depend on both: changing ``data.num_workers`` silently changed the training distribution,
+    and a resumed run could not reproduce the rows it had already consumed.
+    """
+    key = "\x00".join(
+        (str(record.dataset), str(record.context_id), record.context, str(int(epoch)))
+    ).encode("utf-8")
+    return random.Random(int.from_bytes(hashlib.blake2s(key, digest_size=8).digest(), "big"))
+
+
+def _sample_turns(record, turns, count, epoch):
+    """Pick ``count`` turns of one context, deterministically (a permutation when it is all)."""
+    count = min(int(count), len(turns))
+    if count <= 0 or not turns:
+        return []
+    return _turn_rng(record, epoch).sample(turns, count)
+
+
 def collate_context_records(
     rows,
     tokenizer,
@@ -757,12 +910,16 @@ def collate_context_records(
     question_padding_side="left",
     training=False,
     train_tasks="mix",
+    epoch=0,
 ):
     """Build memory-prefix QA batches from structured conversations.
 
     Every selected turn is rendered as ``history + current user + generation prompt``.
     The current assistant content is kept as the target, so PWC history is visible while
     the answer being supervised is never leaked in the input.
+
+    ``epoch`` only feeds the deterministic QA-turn sampling (:func:`_turn_rng`); the same
+    records and epoch always produce the same batch, whatever the worker count.
     """
     if not getattr(tokenizer, "apply_chat_template", None):
         raise ValueError("conversation training requires tokenizer.apply_chat_template")
@@ -780,7 +937,7 @@ def collate_context_records(
                 "conversation training requires at least one assistant turn"
             )
         if training and train_tasks == "mix":
-            qa_turns = random.sample(turns, min(qa_per_context, len(turns)))
+            qa_turns = _sample_turns(record, turns, qa_per_context, epoch)
             chosen = [
                 *qa_turns,
                 ConversationTurn(
@@ -802,14 +959,10 @@ def collate_context_records(
             ]
             chosen_tasks = [0]
         elif training:
-            chosen = random.sample(turns, min(qa_per_context, len(turns)))
+            chosen = _sample_turns(record, turns, qa_per_context, epoch)
             chosen_tasks = [1] * len(chosen)
         else:
-            chosen = (
-                random.sample(turns, min(qa_per_context, len(turns)))
-                if sample_qa
-                else turns
-            )
+            chosen = _sample_turns(record, turns, qa_per_context, epoch) if sample_qa else turns
             chosen_tasks = [1] * len(chosen)
         selected.extend(chosen)
         mapping.extend([row_index] * len(chosen))
@@ -818,7 +971,7 @@ def collate_context_records(
         raise ValueError("conversation batch contains no assistant turns")
 
     rendered = []
-    for turn, task in zip(selected, task_ids):
+    for turn, task in zip(selected, task_ids, strict=True):
         if task == 0:
             rendered.append("")
             continue
@@ -837,7 +990,7 @@ def collate_context_records(
             )
         rendered.append(text)
     # The template already contains role markers and the assistant generation marker.
-    qa_rendered = [text for text, task in zip(rendered, task_ids) if task == 1]
+    qa_rendered = [text for text, task in zip(rendered, task_ids, strict=True) if task == 1]
     if qa_rendered:
         previous_truncation = tokenizer.truncation_side
         tokenizer.truncation_side = "left"
@@ -859,6 +1012,9 @@ def collate_context_records(
         q = torch.empty((len(selected), 0), dtype=c.input_ids.dtype)
         q_mask = torch.empty((len(selected), 0), dtype=torch.bool)
 
+    # Every supervision target is tokenized exactly once, here. Both task views below only
+    # re-pad subsets of this list -- re-tokenizing per task was pure duplicated work and a
+    # second place for the truncation limits to drift.
     target_rows = [
         tokenizer(
             turn.answer,
@@ -866,144 +1022,95 @@ def collate_context_records(
             max_length=max_context_tokens if task == 0 else max_answer_tokens,
             add_special_tokens=False,
         ).input_ids
-        for turn, task in zip(selected, task_ids)
+        for turn, task in zip(selected, task_ids, strict=True)
     ]
-    previous = tokenizer.padding_side
-    tokenizer.padding_side = "right"
-    try:
-        a = tokenizer.pad({"input_ids": target_rows}, padding=True, return_tensors="pt")
-    finally:
-        tokenizer.padding_side = previous
-    if (
-        append_eos
-        and any(task == 1 for task in task_ids)
-        and getattr(tokenizer, "eos_token_id", None) is not None
-    ):
-        eos = int(tokenizer.eos_token_id)
-        rows_n, width = a.input_ids.size(0), a.input_ids.size(1) + 1
-        ids = torch.full(
-            (rows_n, width), int(tokenizer.pad_token_id), dtype=a.input_ids.dtype
-        )
-        mask = torch.zeros((rows_n, width), dtype=torch.long)
-        for index in range(rows_n):
-            valid = int(a.attention_mask[index].sum())
-            ids[index, :valid] = a.input_ids[index, :valid]
-            mask[index, :valid] = 1
-            if task_ids[index] == 1:
-                ids[index, valid] = eos
-                mask[index, valid] = 1
-        a["input_ids"] = ids
-        a["attention_mask"] = mask
-    labels = torch.full_like(a.input_ids, -100)
-    labels[a.attention_mask.bool()] = a.input_ids[a.attention_mask.bool()]
-    if training:
-        task_tensor = torch.tensor(task_ids, dtype=torch.long)
 
-        def pack_task(task_id: int):
-            indices = torch.nonzero(task_tensor.eq(task_id), as_tuple=False).flatten()
-            if indices.numel() == 0:
-                return {
-                    "input_ids": q.new_empty((0, q.size(1) if task_id == 1 else 0)),
-                    "input_mask": q_mask.new_empty((0, q_mask.size(1) if task_id == 1 else 0)),
-                    "target_ids": a.new_empty((0, 0)),
-                    "target_mask": a.new_empty((0, 0), dtype=torch.bool),
-                    "labels": labels.new_empty((0, 0)),
-                    "context_indices": indices,
-                }
-            target_rows_task = [
-                tokenizer(
-                    selected[index].answer,
-                    truncation=True,
-                    max_length=max_context_tokens if task_id == 0 else max_answer_tokens,
-                    add_special_tokens=False,
-                ).input_ids
-                for index in indices.tolist()
-            ]
-            previous_side = tokenizer.padding_side
-            tokenizer.padding_side = "right"
-            try:
-                target = tokenizer.pad(
-                    {"input_ids": target_rows_task}, padding=True, return_tensors="pt"
-                )
-            finally:
-                tokenizer.padding_side = previous_side
-            if append_eos and getattr(tokenizer, "eos_token_id", None) is not None:
-                eos = int(tokenizer.eos_token_id)
-                ids = torch.full(
-                    (target.input_ids.size(0), target.input_ids.size(1) + 1),
-                    int(tokenizer.pad_token_id),
-                    dtype=target.input_ids.dtype,
-                )
-                mask = torch.zeros_like(ids)
-                for row_idx in range(target.input_ids.size(0)):
-                    valid = int(target.attention_mask[row_idx].sum())
-                    ids[row_idx, :valid] = target.input_ids[row_idx, :valid]
-                    mask[row_idx, :valid + 1] = 1
-                    ids[row_idx, valid] = eos
-                target.input_ids, target.attention_mask = ids, mask
-            target_labels = torch.full_like(target.input_ids, -100)
-            target_labels[target.attention_mask.bool()] = target.input_ids[
-                target.attention_mask.bool()
-            ]
-            if task_id == 1:
-                return {
-                    "input_ids": q[indices],
-                    "input_mask": q_mask[indices],
-                    "target_ids": target.input_ids,
-                    "target_mask": target.attention_mask.bool(),
-                    "labels": target_labels,
-                    "context_indices": torch.tensor(
-                        [mapping[index] for index in indices.tolist()], dtype=torch.long
-                    ),
-                }
+    task_tensor = torch.tensor(task_ids, dtype=torch.long)
+
+    def pack(task_id: int):
+        """One task's rows: right-padded targets, EOS appended, padding masked out of the labels.
+
+        The padding + EOS + label rule lives here once and serves both schemas: the training
+        batch (QA and Recon rows) and the evaluation batch (QA rows only). ``append_eos``
+        applies to every supervision row, QA and Recon alike.
+        """
+        indices = torch.nonzero(task_tensor.eq(task_id), as_tuple=False).flatten()
+        if indices.numel() == 0:
             return {
-                "input_ids": q.new_empty((indices.numel(), 0)),
-                "input_mask": q_mask.new_empty((indices.numel(), 0)),
-                "target_ids": target.input_ids,
-                "target_mask": target.attention_mask.bool(),
-                "labels": target_labels,
-                "context_indices": torch.tensor(
-                    [mapping[index] for index in indices.tolist()], dtype=torch.long
-                ),
+                "input_ids": q.new_empty((0, q.size(1) if task_id == 1 else 0)),
+                "input_mask": q_mask.new_empty((0, q_mask.size(1) if task_id == 1 else 0)),
+                "target_ids": q.new_empty((0, 0)),
+                "target_mask": q_mask.new_empty((0, 0)),
+                "labels": q.new_empty((0, 0)),
+                "context_indices": indices,
             }
-
-        qa = pack_task(1)
-        recon = pack_task(0)
+        token_lists = [target_rows[index] for index in indices.tolist()]
+        previous = tokenizer.padding_side
+        tokenizer.padding_side = "right"
+        try:
+            target = tokenizer.pad(
+                {"input_ids": token_lists}, padding=True, return_tensors="pt"
+            )
+        finally:
+            tokenizer.padding_side = previous
+        if append_eos and getattr(tokenizer, "eos_token_id", None) is not None:
+            eos = int(tokenizer.eos_token_id)
+            ids = torch.full(
+                (target.input_ids.size(0), target.input_ids.size(1) + 1),
+                int(tokenizer.pad_token_id),
+                dtype=target.input_ids.dtype,
+            )
+            mask = torch.zeros_like(ids)
+            for row in range(target.input_ids.size(0)):
+                valid = int(target.attention_mask[row].sum())
+                ids[row, :valid] = target.input_ids[row, :valid]
+                mask[row, :valid + 1] = 1
+                ids[row, valid] = eos
+            target.input_ids, target.attention_mask = ids, mask
+        target_labels = torch.full_like(target.input_ids, -100)
+        target_labels[target.attention_mask.bool()] = target.input_ids[
+            target.attention_mask.bool()
+        ]
         return {
-            "context_ids": c.input_ids,
-            "context_mask": c.attention_mask.bool(),
-            "qa_input_ids": qa["input_ids"],
-            "qa_input_mask": qa["input_mask"],
-            "qa_target_ids": qa["target_ids"],
-            "qa_target_mask": qa["target_mask"],
-            "qa_labels": qa["labels"],
-            "qa_context_indices": qa["context_indices"],
-            "recon_input_ids": recon["input_ids"],
-            "recon_input_mask": recon["input_mask"],
-            "recon_target_ids": recon["target_ids"],
-            "recon_target_mask": recon["target_mask"],
-            "recon_labels": recon["labels"],
-            "recon_context_indices": recon["context_indices"],
-            "records": selected,
+            "input_ids": q[indices] if task_id == 1 else q.new_empty((indices.numel(), 0)),
+            "input_mask": (
+                q_mask[indices] if task_id == 1 else q_mask.new_empty((indices.numel(), 0))
+            ),
+            "target_ids": target.input_ids,
+            "target_mask": target.attention_mask.bool(),
+            "labels": target_labels,
+            "context_indices": torch.tensor(
+                [mapping[index] for index in indices.tolist()], dtype=torch.long
+            ),
         }
+
+    qa = pack(1)
+    # One batch schema for training and evaluation: the evaluator and ``scripts/test.py``
+    # read the same names, and the Recon half is simply absent from an evaluation batch.
     batch = {
         "context_ids": c.input_ids,
         "context_mask": c.attention_mask.bool(),
-        "input_ids": q,
-        "input_mask": q_mask,
-        "target_ids": a.input_ids,
-        "target_mask": a.attention_mask.bool(),
-        "labels": labels,
-        "qa_context_indices": torch.tensor(mapping, dtype=torch.long),
+        "qa_input_ids": qa["input_ids"],
+        "qa_input_mask": qa["input_mask"],
+        "qa_target_ids": qa["target_ids"],
+        "qa_target_mask": qa["target_mask"],
+        "qa_labels": qa["labels"],
+        "qa_context_indices": qa["context_indices"],
         "records": selected,
     }
     if training:
-        batch["task_ids"] = torch.tensor(task_ids, dtype=torch.long)
+        recon = pack(0)
+        batch.update(
+            {
+                "recon_input_ids": recon["input_ids"],
+                "recon_input_mask": recon["input_mask"],
+                "recon_target_ids": recon["target_ids"],
+                "recon_target_mask": recon["target_mask"],
+                "recon_labels": recon["labels"],
+                "recon_context_indices": recon["context_indices"],
+            }
+        )
     return batch
 
 
-# Public name for the collate. It used to be a pass-through wrapper that re-declared all
-# twelve parameters and defaults -- which is exactly how a default silently drifts away
-# from the real signature (the wrapper still said question_padding_side="right" /
-# legacy padding defaults long after the real defaults changed).
 collate_fn = collate_context_records

@@ -26,25 +26,29 @@ from __future__ import annotations
 
 import os
 import socket
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 
+# ``DATA_ROOT`` is the tree that holds the 1QA splits (``<DATA_ROOT>/1qa/1qa-*.jsonl``),
+# which is what ``scripts/data/build_*.py`` writes: the repository's own ``contexts/``
+# directory. The older aggregated/SHINE conversation corpus lives elsewhere and is selected
+# separately by ``CONVERSATION_ROOT`` (see configs/README.md).
 MACHINES: dict[str, dict[str, str]] = {
-    # 4x RTX 4090: local conversation data and local model weights.
+    # 4x RTX 4090: local data tree and local model weights.
     "4090": {
         "MODEL_ROOT": "/data/lz/hf_cache/hub",
-        "DATA_ROOT": "/data/lz/contexts",
+        "DATA_ROOT": "/data/lz/MemoryQwen/contexts",
         "AIM_REPO": "/data/lz/MemoryQwen/.aim",
     },
-    # 8x H200: model and conversation data live under the shared project tree.
+    # 8x H200: model and data live under the shared project tree.
     "h200": {
         "MODEL_ROOT": "/home/lijie/proj2/xmu/lz/Qwen",
-        "DATA_ROOT": "/home/lijie/proj2/xmu/lz/contexts",
+        "DATA_ROOT": "/home/lijie/proj2/xmu/lz/MemoryQwen/contexts",
         "AIM_REPO": "/home/lijie/proj2/xmu/lz/MemoryQwen/.aim",
     },
     "a800": {
         "MODEL_ROOT": "/mnt/beegfs-storage-a8002/seanlz/Qwen",
-        "DATA_ROOT": "/mnt/beegfs-storage-a8002/seanlz/aggregated",
+        "DATA_ROOT": "/mnt/beegfs-storage-a8002/seanlz/MemoryQwen/contexts",
         "AIM_REPO": "/mnt/beegfs-storage-a8002/seanlz/MemoryQwen/.aim",
     },
 }

@@ -11,4 +11,3 @@ fi
 exec python -m utils.launcher train "$@"
 
 sleep 1m
-python /home/sean/burn.py

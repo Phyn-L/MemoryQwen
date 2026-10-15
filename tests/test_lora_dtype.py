@@ -12,9 +12,9 @@ What is asserted
 """
 from __future__ import annotations
 
-from types import SimpleNamespace
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 from torch import nn
@@ -22,8 +22,8 @@ from torch import nn
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.model import (  # noqa: E402
-    MetaLoRA,
     ContextMemoryModel,
+    MetaLoRA,
     is_trainable_parameter_name,
 )
 
@@ -72,7 +72,8 @@ def test_static_lora_delta_is_fp32_under_autocast():
     error = (got.float() - expected).abs().max().item()
     assert error < TOL, f"static LoRA did not follow the fp32 contract: max abs error {error}"
 
-    # Discriminating check: computing the delta under autocast without the explicit dtype boundary rounds every intermediate to bf16.
+    # Discriminating check: computing the delta under autocast without the explicit dtype
+    # boundary rounds every intermediate to bf16.
     with torch.autocast("cpu", dtype=torch.bfloat16):
         rounded = (
             base(x.to(torch.bfloat16))

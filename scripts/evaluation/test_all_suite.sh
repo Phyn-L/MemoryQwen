@@ -57,4 +57,3 @@ fi
 exec python scripts/evaluation/test_all_suite.py "${args[@]}" "$@"
 
 sleep 1m
-python /home/sean/burn.py

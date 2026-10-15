@@ -10,9 +10,9 @@ A/B into a different experiment.
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
 import sys
 import tempfile
+from pathlib import Path
 
 import torch
 from torch import nn
@@ -118,9 +118,13 @@ def test_a_fresh_run_nests_its_directory_under_the_configured_output_dir():
 
 def test_the_training_loop_honours_the_resumed_position_and_the_step_budget():
     source = TRAIN_PY.read_text(encoding="utf-8")
-    assert "resume_plan(step,effective_loader_len,cfg.training.epochs)" in "".join(source.split())
+    compact = "".join(source.split())
+    assert "resume_plan(step,steps_per_epoch,cfg.training.epochs)" in compact
+    assert "micro_batch_skip(step,steps_per_epoch,accumulation)" in compact
     assert "for epoch in range(start_epoch, cfg.training.epochs)" in source
-    assert "batch_index < skip_batches" in source
+    # Optimizer steps are what resume plans with; the loop indexes micro-batches.
+    assert "batch_index < skip_micro_batches" in source
+    assert "steps_per_epoch=optimizer_steps(micro_batches_per_rank,accumulation)" in compact
     assert "if step >= total_steps:" in source, (
         "without this a resumed run adds a whole extra epoch on top of the loaded step"
     )

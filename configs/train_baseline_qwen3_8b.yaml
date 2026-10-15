@@ -1,7 +1,7 @@
-# Qwen 变体；未列出的字段继承基础配置。
-_base_: train_baseline.yaml
-model:
-  name_or_path: ${MODEL_ROOT:-/data/lz/hf_cache/hub}/models--Qwen--Qwen3-8B/snapshots/b968826d9c46dd6066d109eabc6255188de91218  # 覆盖预训练模型路径
+# 实验层：Qwen3-8B。只写与 train_baseline 不同的部分（模型层换成 models/qwen3-8b.yaml）。
+_base_:
+- train_baseline.yaml
+- models/qwen3-8b.yaml
 data:
   limits:
     max_context_tokens: 2048  # 覆盖 context token 上限
@@ -11,15 +11,14 @@ data:
     validation_datasets:  # 覆盖验证数据集
     - squad
 evaluation:
-  autoregressive_every: 400  # 自回归验证间隔
-  evaluation_max_samples: 1024  # 自回归验证 QA 上限
-  max_new_tokens: 32  # 生成 token 上限
-  qa_batch_size: 4  # QA 验证批大小
-logging:
+  autoregressive_every: 400
+  max_eval_sample_per_dataset: 1024
+  max_new_tokens: 32
+  qa_batch_size: 4
 memory:
   readout_length: 8  # readout token 数
 scheduler:
-  warmup_steps: 200  # 预热步数
+  warmup_steps: 200
 training:
-  batch_size: 1  # 训练批大小
-  deterministic: false  # 是否启用确定性算法
+  batch_size: 1
+  deterministic: false

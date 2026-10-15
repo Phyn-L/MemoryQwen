@@ -1,18 +1,16 @@
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.distributed as dist
 from tqdm.auto import tqdm
 
 from utils.ddp import is_main_process
 
-from .metrics import METRIC_KEYS, answer_line, best_reference_metrics, normalize_answer
 from .icl_baseline import parse_race_prediction
+from .metrics import METRIC_KEYS, answer_line, best_reference_metrics, normalize_answer
 from .model import TASK_QA, TASK_RECON
-
-
-def _batch_value(batch, new_key, old_key):
-    return batch[new_key] if new_key in batch else batch[old_key]
 
 
 def _distributed_sum(values, device):
@@ -127,22 +125,15 @@ class Evaluator:
 
     @torch.no_grad()
     def autoregressive(self, model, loader, device, max_qa=None, task_id=TASK_QA,
-                       row_loader=None):
+                       row_loader=None, row_base=0, pre_windowed=False):
         """Headline evaluation: every answer token is produced by the model itself.
 
         Metrics are computed from generated answers and gold references.
 
-        ``max_qa`` caps how many QA rows the *whole* evaluation decodes: the budget is split
-        into contiguous windows of the global row order (see :func:`row_window`), so the
-        scored rows and the noise level stay the same when the rank count changes. Decoding
-        is expensive, and a rank
-        that stays inside the evaluation longer than the NCCL watchdog timeout (10 minutes)
-        makes every other rank abort, which is why the budget exists at all.
-
-        ``row_loader`` supplies that global order and must be the *unsharded* validation
-        loader (``accelerator.prepare`` shards by batch, which would scatter a rank's rows
-        across the whole split). Without it a distributed run cannot honour a global budget,
-        so it falls back to the historical per-rank cap and says so.
+        ``max_qa`` caps QA turns per dataset. The selected sequence is split across
+        ranks by ``pipeline.evaluation_window_loader``; it has no combined sample cap.
+        ``row_base`` is this rank's start in that sequence. Original turns preserve
+        their history even when a rank boundary splits a multi-turn context.
         """
         was_training = model.training
         model.eval()
@@ -155,26 +146,27 @@ class Evaluator:
         first_token_hit = 0
         enabled = is_main_process()
         world, rank = _distributed_world_size(), _distributed_rank()
-        if max_qa is None:
-            window, row_source = (0, None), loader
-        elif row_loader is None and world > 1:
-            print(
-                f"[evaluator] WARNING: evaluation.evaluation_max_samples={max_qa} is a global "
-                f"row budget but no unsharded row loader was supplied; falling back to "
-                f"{max_qa} rows per rank ({max_qa * world} rows total), which depends on the "
-                "rank count.",
-                flush=True,
+        if max_qa is not None and not pre_windowed:
+            from .pipeline import evaluation_window_loader
+
+            source = loader if row_loader is None else row_loader
+            row_loader, row_base = evaluation_window_loader(
+                source.dataset, source.collate_fn, budget=max_qa, unit="rows",
+                rank=rank, world=world, batch_size=source.batch_size,
             )
-            window, row_source = (0, max_qa), loader
-        else:
-            window = row_window(max_qa, rank, world)
-            row_source = loader if row_loader is None else row_loader
-        cursor = 0
+            pre_windowed = True
+        total = getattr(row_loader, "evaluation_total", None) if max_qa is not None else None
+        if max_qa is not None and total is None:
+            raise ValueError("Capped QA evaluation requires a per-dataset evaluation loader")
+        window, row_source = self._evaluation_window(
+            "evaluation.max_eval_sample_per_dataset", total, row_loader, loader, world, rank
+        )
+        cursor = int(row_base)
         task_name = "qa" if task_id == TASK_QA else "recon"
         desc = f"Validation (autoregressive, {task_name} task)"
         if world > 1:
             desc += f" [rank {rank}/{world}]"
-        if window[1] is None:
+        if pre_windowed or window[1] is None:
             local_batch_count = len(row_source)
         else:
             local_batch_count = _window_batch_count(
@@ -188,7 +180,7 @@ class Evaluator:
             leave=True,
         )
         for batch in row_source:
-            rows = _batch_value(batch, "input_ids", "question_ids").size(0)
+            rows = batch["qa_input_ids"].size(0)
             batch_start, batch_end = cursor, cursor + rows
             cursor = batch_end
             # Only the rows inside this rank's window are decoded. The batches outside it
@@ -206,10 +198,6 @@ class Evaluator:
                 for key, value in batch.items()
                 if key != "records"
             }
-            if "input_ids" not in ids and "question_ids" in ids:
-                ids["input_ids"], ids["input_mask"] = ids["question_ids"], ids["question_mask"]
-            if "target_ids" not in ids and "answer_ids" in ids:
-                ids["target_ids"], ids["target_mask"] = ids["answer_ids"], ids["answer_mask"]
             q = ids["qa_context_indices"][rows_slice]
             records = batch["records"][rows_slice]
             embed = model.qwen.get_input_embeddings()
@@ -226,13 +214,13 @@ class Evaluator:
                 else self.cfg.evaluation.max_new_tokens
             )
             if task_id == TASK_RECON:
-                question_ids = ids["input_ids"].new_empty((end_row - start_row, 0))
-                question_mask = ids["input_mask"].new_empty(
+                question_ids = ids["qa_input_ids"].new_empty((end_row - start_row, 0))
+                question_mask = ids["qa_input_mask"].new_empty(
                     (end_row - start_row, 0), dtype=torch.bool
                 )
             else:
-                question_ids = ids["input_ids"][rows_slice]
-                question_mask = ids["input_mask"][rows_slice]
+                question_ids = ids["qa_input_ids"][rows_slice]
+                question_mask = ids["qa_input_mask"][rows_slice]
             generated = model.generate_answers_with_prefix(
                 prefix,
                 q,
@@ -266,9 +254,11 @@ class Evaluator:
                 break
         progress.close()
         model.train(was_training)
-        first_token_hit, race_correct, race_count, samples = _distributed_sum([first_token_hit, race_correct, race_count, samples], device)
+        (first_token_hit, race_correct, race_count, samples) = _distributed_sum(
+            [first_token_hit, race_correct, race_count, samples], device
+        )
         sums = dict(
-            zip(METRIC_KEYS, _distributed_sum([sums[key] for key in METRIC_KEYS], device))
+            zip(METRIC_KEYS, _distributed_sum([sums[key] for key in METRIC_KEYS], device), strict=True)
         )
         result = {key: value / max(1, samples) for key, value in sums.items()}
         dataset_names = sorted(dataset_sums)
@@ -294,21 +284,178 @@ class Evaluator:
         result["first_token_em"] = first_token_hit / max(1, samples)
         return result
 
+    def _evaluation_window(self, captioned, total, row_loader, loader, world, rank):
+        """Shared budget policy of the two evaluation passes (see :func:`row_window`)."""
+        if total is None:
+            return (0, None), loader
+        if row_loader is None and world > 1:
+            print(
+                f"[evaluator] WARNING: {captioned} is a global budget but no unsharded row "
+                f"loader was supplied; falling back to {total} rows per rank "
+                f"({total * world} rows total), which depends on the rank count.",
+                flush=True,
+            )
+            return (0, total), loader
+        return row_window(total, rank, world), (loader if row_loader is None else row_loader)
+
+    @torch.no_grad()
+    def recon_teacher_forced(self, model, loader, device, row_loader=None,
+                             context_base=0, pre_windowed=False):
+        """Reconstruction score of the memory without decoding anything.
+
+        Every validation context is reproduced behind ``[memory, recon_task_embedding]`` and
+        scored token by token, exactly like the training objective's Recon term. One forward
+        per batch instead of ``max_context_tokens`` greedy steps per context: that cost is what
+        used to keep the Recon reader out of the training loop entirely, even though Recon is
+        the objective that actually measures whether the memory carries the context.
+
+        Reported overall and per dataset: teacher-forced cross entropy (``recon_ce``), its
+        perplexity, and the share of context tokens reproduced exactly
+        (``recon_token_accuracy``).
+        """
+        was_training = model.training
+        model.eval()
+        enabled = is_main_process()
+        world, rank = _distributed_world_size(), _distributed_rank()
+        window = (0, None)
+        row_source = loader if row_loader is None else row_loader
+        max_logits_rows = getattr(getattr(self.cfg, "loss", None), "max_logits_rows", 256)
+        sums: dict[str, list[float]] = {}
+        cursor = int(context_base)
+        progress = tqdm(
+            total=(
+                len(row_source)
+                if pre_windowed or window[1] is None
+                else _window_batch_count(window, getattr(row_source, "batch_size", None))
+            ),
+            desc="Validation (teacher-forced reconstruction)"
+            + (f" [rank {rank}/{world}]" if world > 1 else ""),
+            unit="batch",
+            disable=not enabled,
+            leave=True,
+        )
+        for batch in row_source:
+            context_rows = batch["context_ids"].size(0)
+            batch_start, batch_end = cursor, cursor + context_rows
+            cursor = batch_end
+            start_row = max(batch_start, window[0])
+            end_row = min(batch_end, batch_end if window[1] is None else window[1])
+            if end_row <= start_row:
+                if window[1] is not None and batch_start >= window[1]:
+                    break
+                continue
+            records = batch["records"]
+            ids = {key: value.to(device) for key, value in batch.items() if key != "records"}
+            context_ids, context_mask = ids["context_ids"], ids["context_mask"]
+            # A context row is reported under the dataset of the QA turns that point at it.
+            datasets = [""] * context_rows
+            for turn, context_index in zip(records, ids["qa_context_indices"].tolist(), strict=True):
+                datasets[context_index] = turn.dataset
+            embedding = model.qwen.get_input_embeddings()
+            prefix = model.encode_context_prefix(embedding(context_ids), context_mask)
+            stats = model.recon_teacher_forced(
+                prefix,
+                embedding(context_ids),
+                context_mask,
+                context_ids.masked_fill(~context_mask, -100),
+                max_logits_rows=max_logits_rows,
+            )
+            nll, correct, tokens = (
+                stats["nll"].tolist(), stats["correct"].tolist(), stats["tokens"].tolist(),
+            )
+            for row in range(start_row - batch_start, end_row - batch_start):
+                bucket = sums.setdefault(datasets[row] or "unknown", [0.0, 0.0, 0.0, 0.0])
+                bucket[0] += nll[row]
+                bucket[1] += correct[row]
+                bucket[2] += tokens[row]
+                bucket[3] += 1.0
+            progress.update(1)
+            progress.set_postfix({"contexts": int(sum(v[3] for v in sums.values()))}, refresh=False)
+            if window[1] is not None and cursor >= window[1]:
+                break
+        progress.close()
+        model.train(was_training)
+        dataset_names = sorted(sums)
+        if dist.is_available() and dist.is_initialized():
+            gathered = [None] * dist.get_world_size()
+            dist.all_gather_object(gathered, dataset_names)
+            dataset_names = sorted({name for names in gathered for name in names})
+        zero = [0.0, 0.0, 0.0, 0.0]
+        flat: list[float] = []
+        for name in dataset_names:
+            flat.extend(sums.get(name, zero))
+        flat.extend(
+            [sum(sums.get(name, zero)[index] for name in sums) for index in range(4)]
+        )
+        reduced = _distributed_sum(flat, device)
+        result: dict[str, float] = {}
+        for index, name in enumerate(dataset_names):
+            nll, correct, tokens, _ = reduced[4 * index:4 * index + 4]
+            result[f"dataset/{name}/recon_ce"] = nll / max(tokens, 1.0)
+            result[f"dataset/{name}/recon_token_accuracy"] = correct / max(tokens, 1.0)
+            result[f"dataset/{name}/contexts"] = reduced[4 * index + 3]
+        nll, correct, tokens, contexts = reduced[-4:]
+        result["recon_ce"] = nll / max(tokens, 1.0)
+        result["recon_ppl"] = math.exp(min(result["recon_ce"], 20.0))
+        result["recon_token_accuracy"] = correct / max(tokens, 1.0)
+        result["contexts"] = contexts
+        return result
+
     @torch.no_grad()
     def compare_reader_tasks(
         self, model, loader, device, max_qa=None, row_loader=None,
-        include_recon=True,
+        include_recon=True, recon_loader=None, row_base=0, recon_row_loader=None,
+        recon_base=0, pre_windowed=False,
     ):
-        """Evaluate QA, optionally followed by the expensive Recon reader path."""
+        """Evaluate a shared deterministic QA sample with QA and Recon readers."""
+        if max_qa is not None and row_loader is None:
+            from .pipeline import evaluation_window_loader
+
+            seed = getattr(getattr(self.cfg, "training", None), "seed", 0)
+            world, rank = _distributed_world_size(), _distributed_rank()
+            row_loader, row_base = evaluation_window_loader(
+                loader.dataset, loader.collate_fn, budget=max_qa, unit="rows",
+                seed=seed, rank=rank, world=world, batch_size=loader.batch_size,
+            )
+            pre_windowed = True
+        if (
+            max_qa is not None
+            and row_loader is not None
+            and recon_row_loader is None
+            and hasattr(row_loader, "evaluation_selection")
+        ):
+            from .pipeline import evaluation_window_loader
+
+            recon_row_loader, recon_base = evaluation_window_loader(
+                row_loader.evaluation_source_dataset, row_loader.evaluation_collate,
+                budget=max_qa,
+                unit="selected_contexts", selection=row_loader.evaluation_selection,
+                rank=_distributed_rank(), world=_distributed_world_size(),
+                batch_size=row_loader.batch_size,
+            )
         metrics = {
             "qa_task": self.autoregressive(
                 model, loader, device, max_qa=max_qa, task_id=TASK_QA,
-                row_loader=row_loader,
+                row_loader=row_loader, row_base=row_base, pre_windowed=pre_windowed,
             )
         }
-        if include_recon:
-            metrics["recon_task"] = self.autoregressive(
+        if not include_recon:
+            return metrics
+        settings = getattr(self.cfg, "evaluation", None)
+        teacher_forced = getattr(settings, "recon_metrics", True)
+        autoregressive = getattr(settings, "recon_autoregressive", False)
+        if teacher_forced:
+            metrics["recon_task"] = self.recon_teacher_forced(
+                model,
+                loader if recon_loader is None else recon_loader,
+                device,
+                row_loader=row_loader if recon_row_loader is None else recon_row_loader,
+                context_base=recon_base,
+                pre_windowed=pre_windowed,
+            )
+        if autoregressive:
+            metrics["recon_autoregressive"] = self.autoregressive(
                 model, loader, device, max_qa=max_qa, task_id=TASK_RECON,
-                row_loader=row_loader,
+                row_loader=row_loader, row_base=row_base, pre_windowed=pre_windowed,
             )
         return metrics

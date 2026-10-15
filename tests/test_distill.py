@@ -3,11 +3,10 @@ from __future__ import annotations
 
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 from src.losses import kl_distill_loss, memory_objectives
 from src.model import ContextMemoryModel, is_trainable_parameter_name
-from utils.config import MemoryConfig
+from utils.config import LossConfig
 
 try:
     from transformers import Qwen3Config, Qwen3ForCausalLM
@@ -74,7 +73,7 @@ def test_model_distillation_uses_memory_gradient():
     ids = torch.randint(0, 64, (2, 8))
     mask = torch.ones_like(ids, dtype=torch.bool)
     prefix = model.encode_context_prefix(model.qwen.get_input_embeddings()(ids), mask)
-    cfg = MemoryConfig(distill_weight=1.0, distill_positions=4)
+    cfg = LossConfig(distill_weight=1.0, distill_positions=4)
     terms = memory_objectives(model, prefix, ids, mask, cfg)
     assert set(terms) == {"distill_loss"}
     terms["distill_loss"].backward()

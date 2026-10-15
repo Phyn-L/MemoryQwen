@@ -18,11 +18,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from src.data import ContextRecord, ConversationMessage
 from src.model import load_model
 from src.pipeline import make_collate, make_context_dataset
-from src.data import ContextRecord, ConversationMessage
 from utils.config import TrainConfig
-
 
 DATASETS = {
     "c1qa": ("configs/conversation_c1qa.yaml", "ift_c1qa.jsonl"),
@@ -52,9 +51,9 @@ def configure(
     cfg.data.max_conversation_tokens = max_conversation_tokens
     cfg.data.max_answer_tokens = max_answer_tokens
     cfg.data.train_tasks = "qa"
-    cfg.memory.distill_weight = 0.0
-    cfg.memory.qa_weight = 1.0
-    cfg.memory.recon_weight = 0.0
+    cfg.loss.distill_weight = 0.0
+    cfg.loss.qa_weight = 1.0
+    cfg.loss.recon_weight = 0.0
     # Read the first rows and let the normal collator truncate them to the
     # configured training limits instead of scanning for short examples.
     cfg.data.filter_long_context = False

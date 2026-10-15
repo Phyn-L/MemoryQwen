@@ -1,8 +1,8 @@
 """One worker per visible GPU; experiment parameters belong to YAML, not shell."""
 import argparse
 import os
-from pathlib import Path
 import sys
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = {'train': 'train.py', 'test': 'test.py', 'icl': 'evaluation/test_icl_suite.py'}

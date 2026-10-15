@@ -5,14 +5,14 @@ import pytest
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.model import ContextMemoryModel, MetaLoRA, TASK_QA, TASK_RECON, load_model
+from src.model import ContextMemoryModel, MetaLoRA, load_model
 from utils.config import TrainConfig
 
 
-def tiny_model(**kwargs):
+def tiny_model(vocab_size=64, **kwargs):
     torch.manual_seed(7)
     config = Qwen3Config(
-        vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=3,
+        vocab_size=vocab_size, hidden_size=32, intermediate_size=64, num_hidden_layers=3,
         num_attention_heads=4, num_key_value_heads=2, head_dim=8,
         max_position_embeddings=64, tie_word_embeddings=True,
     )
@@ -118,7 +118,9 @@ def test_context_checkpointing_preserves_cache_outputs_and_gradients():
         prefix.memory.square().mean().backward()
         assert prefix.memory_cache.get_seq_length() == 4
         assert not any(layer.gradient_checkpointing for layer in model._transformer_body.layers)
-    for (name, p), (_, q) in zip(plain.named_parameters(), checked.named_parameters()):
+    for (name, p), (_, q) in zip(
+        plain.named_parameters(), checked.named_parameters(), strict=True
+    ):
         if p.grad is not None:
             assert q.grad is not None, name
             torch.testing.assert_close(p.grad, q.grad, atol=1e-6, rtol=1e-4)
@@ -258,6 +260,78 @@ def test_recon_reader_inserts_only_recon_embedding():
     torch.testing.assert_close(seen[0], model.recon_task_embedding.to(model.dtype).expand(2, -1))
 
 
+# ``<|im_start|>`` / ``assistant`` / ``\n`` in Qwen3's vocabulary.
+QWEN3_ASSISTANT_HEADER_IDS = (151644, 77091, 198)
+
+
+def test_recon_task_embedding_is_initialised_from_assistant_header_mean():
+    model = tiny_model(vocab_size=151936)
+    embedding = model.qwen.get_input_embeddings().weight.detach()
+    expected = embedding[list(QWEN3_ASSISTANT_HEADER_IDS)].mean(dim=0)
+    assert model.recon_task_embedding.shape == (model.qwen_hidden_size,)
+    assert model.recon_task_embedding.dtype == torch.float32
+    assert model.recon_task_embedding.requires_grad
+    torch.testing.assert_close(model.recon_task_embedding.detach(), expected.to(torch.float32))
+    # The marker is a copy of the pretrained header mean, not a view of the embedding.
+    assert model.recon_task_embedding.data_ptr() != embedding.data_ptr()
+
+
+def test_the_recon_marker_uses_the_ids_the_caller_resolves():
+    """``load_model`` passes the ids from the run's own tokenizer; those rows are used."""
+    model = tiny_model(vocab_size=151936, task_init_token_ids=(3, 4))
+    embedding = model.qwen.get_input_embeddings().weight.detach()
+    assert model.task_init_token_ids == (3, 4)
+    torch.testing.assert_close(
+        model.recon_task_embedding.detach(),
+        embedding[[3, 4]].mean(dim=0).to(torch.float32),
+    )
+
+
+def test_an_unusable_header_id_falls_back_to_the_qwen3_ids():
+    # 10_000_000 is outside the vocabulary, so that pair cannot come from the embeddings.
+    model = tiny_model(vocab_size=151936, task_init_token_ids=(5, 10_000_000))
+    embedding = model.qwen.get_input_embeddings().weight.detach()
+    assert model.task_init_token_ids == (151644, 77091, 198)
+    torch.testing.assert_close(
+        model.recon_task_embedding.detach(),
+        embedding[[151644, 77091, 198]].mean(dim=0).to(torch.float32),
+    )
+
+
+def test_the_header_ids_are_resolved_from_the_tokenizer():
+    from src.model import assistant_header_token_ids
+
+    class _Tokenizer:
+        def encode(self, text, add_special_tokens=False):
+            assert text == "<|im_start|>assistant\n"
+            return [11, 22, 33]
+
+    class _Empty:
+        def encode(self, text, add_special_tokens=False):
+            return []
+
+    assert assistant_header_token_ids(_Tokenizer()) == (11, 22, 33)
+    assert assistant_header_token_ids(_Empty()) == ()
+    assert assistant_header_token_ids(object()) == ()
+
+
+def test_recon_task_embedding_falls_back_for_backbones_without_the_header_ids():
+    """The guard is `max(id) < vocab`: one row short of the header must stay random."""
+    header_max = max(QWEN3_ASSISTANT_HEADER_IDS)
+    model = tiny_model(vocab_size=header_max)
+    assert model.recon_task_embedding.shape == (model.qwen_hidden_size,)
+    assert model.recon_task_embedding.requires_grad
+    assert model.recon_task_embedding.dtype == torch.float32
+    assert 0.005 < model.recon_task_embedding.std().item() < 0.05
+
+    covered = tiny_model(vocab_size=header_max + 1)
+    embedding = covered.qwen.get_input_embeddings().weight.detach()
+    torch.testing.assert_close(
+        covered.recon_task_embedding.detach(),
+        embedding[list(QWEN3_ASSISTANT_HEADER_IDS)].mean(dim=0).to(torch.float32),
+    )
+
+
 def test_context_resampler_depth_and_block_order_are_configurable():
     model = tiny_model(memory_resampler_layers=3).eval()
     resampler = model.context_resampler
@@ -319,6 +393,25 @@ def test_window_and_empty_context_validation():
         model.encode_context_prefix(torch.randn(2, 4, 32), torch.ones(2, 3, dtype=torch.bool))
     with pytest.raises(ValueError, match="window"):
         tiny_model(max_context_tokens=65)
+
+
+def test_the_training_context_cap_is_stored_and_enforced():
+    """``max_context_tokens`` is the *training* cap, and it is not silently dropped.
+
+    The constructor used to validate the argument and then keep only the backbone window, so a
+    caller could hand over any length and the model accepted it.
+    """
+    capped = tiny_model(max_context_tokens=8)
+    assert capped.max_context_tokens == 8
+    assert capped.window_limit == 64
+    encode(capped, length=8)
+    with pytest.raises(ValueError, match="max_context_tokens"):
+        encode(capped, length=9)
+    # Without an explicit cap the window is the cap, and the window itself is never exceeded.
+    uncapped = tiny_model()
+    assert uncapped.max_context_tokens == uncapped.window_limit == 64
+    with pytest.raises(ValueError, match="window"):
+        encode(uncapped, length=65)
 
 
 def test_writer_config_roundtrip():

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import torch
 
@@ -158,6 +157,53 @@ def test_training_ignores_left_padding_when_numbering_the_question():
     assert train[0, 4].item() == START + 2, train[0].tolist()
     assert train[1, 4].item() == START + 4, train[1].tolist()
     assert train[0, 4:].tolist() == [START + 2, START + 3, START + 4]
+
+
+def test_the_qa_block_is_numbered_by_the_shared_helper():
+    """Training numbering is ``compact_positions`` of the concatenated block mask.
+
+    The helper is the only place that decides where a token sits, so the QA block, the read-out
+    block and the answer block cannot drift apart from generation or from context encoding.
+    """
+    if not _requirements_available():
+        return
+    from src.model import compact_positions
+
+    model = _model(readout_length=1)
+    prefix = _prefix(model, contexts=QUESTION_IDS.size(0))
+    blocks = torch.cat(
+        [
+            QUESTION_MASK,
+            QUESTION_MASK.new_ones(QUESTION_IDS.size(0), 1),
+            QUESTION_MASK.new_ones(QUESTION_IDS.size(0), ANSWER_LENGTH),
+        ],
+        dim=1,
+    )
+    expected = compact_positions(blocks, MEMORY_LENGTH)
+    got = model._qa_positions(prefix, QUESTION_MASK, ANSWER_LENGTH, 1, torch.device("cpu"))
+    torch.testing.assert_close(got, expected)
+
+
+def test_context_encoding_is_independent_of_the_padding_side():
+    """The same content tokenized with left vs right padding must yield the same memory.
+
+    Context positions used to be a plain ``arange``, which is only correct for right padding,
+    and Qwen3's tokenizer config does not pin ``padding_side``: switching to a tokenizer whose
+    default is left would have silently shifted every context position.
+    """
+    if not _requirements_available():
+        return
+    model = _model()
+    embedding = model.qwen.get_input_embeddings()
+    left_ids = torch.tensor([[0, 0, 3, 4, 5, 6]])
+    left_mask = torch.tensor([[False, False, True, True, True, True]])
+    right_ids = torch.tensor([[3, 4, 5, 6, 0, 0]])
+    right_mask = torch.tensor([[True, True, True, True, False, False]])
+
+    left = model.encode_context_prefix(embedding(left_ids), left_mask)
+    right = model.encode_context_prefix(embedding(right_ids), right_mask)
+    torch.testing.assert_close(left.memory, right.memory)
+    torch.testing.assert_close(left.layer_memory, right.layer_memory)
 
 
 def test_generation_prefills_the_same_positions_as_training():

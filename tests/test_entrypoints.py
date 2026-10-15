@@ -1,19 +1,18 @@
 """Offline checks for checkpoint-driven evaluation, local models and YAML entrypoints."""
 import importlib.util
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import pytest
 import torch
-import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from utils.config import TrainConfig
-from utils.model_paths import resolve_model_path, relocate_saved_paths
-from utils.machines import MACHINES
-from utils.launcher import command
 from utils.icl_config import load_icl_defaults
+from utils.launcher import command
+from utils.machines import MACHINES
+from utils.model_paths import relocate_saved_paths, resolve_model_path
 
 
 def script(name):
@@ -99,15 +98,24 @@ def test_stale_checkpoint_model_path_resolves_by_name(tmp_path, monkeypatch):
     assert raw['model']['name_or_path'].endswith('revision-old')
 
 
-def test_icl_yaml_cli_precedence_and_hotpot_paths(tmp_path):
-    model = tmp_path / 'model'; model.mkdir(); (model / 'config.json').write_text('{}')
+def test_icl_yaml_cli_precedence_and_dataset_names(tmp_path):
+    model = tmp_path / 'model'
+    model.mkdir()
+    (model / 'config.json').write_text('{}')
     module = script('evaluation/test_icl_suite')
     args = module.parse_args(['--config', str(ROOT / 'configs/icl_zeroshot.yaml'),
-                              '--machine', 'h200', '--model', str(model), '--bs', '7', '--datasets', 'hotpotqa'])
+                              '--machine', 'h200', '--model', str(model), '--bs', '7',
+                              '--datasets', 'hotpotqa(distractor)'])
     assert args.batch_size == 7 and args.num_shots == 0
-    assert args.datasets == ['hotpotqa'] and args.max_new_tokens == 32
-    assert module.dataset_paths(args)['hotpotqa'][0] == MACHINES['h200']['DATA_ROOT'] + '/hotpotqa/validation.jsonl'
+    assert args.datasets == ['hotpotqa(distractor)'] and args.max_new_tokens == 32
+    assert args.data_root == MACHINES['h200']['DATA_ROOT']
+    # The file itself comes from src/eval_data.py; only the layout module may build it.
+    assert module.slug('hotpotqa(distractor)') == 'hotpotqa_distractor'
     assert args.model == str(model)
+    with pytest.raises(SystemExit):
+        # Old aggregated names are gone, and a bad batch size is still rejected.
+        module.parse_args(['--config', str(ROOT / 'configs/icl_zeroshot.yaml'),
+                           '--datasets', 'hotpotqa'])
     with pytest.raises(SystemExit):
         module.parse_args(['--config', str(ROOT / 'configs/icl_zeroshot.yaml'), '--bs', '0'])
 
@@ -135,7 +143,8 @@ def test_presets_valid_and_legacy_aliases_equivalent():
 
 
 def test_unknown_icl_sections_fail(tmp_path):
-    p = tmp_path / 'bad.yaml'; p.write_text('infernce: {}\n')
+    p = tmp_path / 'bad.yaml'
+    p.write_text('infernce: {}\n')
     with pytest.raises(ValueError, match='Unknown'):
         load_icl_defaults(p)
 
@@ -145,14 +154,14 @@ def test_icl_machine_defaults_preserve_explicit_model(monkeypatch):
     monkeypatch.setattr(module, 'resolve_model_path', lambda name, machine: name)
     args = module.parse_args(['--machine', 'h200'])
     assert args.model.startswith(MACHINES['h200']['MODEL_ROOT'] + '/')
-    assert args.squad_validation_file.startswith(MACHINES['h200']['DATA_ROOT'] + '/')
+    assert args.data_root == MACHINES['h200']['DATA_ROOT']
     explicit = module.DEFAULT_MODEL
     args = module.parse_args(['--machine', 'h200', '--model', explicit])
     assert args.model == explicit
 
 
 def test_removed_config_paths_are_not_silently_remapped():
-    from utils.config_paths import resolve_config_path
+    # utils/config_paths.py (an identity re-mapper for the deleted machine config trees) is
+    # gone; a stale path must simply not exist and never be rewritten to another file.
     old = ROOT / 'configs/qwen-1.7b/4090_train.yaml'
-    assert resolve_config_path(old) == old
     assert not old.exists()

@@ -1,7 +1,7 @@
 """Resolve local Qwen checkpoints without downloading or guessing among revisions."""
-from pathlib import Path
 import os
 import re
+from pathlib import Path
 
 from .machines import fill_missing, machine_environ, resolve_machine
 
@@ -13,7 +13,7 @@ def machine_paths(machine=None):
         values = fill_missing(values, os.environ)
     return resolved, {
         'MODEL_ROOT': values.get('MODEL_ROOT', os.environ.get('MODEL_ROOT', '/data/lz/hf_cache/hub')),
-        'DATA_ROOT': values.get('DATA_ROOT', os.environ.get('DATA_ROOT', '/data/lz/contexts/aggregated')),
+        'DATA_ROOT': values.get('DATA_ROOT', os.environ.get('DATA_ROOT', 'contexts')),
     }
 
 
@@ -54,6 +54,7 @@ def resolve_model_path(name, machine=None, model_root=None):
 def relocate_saved_paths(raw, machine):
     """Rebase known machine roots, resolving stale Qwen paths by model name."""
     from copy import deepcopy
+
     from .machines import MACHINES
     values = deepcopy(raw)
     resolved, paths = machine_paths(machine)

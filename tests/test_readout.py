@@ -18,7 +18,6 @@ import sys
 from pathlib import Path
 
 import torch
-from torch import nn
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -151,8 +150,11 @@ def _tiny_qwen3(vocab=64, hidden=32, layers=2, heads=4, kv_heads=2, intermediate
 def _model(readout_length=0, readout_mode="memory_question"):
     torch.manual_seed(0)
     model = ContextMemoryModel(
-        _tiny_qwen3(), rank=2, alpha=4.0, memory_length=4,                  target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], dropout=0.0,
-        max_context_tokens=16, trainable_dtype=torch.float32,         readout_length=readout_length, readout_layers=2, readout_heads=4, readout_mode=readout_mode,
+        _tiny_qwen3(), rank=2, alpha=4.0, memory_length=4,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], dropout=0.0,
+        max_context_tokens=16, trainable_dtype=torch.float32,
+        readout_length=readout_length, readout_layers=2, readout_heads=4,
+        readout_mode=readout_mode,
     )
     for name, parameter in model.named_parameters():
         parameter.requires_grad = is_trainable_parameter_name(name)
@@ -171,7 +173,7 @@ def _batch(vocab=64, B=2, L=10, Q=4, A=5):
     )
 
 
-def _forward(model, batch):
+def _forward(model, batch, **kwargs):
     embedding = model.qwen.get_input_embeddings()
     return model(
         embedding(batch["context_ids"]), batch["context_mask"],
@@ -179,6 +181,7 @@ def _forward(model, batch):
         embedding(batch["answer_ids"]), batch["answer_mask"], batch["answer_ids"],
         torch.arange(batch["context_ids"].size(0)),
         context_ids=batch["context_ids"],
+        **kwargs,
     )
 
 
@@ -286,7 +289,6 @@ def test_memory_only_input_dependency():
 
 
 def test_new_modes_forward_gradient_and_generation():
-    from src.losses import qa_loss
     for mode in ("memory_only", "learned_prefix", "off"):
         model = _model(3, mode)
         batch = _batch()
@@ -296,25 +298,41 @@ def test_new_modes_forward_gradient_and_generation():
         assert torch.equal(output.labels[:, 4 + extra:], batch["answer_ids"])
         if extra:
                 assert (output.labels[:, 4:7] == -100).all()
-        qa_loss(output.logits, output.labels).backward()
+        # The training path is the only loss path now: per-row means over the memory-prefixed
+        # forward, with no [rows, tokens, vocab] logits materialised.
+        graded = _forward(model, batch, loss_only=True)
+        assert graded.supervision_losses.shape == (output.labels.size(0),)
+        assert bool(graded.supervision_mask.all())
+        graded.supervision_losses.sum().backward()
         if mode == "off":
             assert model.resampler is None and model.readout_length == 0
         else:
             assert all(p.grad is not None for p in model.resampler.parameters())
             assert any(p.grad.abs().sum() > 0 for p in model.resampler.parameters())
-            assert all(is_trainable_parameter_name(n) for n, p in model.named_parameters() if n.startswith("resampler."))
+            assert all(
+                is_trainable_parameter_name(name)
+                for name, _ in model.named_parameters()
+                if name.startswith("resampler.")
+            )
         model.eval()
         embed = model.qwen.get_input_embeddings()
         with torch.no_grad():
             prefix = model.encode_context_prefix(embed(batch["context_ids"]), batch["context_mask"])
             if mode == "learned_prefix":
                 a = model.resampler(embed(batch["question_ids"]), batch["question_mask"], prefix.memory)
-                b = model.resampler(torch.randn_like(embed(batch["question_ids"])), ~batch["question_mask"], torch.randn_like(prefix.memory))
+                b = model.resampler(
+                    torch.randn_like(embed(batch["question_ids"])),
+                    ~batch["question_mask"],
+                    torch.randn_like(prefix.memory),
+                )
                 assert torch.equal(a, b)
             class Tokenizer:
                 pad_token_id = 0
                 eos_token_id = None
-            tokens = model.generate_answers_with_prefix(prefix, torch.arange(2), batch["question_ids"], batch["question_mask"], Tokenizer(), max_new_tokens=3)
+            tokens = model.generate_answers_with_prefix(
+                prefix, torch.arange(2), batch["question_ids"], batch["question_mask"],
+                Tokenizer(), max_new_tokens=3,
+            )
             assert tokens.shape == (2, 3)
 
 

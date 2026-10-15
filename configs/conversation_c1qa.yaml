@@ -2,8 +2,8 @@
 _base_: train_baseline.yaml
 data:
   files:
-    root: ${DATA_ROOT:-/data/lz/contexts}  # Conversation 数据根目录
-    conversation_file: ${DATA_ROOT:-/data/lz/contexts}/ift_c1qa.jsonl  # 会话 JSONL 文件
+    root: ${DATA_ROOT:-contexts}  # 1QA 数据根目录（validation 子集从这里解析）
+    conversation_file: ${CONVERSATION_ROOT:-/data/lz/contexts}/ift_c1qa.jsonl  # conversation JSONL（SHINE 语料，独立根目录）
   limits:
     max_context_tokens: 2048  # 覆盖 context token 上限
   task:

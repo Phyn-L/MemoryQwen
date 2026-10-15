@@ -14,3 +14,37 @@ train = ["accelerate>=0.30", "aim>=3.4", "peft>=0.12"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["utils*", "src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = ["gpu: requires a CUDA device with free memory"]
+filterwarnings = [
+  # The row-filter pools fork a parent that may already hold tokenizer/torch threads
+  # (src/cache_build.py, src/data.py::filter_row_chunks). Deliberate: the pools are short
+  # lived, their output is verified byte-identical to the serial path, and the loader path has
+  # done this since before the cache build existed. `multiprocessing.set_start_method
+  # ("forkserver")` is the mitigation if a hang ever shows up.
+  'ignore:This process .* is multi-threaded, use of fork\(\) may lead to deadlocks:DeprecationWarning',
+]
+
+[tool.ruff]
+# 120 rather than 100: the training and data code carries long, deliberate one-line
+# expressions and long Chinese comments, and reflowing 126 of them would be pure churn.
+line-length = 120
+target-version = "py312"
+extend-exclude = ["docs", ".tmp_analysis", "outputs", "wandb"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests and standalone scripts put the repository root on sys.path *after* the stdlib imports
+# and before importing the project -- the pattern that makes `python tests/test_x.py` work.
+"tests/*" = ["E402"]
+"scripts/*" = ["E402"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+exclude = '(^|/)(docs|scripts)/(.*)$'

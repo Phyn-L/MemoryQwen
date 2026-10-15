@@ -5,10 +5,10 @@ import json
 import os
 import platform
 import shlex
-from datetime import datetime
 import subprocess
 import sys
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 import torch
@@ -16,27 +16,27 @@ import torch.distributed as dist
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from utils import seed_everything
 
-from scripts.evaluation.test_all_suite import DATASETS, plans
-
+from scripts.evaluation.test_all_suite import plans
+from src.eval_data import DEFAULT_DATASETS, resolve, slug, train_file
 from src.icl_baseline import (
-    ICLExample,
     aggregate_metrics,
     example_metrics,
+    limit_examples,
     load_jsonl,
     parse_prediction,
     render_prompt,
-    sample_jsonl,
-    limit_examples,
     sample_context_rows,
+    sample_jsonl_many,
     system_prompt_for,
 )
+from utils import seed_everything
 from utils.config import dtype_from_name, expand_env
-from utils.icl_config import load_icl_defaults
-from utils.model_paths import machine_paths, resolve_model_path
 from utils.ddp import barrier, init_distributed, is_main_process
+from utils.icl_config import load_icl_defaults
 from utils.machines import fill_missing, machine_environ, machine_names, resolve_machine
+from utils.model_paths import machine_paths, resolve_model_path
+
 
 # Both defaults go through the same ${VAR:-default} mechanism the YAML configs use, so a
 # machine with a different model directory or data tree overrides them with MODEL_ROOT /
@@ -51,7 +51,7 @@ def _machine_overrides(machine: str | None = None) -> dict[str, str]:
 
 def _default_paths(overrides=None):
     model_root = expand_env("${MODEL_ROOT:-/data/lz/hf_cache/hub}", overrides)
-    data_root = expand_env("${DATA_ROOT:-/data/lz/contexts/aggregated}", overrides)
+    data_root = expand_env("${DATA_ROOT:-contexts}", overrides)
     return (
         f"{model_root}/models--Qwen--Qwen3-1.7B/"
         "snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e",
@@ -82,26 +82,16 @@ def parse_args(argv=None):
              "MACHINE variable or the hostname decides.",
     )
     parser.add_argument("--config", help="ICL YAML; controls shot count, decoding, split and output")
-    parser.add_argument("--split", choices=("train", "validation", "test"))
-    parser.add_argument("--source-version")
+    parser.add_argument(
+        "--split", choices=("test", "validation"),
+        help="Evaluation split; the default prefers the fixed test split, else the sampled "
+             "validation subset.",
+    )
     parser.add_argument("--data-root")
     parser.add_argument("--max-new-tokens", type=int)
     parser.add_argument("--model", default=default_model)
     parser.add_argument(
         "--datasets", nargs="+", default=["squad", "race"]
-    )
-    parser.add_argument(
-        "--squad-validation-file",
-        default=str(default_data / "squad/validation.jsonl"),
-    )
-    parser.add_argument(
-        "--squad-train-file", default=str(default_data / "squad/train.jsonl")
-    )
-    parser.add_argument(
-        "--race-test-file", default=str(default_data / "race/test.jsonl")
-    )
-    parser.add_argument(
-        "--race-train-file", default=str(default_data / "race/train.jsonl")
     )
     parser.add_argument("--output-dir", default="outputs/icl_baseline/qwen3-1.7b")
     parser.add_argument("--num-shots", type=int, default=4)
@@ -144,8 +134,12 @@ def parse_args(argv=None):
         parser.error(
             "num-shots must be non-negative and batch/token limits must be positive"
         )
-    if not args.datasets or any(not name or "/" in name or name in (".", "..") for name in args.datasets):
-        parser.error("datasets must be directory names under the data root")
+    unknown = [name for name in args.datasets if name not in DEFAULT_DATASETS]
+    if not args.datasets or unknown:
+        parser.error(
+            f"unknown datasets {unknown or args.datasets}; choose from "
+            f"{', '.join(DEFAULT_DATASETS)}"
+        )
     if args.max_new_tokens is not None and args.max_new_tokens <= 0:
         parser.error("max-new-tokens must be positive")
     if args.num_workers < 0:
@@ -154,8 +148,6 @@ def parse_args(argv=None):
         value = getattr(args, name)
         if value is not None and value <= 0:
             parser.error(f"{name} must be positive")
-    if args.config and args.split == "train" and args.num_shots:
-        parser.error("few-shot evaluation on train risks demonstration leakage; use validation/test")
     args.model = resolve_model_path(args.model, args.machine)
     if args.data_root is None:
         args.data_root = str(_default_paths(_machine_overrides(args.machine))[1])
@@ -163,23 +155,19 @@ def parse_args(argv=None):
         if args.resume:
             parser.error("--resume requires --output-dir pointing to the existing run")
         from datetime import datetime
+
         from src.pipeline import model_run_label
         args.output_dir = f"outputs/icl/{model_run_label(args.model)}_{datetime.now():%Y%m%d_%H%M%S}"
     return args
 
 
 def dataset_paths(args):
+    """``{dataset: evaluation file}`` in the scripts/data layout (``src/eval_data.py``)."""
     root = Path(args.data_root)
     paths = {}
     for dataset in args.datasets:
-        if args.split is not None:
-            paths[dataset] = (str(root / dataset / f"{args.split}.jsonl"), str(root / dataset / "train.jsonl"))
-        elif dataset == "squad":
-            paths[dataset] = (args.squad_validation_file, args.squad_train_file)
-        elif dataset == "race":
-            paths[dataset] = (args.race_test_file, args.race_train_file)
-        else:
-            raise ValueError(f"Specify --split for dataset {dataset}")
+        evaluation, _ = resolve(root, dataset, args.split)
+        paths[dataset] = str(evaluation)
     return paths
 
 
@@ -213,7 +201,7 @@ def load_model(args, device):
 
 
 def collate_records(rows):
-    indices, records = zip(*rows)
+    indices, records = zip(*rows, strict=True)
     return list(indices), list(records)
 
 
@@ -241,7 +229,7 @@ def evaluate_dataset(
     device,
     output_dir,
 ):
-    shard_path = output_dir / f"{dataset}.rank-{rank:05d}-of-{world_size:05d}.jsonl"
+    shard_path = output_dir / f"{slug(dataset)}.rank-{rank:05d}-of-{world_size:05d}.jsonl"
     done = completed_indices(shard_path) if args.resume else set()
     indexed = [
         (index, record)
@@ -269,13 +257,7 @@ def evaluate_dataset(
         )
         for indices, examples in progress:
             prompts = [
-                render_prompt(
-                    tokenizer,
-                    example,
-                    demos,
-                    not args.no_chat_template,
-                    args.source_version,
-                )
+                render_prompt(tokenizer, example, demos, not args.no_chat_template)
                 for example in examples
             ]
             encoded = tokenizer(
@@ -299,7 +281,7 @@ def evaluate_dataset(
                 new_tokens, skip_special_tokens=True
             )
             for index, example, raw_prediction in zip(
-                indices, examples, raw_predictions
+                indices, examples, raw_predictions, strict=True
             ):
                 prediction, predicted_letter = parse_prediction(example, raw_prediction)
                 metrics = example_metrics(prediction, example.references)
@@ -330,16 +312,16 @@ def evaluate_dataset(
 def merge_and_score(dataset: str, output_dir: Path, world_size: int):
     rows = []
     for rank in range(world_size):
-        path = output_dir / f"{dataset}.rank-{rank:05d}-of-{world_size:05d}.jsonl"
+        path = output_dir / f"{slug(dataset)}.rank-{rank:05d}-of-{world_size:05d}.jsonl"
         with path.open(encoding="utf-8") as handle:
             rows.extend(json.loads(line) for line in handle if line.strip())
     rows.sort(key=lambda row: row["index"])
-    prediction_path = output_dir / f"{dataset}.predictions.jsonl"
+    prediction_path = output_dir / f"{slug(dataset)}.predictions.jsonl"
     with prediction_path.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
     metrics = aggregate_metrics(rows)
-    (output_dir / f"{dataset}.metrics.json").write_text(
+    (output_dir / f"{slug(dataset)}.metrics.json").write_text(
         json.dumps(metrics, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
@@ -396,10 +378,11 @@ def worker_main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = dataset_paths(args)
-    demonstrations = {
-        dataset: sample_jsonl(paths[dataset][1], dataset, args.num_shots, args.seed)
-        for dataset in args.datasets
-    }
+    # One pass over the shared training split for every requested dataset; zero-shot runs
+    # (num_shots == 0) never open it.
+    demonstrations = sample_jsonl_many(
+        train_file(Path(args.data_root)), args.datasets, args.num_shots, args.seed
+    )
     if is_main_process():
         (output_dir / "run_config.json").write_text(
             json.dumps(
@@ -413,7 +396,7 @@ def worker_main():
     barrier()
     tokenizer, model = load_model(args, device)
     for dataset in args.datasets:
-        records = load_jsonl(paths[dataset][0], dataset, args.source_version)
+        records = load_jsonl(paths[dataset], dataset)
         if args.max_samples is not None:
             records = records[: args.max_samples]
         records = limit_examples(
@@ -450,7 +433,8 @@ def suite_main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--machine', choices=machine_names(), default=None)
     parser.add_argument('--model', default='Qwen3-8B')
-    parser.add_argument('--datasets', nargs='+', choices=DATASETS, default=list(DATASETS))
+    parser.add_argument('--datasets', nargs='+', choices=DEFAULT_DATASETS,
+                        default=list(DEFAULT_DATASETS))
     parser.add_argument('--data-root')
     parser.add_argument('--output-dir')
     parser.add_argument('--bs', type=int, default=2)
@@ -464,7 +448,10 @@ def suite_main(argv=None):
     parser.add_argument('--context-shuffle-seed', type=int, default=42)
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
-    for key in ('bs', 'max_input_tokens', 'max_new_tokens', 'max_context_tokens', 'max_samples', 'max_contexts', 'qa_per_context'):
+    for key in (
+        'bs', 'max_input_tokens', 'max_new_tokens', 'max_context_tokens',
+        'max_samples', 'max_contexts', 'qa_per_context',
+    ):
         value = getattr(args, key)
         if value is not None and value < 1:
             parser.error(f'{key} must be positive')
@@ -477,10 +464,10 @@ def suite_main(argv=None):
     results = []
     print(f'Model: {args.model} -> {model}', flush=True)
     for plan in dataset_plans:
-        destination = out / plan['name']
+        destination = out / slug(plan['name'])
         command = [sys.executable, '-m', 'utils.launcher', 'icl',
                    '--config', 'configs/icl_zeroshot.yaml', '--model', model,
-                   '--num-shots', '0', '--datasets', plan['dataset'], '--split', plan['split'],
+                   '--num-shots', '0', '--datasets', plan['name'], '--split', plan['split'],
                    '--data-root', str(root), '--output-dir', str(destination),
                    '--bs', str(args.bs), '--max-input-tokens', str(args.max_input_tokens),
                    '--max-new-tokens', str(args.max_new_tokens),
@@ -492,8 +479,6 @@ def suite_main(argv=None):
         command += ['--context-shuffle-seed', str(args.context_shuffle_seed)]
         if machine:
             command += ['--machine', machine]
-        if plan['version']:
-            command += ['--source-version', plan['version']]
         if args.max_samples:
             command += ['--max-samples', str(args.max_samples)]
         print(shlex.join(command), flush=True)
@@ -503,7 +488,7 @@ def suite_main(argv=None):
             # Inherit stdout/stderr so tqdm progress is visible in the terminal.
             result = subprocess.run(command)
             row['status'] = 'ok' if result.returncode == 0 else f'failed:{result.returncode}'
-            metrics_file = destination / f"{plan['dataset']}.metrics.json"
+            metrics_file = destination / f"{slug(plan['name'])}.metrics.json"
             if result.returncode == 0:
                 if metrics_file.is_file():
                     row['metrics'] = json.loads(metrics_file.read_text())

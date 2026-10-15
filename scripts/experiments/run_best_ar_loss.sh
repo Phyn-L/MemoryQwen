@@ -62,10 +62,10 @@ from utils.config import TrainConfig
 base_path = Path(os.environ["BASE_CONFIG"])
 out_root = Path(os.environ["OUTPUT_ROOT"])
 run_name = os.environ["RUN_NAME"]
-config = copy.deepcopy(yaml.safe_load(base_path.read_text(encoding="utf-8")))
+config = TrainConfig.from_file(base_path).to_dict()
 
 # Best observed AR configuration: QA + distribution distillation only.
-config.setdefault("memory", {}).update(
+config.setdefault("loss", {}).update(
     distill_weight=0.3,
     distill_entropy_weight=True,
 )

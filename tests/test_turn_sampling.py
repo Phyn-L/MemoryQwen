@@ -1,0 +1,174 @@
+"""Collate contracts: deterministic turn sampling and one tokenization per target.
+
+Which QA turns a context contributes used to come from ``random.sample`` on the process-global
+stream inside the DataLoader workers, so it depended on the worker layout: changing
+``data.num_workers`` changed the training distribution, and a resumed run could not reproduce
+the rows it had already consumed. It is now keyed on (record, epoch) only, which is what the
+first test pins down.
+
+The second test pins the other half of the cleanup: every supervision target is tokenized
+exactly once. It used to be tokenized once for the whole batch and then again per task, which
+is also how the truncation limits of the two views could drift apart.
+"""
+from __future__ import annotations
+
+import torch
+
+from src.data import ContextRecord, collate_context_records
+
+
+class _Batch:
+    def __init__(self, rows, masks=None):
+        self.input_ids = torch.tensor(rows, dtype=torch.long)
+        if masks is None:
+            masks = [[1] * len(row) for row in rows]
+        self.attention_mask = torch.tensor(masks, dtype=torch.long)
+
+
+class _Encoded:
+    """What the real tokenizer returns for one plain string: a flat id list."""
+
+    def __init__(self, ids):
+        self.input_ids = ids
+
+
+class _WordTokenizer:
+    """Whitespace tokenizer with the surface ``collate_context_records`` uses."""
+
+    padding_side = "right"
+    truncation_side = "right"
+    eos_token_id = 1
+    pad_token_id = 0
+    VOCAB = {
+        word: index
+        for index, word in enumerate(
+            ("the", "cat", "sat", "dog", "ctx", "answer", "question", "extra", "history"),
+            start=2,
+        )
+    }
+
+    def __init__(self):
+        self.calls = []
+
+    def _ids(self, text):
+        return [self.VOCAB.get(word, 2) for word in str(text).split()]
+
+    def _pad(self, rows):
+        width = max((len(row) for row in rows), default=0)
+        ids, masks = [], []
+        for row in rows:
+            pad = width - len(row)
+            if self.padding_side == "left":
+                ids.append([self.pad_token_id] * pad + list(row))
+                masks.append([0] * pad + [1] * len(row))
+            else:
+                ids.append(list(row) + [self.pad_token_id] * pad)
+                masks.append([1] * len(row) + [0] * pad)
+        return _Batch(ids, masks)
+
+    def __call__(self, text, add_special_tokens=False, padding=False, truncation=False,
+                 max_length=None, return_tensors=None):
+        self.calls.append(text)
+        if isinstance(text, str):
+            return _Encoded(self._truncate(self._ids(text), truncation, max_length))
+        rows = [
+            self._truncate(self._ids(item), truncation, max_length) for item in list(text)
+        ]
+        return self._pad(rows) if padding else _Batch(rows)
+
+    def _truncate(self, ids, truncation, max_length):
+        if truncation and max_length is not None and len(ids) > max_length:
+            return ids[-max_length:] if self.truncation_side == "left" else ids[:max_length]
+        return ids
+
+    def pad(self, encoded, padding=True, return_tensors=None):
+        return self._pad([list(row) for row in encoded["input_ids"]])
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, **kwargs):
+        return " ".join(str(item["content"]) for item in messages)
+
+
+def _record(index: int, turns: int = 6) -> ContextRecord:
+    conversations = [{"role": "system", "content": "ctx history"}]
+    for turn in range(turns):
+        conversations.append({"role": "user", "content": f"question {index} {turn}"})
+        conversations.append({"role": "assistant", "content": f"answer {index} {turn}"})
+    return ContextRecord(
+        context=f"ctx {index}",
+        conversations=tuple(conversations),
+        dataset="squad",
+        context_id=f"id{index}",
+    )
+
+
+def _collate(rows, epoch, tokenizer=None, **kwargs):
+    return collate_context_records(
+        rows,
+        tokenizer or _WordTokenizer(),
+        max_context_tokens=8,
+        max_question_tokens=6,
+        max_answer_tokens=4,
+        qa_per_context=2,
+        training=True,
+        train_tasks="mix",
+        epoch=epoch,
+        **kwargs,
+    )
+
+
+def _selected(batch):
+    """``{context_id: [(user, answer), ...]}`` of the QA rows of one training batch."""
+    chosen = {}
+    for turn in batch["records"]:
+        if not turn.messages:
+            continue
+        chosen.setdefault(turn.context_id, []).append(
+            (turn.question, turn.answer)
+        )
+    return chosen
+
+
+def test_the_same_records_and_epoch_select_the_same_qa_turns():
+    rows = [_record(index) for index in range(3)]
+    assert _selected(_collate(rows, epoch=0)) == _selected(_collate(rows, epoch=0))
+
+
+def test_each_context_selects_independently_of_the_batch_it_travels_in():
+    """Worker count changes the batch composition, so it must not change the selection."""
+    rows = [_record(index) for index in range(4)]
+    forward = _selected(_collate(rows, epoch=0))
+    shuffled = _selected(_collate(list(reversed(rows)), epoch=0))
+    assert forward == shuffled
+
+    # ... and a different epoch is allowed to select differently (it is a new pass over the
+    # data), while still being reproducible.
+    other = _collate(rows, epoch=1)
+    assert _selected(other) == _selected(_collate(rows, epoch=1))
+
+
+def test_every_supervision_target_is_tokenized_exactly_once():
+    rows = [_record(index) for index in range(3)]
+    tokenizer = _WordTokenizer()
+    batch = _collate(rows, epoch=0, tokenizer=tokenizer)
+    answers = [call for call in tokenizer.calls if isinstance(call, str)]
+    assert len(answers) == len(batch["records"]), "one tokenizer call per selected turn"
+
+    # Both task views are padded from that single pass, so the batch carries the same targets
+    # the QA path tokenized: the Recon target is the context, the QA target the answer(+EOS).
+    qa_rows = batch["qa_target_ids"].size(0)
+    recon_rows = batch["recon_target_ids"].size(0)
+    assert qa_rows + recon_rows == len(batch["records"])
+    assert batch["recon_labels"][:, -1].ne(-100).all()
+    assert torch.equal(
+        batch["recon_target_ids"][:, 0], torch.full((recon_rows,), _WordTokenizer.VOCAB["ctx"])
+    )
+
+
+def test_mix_emits_one_recon_row_and_qa_per_context():
+    rows = [_record(index) for index in range(2)]
+    batch = _collate(rows, epoch=0)
+    assert batch["qa_target_ids"].size(0) == 2 * 2
+    assert batch["recon_target_ids"].size(0) == 2
+    assert batch["qa_context_indices"].tolist() == [0, 0, 1, 1]
+    assert batch["recon_context_indices"].tolist() == [0, 1]
+    assert batch["context_ids"].size(0) == 2

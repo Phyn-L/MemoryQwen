@@ -2,16 +2,25 @@
 
 ## 当前实现（2026-10-13）
 
-训练 validation 和独立 eval 均只运行 autoregressive 自由生成，使用 QA task embedding。
-`Evaluator.teacher_forced`、`include_teacher_metrics`、`--teacher-forced` 和
-`val_teacher_forced/*` 日志已删除。标准答案只用于生成后的指标计算，不作为生成输入。
+QA 的评估只运行 autoregressive 自由生成，使用 QA task embedding：答案的 TF（teacher-forced）
+路径、`include_teacher_metrics`、`--teacher-forced` 和 `val_teacher_forced/*` 日志仍然删除，
+标准答案只用于生成后的指标计算，不作为生成输入。
 
-评估报告包含 `autoregressive`，记录 EM、F1、ROUGE-L、`first_token_em`、
-各数据集指标，以及适用时的 RACE accuracy。训练中的 QA、Recon、distill loss
-单独记录在 `loss/*`，评估不再计算 TF loss 或 perplexity。
+每次评估还会跑一次 **teacher-forced recon 指标**，它评估的是另一个目标而不是答案：
+`Evaluator.recon_teacher_forced` 让模型在 `[memory, recon_task_embedding]` 之后逐 token 复现
+context，用同一次前向给出 `recon_ce`、`recon_ppl`、`recon_token_accuracy`（逐数据集
+`dataset/<name>/recon_*` 与 `<name>/contexts`）。它不做任何解码，成本是一次前向，因此可以放进
+训练循环；`evaluation.recon_autoregressive: true` 才额外开启自回归的 recon 评估
+（每个 context 生成 `max_context_tokens` 个 token，昂贵）。两种 Recon 评估都复用 QA 抽样涉及的 context；
+teacher-forced Recon 对每个去重 context 评估一次。
+
+QA 评估报告包含 EM、F1、ROUGE-L、`first_token_em`、各数据集指标，以及适用时的 RACE accuracy。
+训练中的 QA、Recon、distill loss 单独记录在 `loss/*`。QA 的 TF loss 与 perplexity 不参与评估。
 
 `evaluation.autoregressive_every` 控制训练中的评估频率，
-`evaluation.evaluation_max_samples` 控制全局评估 QA 数，
+`evaluation.max_eval_sample_per_dataset` 控制每个数据集的评估 QA 条数上限：
+各数据集按 `training.seed` 独立随机抽取至多 N 条，不限制所有数据集合计的 QA 数；
+Recon 复用这份样本涉及的去重 context，多 GPU 分摊同一份入选样本。
 `evaluation.max_new_tokens` 控制每个答案的生成上限。
 相关入口为 `scripts/train.py`、`scripts/test.py` 和
 `scripts/evaluation/test_all_suite.py`。
@@ -22,9 +31,9 @@
 
 当前实现入口：[evaluator](../../src/evaluator.py)、[metrics](../../src/metrics.py)、[data](../../src/data.py)。2026-09-18 整理；下列样例分数、数据集行数是原 README 的历史快照，不是本次重新测量。正式比较时记录数据指纹、过滤规则、checkpoint、解码预算和实际 QA 数。
 
-当前默认 `question_padding_side=left`、`eos_mode=append`；旧模式只用于复现实验。修复过程及回归示例见[历史记录](../history/ENGINEERING.md#readme-target-format-history)。主指标使用自由生成的 AR EM/F1；TF 用作诊断。数据过滤仍会影响 SQuAD v2 无答案行，不能将有答案子集得分解释为完整 SQuAD 2.0 成绩。
+当前默认 `question_padding_side=left`、`eos_mode=append`；旧模式只用于复现实验。修复过程及回归示例见回归测试（`tests/`）及相关 commit 记录。主指标使用自由生成的 AR EM/F1；TF 用作诊断。数据过滤仍会影响 SQuAD v2 无答案行，不能将有答案子集得分解释为完整 SQuAD 2.0 成绩。
 
-运行命令见[运行指南](RUNNING.md)，SQuAD 专用评测异常见[异常记录](../experiments/EVAL_ANOMALIES.md)。
+运行命令见[运行指南](RUNNING.md)。
 
 ### Teacher-forced scores are a diagnostic, not the headline
 
@@ -120,13 +129,37 @@ counts as a hit, compared as a token id or as normalized text so the leading-spa
 encoding of a generated token does not hide a hit. `tests/test_references.py` covers the
 end-to-end JSONL -> dataset -> offset-cache -> reload path.
 
-Both harnesses read the same file, and it is the only supported one:
-`scripts/evaluation/test_icl_suite.py` defaults to `<data.root>/squad/validation.jsonl` and reads it
-through `src.icl_baseline.iter_examples`, which understands the aggregated context schema and
-**raises** on the old one-question-per-line layout instead of yielding an empty evaluation
-set. `tests/test_icl_data.py` asserts the parity against the training split on the real files.
+Both harnesses read the same files, and `src/eval_data.py` is the only place that decides
+where they are: `<data.root>/1qa/meta/test/<slug>.json` and
+`<data.root>/1qa/meta/validation/<slug>.json` (both written by `scripts/data/build_1qa.py`;
+the previous layout `1qa-test/`, `1qa-validation/` and the old sampled `1qa-val/` still resolve
+as fallbacks so an existing tree keeps working). The memory side is
+`scripts/evaluation/test_all_suite.py`, which runs `scripts/test.py --data-file <file>` once
+per dataset; the ICL side reads the file through `src.icl_baseline.iter_examples`, which
+understands both dialects `scripts/data/` writes (per-dataset `conversations` rows and the
+shared training split's `qa_pairs` rows) and **raises** on anything else instead of yielding an
+empty evaluation set. ICL demonstrations come from the shared filtered
+`<data.root>/1qa/cache/train.jsonl` in one pass, filtered by dataset. `tests/test_eval_data.py` pins the layout, both dialects and
+the demo sampler; `tests/test_all_suite_orchestration.py` pins the commands it generates.
 
 ### The SQuAD evaluation set, in detail
+
+> **Historical measurement.** The numbers below were measured on the deprecated `aggregated`
+> tree (`<data.root>/squad/*.jsonl`, the v1.1 + v2.0 concatenation) that the harnesses used
+> before the 1QA rebuild. The current corpus is built by `scripts/data/build_1qa.py`, which
+> records the context and QA counts per dataset and split in
+> `contexts/1qa/meta/build.manifest.json`; `meta/test/squad.json` and
+> `meta/validation/squad.json` are its per-dataset files, and the filtered
+> `cache/{train,validation}.jsonl` are what a run trains and evaluates on. The composition
+> argument below still holds in kind -- questions that share a context are aggregated into one
+> row and metrics are averaged over QA rows -- but the counts have not been re-measured for the
+> new build.
+
+Evaluation never samples: the file's own order plus the per-rank window decide which rows are
+scored, and decoding is greedy (`argmax`, stop at EOS) in every harness -- the memory-side
+evaluator, `scripts/test.py` and the ICL baseline (`do_sample=False`). `1qa-val/` and the
+reservoir sampler that produced it are gone; a validation score is now a deterministic function
+of the checkpoint and the evaluation budget.
 
 `<data.root>/squad/*.jsonl` is not "SQuAD dev" in the sense the papers mean. It is the
 **v1.1 and v2.0 sets concatenated per paragraph**, and that composition is visible in every

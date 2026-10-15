@@ -1,18 +1,26 @@
-"""Run dataset evaluators serially and write compact reports plus one summary."""
+"""Run the memory-side evaluator over checkpoints x datasets and write one summary.
+
+For every checkpoint and every dataset this orchestrator runs ``scripts/test.py`` on that
+dataset's own file (``src/eval_data.py`` decides where the file lives) and collects the
+per-dataset report into a single ``summary.csv``. It is the memory half of the reader
+comparison whose baseline half is ``scripts/evaluation/test_icl_suite.py``.
+"""
 
 from __future__ import annotations
-import argparse, csv, json, subprocess, sys
+
+import argparse
+import csv
+import json
+import subprocess
+import sys
 from pathlib import Path
 
+from src.eval_data import DEFAULT_DATASETS, report_name, resolve, slug
 from utils.machines import machine_names
 from utils.model_paths import machine_paths
 
-DATASETS = ("squad", "ms_marco_v1", "ms_marco_v2", "hotpotqa", "race")
+DATASETS = DEFAULT_DATASETS
 CHECKPOINT_SUFFIXES = {".pt", ".pth", ".bin"}
-
-
-def _nonempty(path):
-    return path.is_file() and path.stat().st_size > 0
 
 
 def discover_checkpoints(directory):
@@ -31,34 +39,21 @@ def discover_checkpoints(directory):
     return checkpoints
 
 
-def plans(root, selected):
+def plans(root, selected, split=None):
+    """One plan per dataset: the file to evaluate plus the split it came from."""
     for name in selected:
-        if name == "ms_marco_v1":
-            dataset, version = "ms_marco", "ms_marco_v1_1"
-            split = "test" if _nonempty(root / dataset / "test.jsonl") else "validation"
-        elif name == "ms_marco_v2":
-            dataset, version, split = "ms_marco", "ms_marco_v2_1", "validation"
-        else:
-            dataset, version = name, None
-            split = "test" if _nonempty(root / dataset / "test.jsonl") else "validation"
-        path = root / dataset / f"{split}.jsonl"
-        if not _nonempty(path):
-            raise FileNotFoundError(f"no nonempty {split}.jsonl for {name}: {path}")
-        yield {"name": name, "dataset": dataset, "version": version, "split": split}
+        path, actual_split = resolve(root, name, split)
+        yield {"name": name, "path": str(path), "split": actual_split}
 
 
-def common_args(plan, machine):
-    result = [
-        "--machine",
-        machine,
-        "--datasets",
-        plan["dataset"],
-        "--split",
-        plan["split"],
-    ]
-    if plan["version"]:
-        result += ["--source-version", plan["version"]]
-    return result
+def common_args(plan):
+    """The dataset-specific arguments of one evaluator run.
+
+    ``--data-file`` is what makes a per-dataset run possible: the checkpoint's config names one
+    split file for the whole corpus, and the evaluator is pointed at this dataset's file
+    instead. Every flag here must exist in ``scripts/test.py``.
+    """
+    return ["--split", plan["split"], "--data-file", plan["path"]]
 
 
 def run(label, command, dry_run):
@@ -71,28 +66,34 @@ def run(label, command, dry_run):
 
 
 def write_summary(path, checkpoints, datasets, reports):
-    metrics = ("em", "f1", "rouge_l")
+    """CSV of the answer metrics plus the teacher-forced reconstruction score per dataset."""
     header = ["ckpt"]
     for dataset in datasets:
+        name = slug(dataset)
         header.extend(
-            (f"{dataset}_AR_EM", f"{dataset}_AR_F1", f"{dataset}_AR_ROUGE-L")
+            f"{name}_AR_{label}" for label in ("EM", "F1", "ROUGE-L", "recon_CE")
         )
         if dataset == "race":
-            header.append("race_AR_Acc")
+            header.append(f"{name}_AR_Acc")
     rows = []
     for checkpoint in checkpoints:
         row = [checkpoint.stem]
         for dataset in datasets:
             report_path = reports.get((checkpoint, dataset))
-            values = None
+            answers, recon = None, {}
             if report_path is not None and report_path.is_file():
                 report = json.loads(report_path.read_text())
-                values = report.get("autoregressive")
-            for metric in metrics:
-                value = None if values is None else values.get(metric)
+                # The evaluator reports one group per task: generated QA answers
+                # (``qa_task``) and the teacher-forced reconstruction (``recon_task``).
+                answers = report.get("qa_task")
+                recon = report.get("recon_task") or {}
+            for metric in ("em", "f1", "rouge_l"):
+                value = None if answers is None else answers.get(metric)
                 row.append("" if value is None else f"{100 * float(value):.2f}")
+            recon_ce = None if answers is None else recon.get("recon_ce")
+            row.append("" if recon_ce is None else f"{float(recon_ce):.4f}")
             if dataset == "race":
-                value = None if values is None else values.get("accuracy")
+                value = None if answers is None else answers.get("accuracy")
                 row.append("" if value is None else f"{100 * float(value):.2f}")
         rows.append(row)
     with path.open("w", encoding="utf-8", newline="") as handle:
@@ -102,17 +103,12 @@ def write_summary(path, checkpoints, datasets, reports):
     return rows
 
 
-def report_filename(dataset):
-    """Return the compact report filename used inside a checkpoint directory."""
-    return f"{dataset.replace('_', '')}.json"
-
-
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--machine", choices=machine_names(), default=None)
     parser.add_argument(
         "--data-root",
-        help="Aggregated dataset root; defaults to the DATA_ROOT for --machine",
+        help="Data tree written by scripts/data/ (defaults to the DATA_ROOT for --machine)",
     )
     parser.add_argument("--checkpoint", "--ckpt", dest="checkpoints", nargs="+")
     parser.add_argument(
@@ -121,12 +117,20 @@ def main(argv=None):
     parser.add_argument(
         "--datasets", nargs="+", choices=DATASETS, default=list(DATASETS)
     )
+    parser.add_argument(
+        "--split",
+        choices=("test", "validation"),
+        help="Evaluation split; default picks the fixed test split, else the sampled subset",
+    )
     parser.add_argument("--memory-bs", type=int, default=16)
-    parser.add_argument("--system-prompt-mode", choices=("none", "context", "separate"), default="separate")
     parser.add_argument("--max-context-tokens", type=int, default=1024)
-    parser.add_argument("--max-context-rows", type=int, default=5000)
-    parser.add_argument("--qa-per-context", type=int, default=8)
-    parser.add_argument("--context-shuffle-seed", type=int, default=42)
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        help="Cap on the contexts of each dataset (scripts/test.py --max-samples)",
+    )
+    parser.add_argument("--max-new-tokens", type=int, help="Decoding budget per answer")
+    parser.add_argument("--qa-batch-size", type=int, help="QA rows per generation group")
     parser.add_argument(
         "--output-dir",
         default="outputs/eval_ab_reader",
@@ -166,9 +170,9 @@ def main(argv=None):
         checkpoint_out.mkdir(parents=True, exist_ok=True)
         if not args.dry_run:
             (checkpoint_out / "manifest.json").unlink(missing_ok=True)
-        for plan in plans(root, args.datasets):
-            common = common_args(plan, args.machine)
+        for plan in plans(root, args.datasets, args.split):
             label = f"memory:{checkpoint.stem}"
+            report_path = checkpoint_out / report_name(plan["name"])
             command = [
                 sys.executable,
                 "-m",
@@ -176,28 +180,24 @@ def main(argv=None):
                 "test",
                 "--ckpt",
                 str(checkpoint),
-                "--data-root",
-                str(root.resolve()),
                 "--bs",
                 str(args.memory_bs),
                 "--max-context-tokens",
                 str(args.max_context_tokens),
-                "--system-prompt-mode",
-                args.system_prompt_mode,
-                *common,
-            ]
-            if args.max_context_rows is not None:
-                command += ["--max-context-rows", str(args.max_context_rows)]
-            if args.qa_per_context is not None:
-                command += ["--qa-per-context", str(args.qa_per_context)]
-            command += ["--context-shuffle-seed", str(args.context_shuffle_seed)]
-            report_path = checkpoint_out / report_filename(plan["name"])
-            command += [
+                *common_args(plan),
                 "--output-dir",
                 str(checkpoint_out),
                 "--report-file",
                 str(report_path),
             ]
+            if args.machine:
+                command += ["--machine", args.machine]
+            if args.max_samples is not None:
+                command += ["--max-samples", str(args.max_samples)]
+            if args.max_new_tokens is not None:
+                command += ["--max-new-tokens", str(args.max_new_tokens)]
+            if args.qa_batch_size is not None:
+                command += ["--qa-batch-size", str(args.qa_batch_size)]
             if not args.dry_run:
                 report_path.unlink(missing_ok=True)
             status = run(label, command, args.dry_run)

@@ -1,3 +1,12 @@
+"""Objectives: per-task cross entropy, teacher-forced reconstruction stats, KL distillation.
+
+The whole batch is projected through the vocabulary head in one *flattened* pass (chunked by
+``loss.max_logits_rows``) and each row is normalised by its own active-token count, so
+"average tokens within a row, then average rows within a task" holds without one Python
+iteration per row.
+"""
+from __future__ import annotations
+
 import math
 
 import torch
@@ -5,45 +14,10 @@ import torch.nn.functional as F
 
 from .dtypes import no_autocast
 
-def qa_loss(logits, labels, row_mask=None):
-    # Reduce in float32: the backbone may emit bfloat16 logits, and the answer-only
-    # cross entropy is small enough that bfloat16 rounding is visible in the loss.
-    token_logits = logits[..., :-1, :].float()
-    token_labels = labels[..., 1:]
-    flat_loss = F.cross_entropy(token_logits.reshape(-1, logits.size(-1)), token_labels.reshape(-1), ignore_index=-100, reduction="none")
-    active = token_labels.reshape(-1).ne(-100)
-    if not active.any():
-        return token_logits.sum() * 0.0
-    token_loss = flat_loss.view(token_labels.shape)
-    row_counts = active.view(token_labels.shape).sum(dim=1).clamp_min(1)
-    row_loss = token_loss.sum(dim=1) / row_counts
-    if row_mask is not None:
-        row_mask = row_mask.to(row_loss.device, dtype=torch.bool)
-        if row_mask.shape != row_loss.shape:
-            raise ValueError(f"row_mask {tuple(row_mask.shape)} does not match loss rows {tuple(row_loss.shape)}")
-        if not bool(row_mask.any()):
-            return token_logits.sum() * 0.0
-        return row_loss[row_mask].mean()
-    return row_loss.mean()
-
-def _chunk_cross_entropy(hidden_chunk, labels_chunk, weight):
-    """Vocabulary cross entropy for one flat chunk. Separated so it can be checkpointed.
-
-    ``weight`` is the already materialised ``[vocab, D]`` unembedding, not the head
-    module: a tied head materialises its weight lazily, and letting that happen inside
-    the checkpointed function makes the recomputation save a different number of
-    tensors than the original forward (``CheckpointError``). Passing the weight in as an
-    input keeps the recomputation pure and the materialisation in the outer graph.
-    """
-    logits = F.linear(hidden_chunk, weight).float()
-    return F.cross_entropy(logits, labels_chunk, ignore_index=-100, reduction="sum")
-
 
 def sample_positions(mask, count, generator=None):
     """Sample up to ``count`` True positions of ``mask`` ``[B, S]`` per row.
 
-    Same contract as ``MetaLoRA.sample_context_targets`` but standalone, so a caller can
-    index an already-aligned ``(hidden, labels)`` pair (see :func:`sequence_lm_loss`).
     Returns ``[B, P]`` indices and a ``[B, P]`` keep-mask; rows with fewer than ``count``
     valid positions get ``-1`` in the unused slots.
 
@@ -52,81 +26,180 @@ def sample_positions(mask, count, generator=None):
     same token ``count - valid`` extra times (a context shorter than the budget would be
     trained mostly on its own first token). The losses translate a negative position into
     ``ignore_index``, which makes that mistake impossible.
+
+    ``generator`` is threaded through so a caller can make the sampling *reproducible*: the
+    training loop reseeds one generator with ``seed + step`` per optimizer step, which is
+    what turns this from "a random subset" into "a recomputable subset" (and what keeps a
+    resumed run identical to an uninterrupted one). Without it the global RNG is used and
+    the choice is neither reproducible nor resumable.
     """
     mask = mask.bool()
     if mask.ndim != 2:
         raise ValueError("sample_positions expects a [B, S] mask")
     device = mask.device
-    scores = torch.rand(mask.shape, device=device, generator=generator).masked_fill(~mask, float("-inf"))
+    scores = torch.rand(
+        mask.shape, device=device, dtype=torch.float32, generator=generator
+    ).masked_fill(~mask, float("-inf"))
     budget = max(1, min(int(count), mask.size(1)))
     positions = scores.topk(budget, dim=1).indices
     keep = mask.gather(1, positions)
     return positions.masked_fill(~keep, -1), keep
 
-def sequence_lm_loss(hidden, labels, head, mask=None, positions=None, max_logits_rows=256):
-    """Next-token cross entropy over a whole sequence.
+
+def _gather_positions(hidden, labels, mask, positions):
+    """Select the sampled positions of an aligned ``(hidden, labels)`` pair."""
+    # See sample_positions: -1 means "this sampled slot could not be filled" and must not be
+    # scored, which the gathered mask alone cannot express (a duplicate would point at a
+    # position that is itself valid).
+    valid = positions >= 0
+    safe = positions.clamp_min(0)
+    index = safe.unsqueeze(-1).expand(-1, -1, hidden.size(-1))
+    return (
+        hidden.gather(1, index),
+        labels.gather(1, safe),
+        mask.gather(1, safe) & valid,
+    )
+
+
+def _resolve_mask(labels, mask):
+    if mask is None:
+        return labels.ne(-100)
+    return mask.bool() & labels.ne(-100)
+
+
+def _head_weight(head):
+    """``[vocab, D]`` unembedding, materialised outside checkpointed chunks."""
+    weight = (
+        head.materialized_weight() if hasattr(head, "materialized_weight") else head.weight
+    )
+    return weight, (getattr(head, "compute_dtype", None) or weight.dtype)
+
+
+def _chunk_row_cross_entropy(hidden_chunk, labels_chunk, weight, rows_chunk, row_count):
+    """Per-row summed cross entropy for one flat chunk. Separated so it can be checkpointed.
+
+    ``weight`` is the already materialised ``[vocab, D]`` unembedding, not the head module: a
+    tied head materialises its weight lazily, and letting that happen inside the checkpointed
+    function makes the recomputation save a different number of tensors than the original
+    forward (``CheckpointError``). Passing the weight in as an input keeps the recomputation
+    pure and the materialisation in the outer graph.
+    """
+    logits = F.linear(hidden_chunk, weight).float()
+    token_loss = F.cross_entropy(
+        logits, labels_chunk, ignore_index=-100, reduction="none"
+    )
+    active = labels_chunk.ne(-100)
+    partial = token_loss.new_zeros(row_count)
+    partial.index_add_(0, rows_chunk, token_loss.masked_fill(~active, 0.0))
+    return partial
+
+
+def _row_statistics(hidden, labels, head, max_logits_rows, with_correct):
+    """Chunked vocabulary projection; returns per-row ``(nll_sum, correct, tokens)``.
+
+    Every row of the batch is projected in one pass: the ``[R, S]`` pair is flattened to
+    ``R * S`` rows and cut into ``max_logits_rows`` chunks that may straddle row boundaries,
+    because the per-row reduction is an ``index_add_`` over the row index of each token.
+    """
+    if hidden.ndim != 3:
+        raise ValueError("a supervision row must have shape [B, S, H]")
+    if labels.shape != hidden.shape[:2]:
+        raise ValueError(
+            f"labels {tuple(labels.shape)} do not match hidden {tuple(hidden.shape)}"
+        )
+    row_count, width = labels.shape
+    weight, head_dtype = _head_weight(head)
+    # Labels stay integer (cross_entropy requires it); the hidden states are what has to match
+    # the head's dtype.
+    flat_labels = labels.reshape(-1)
+    flat_hidden = hidden.reshape(-1, hidden.size(-1)).to(head_dtype)
+    active = flat_labels.ne(-100)
+    tokens = active.view(row_count, width).sum(dim=1).float()
+    rows_of_token = torch.arange(row_count, device=labels.device).repeat_interleave(width)
+    total_tokens = flat_hidden.size(0)
+    step = max(1, min(int(max_logits_rows), total_tokens)) if total_tokens else 1
+
+    nll = torch.zeros(row_count, dtype=torch.float32, device=labels.device)
+    correct = (
+        torch.zeros(row_count, dtype=torch.float32, device=labels.device)
+        if with_correct
+        else None
+    )
+    if total_tokens:
+        with no_autocast(hidden.device):
+            for start in range(0, total_tokens, step):
+                stop = start + step
+                chunk_hidden = flat_hidden[start:stop]
+                chunk_labels = flat_labels[start:stop]
+                chunk_rows = rows_of_token[start:stop]
+                if not bool(chunk_labels.ne(-100).any()):
+                    continue
+                if torch.is_grad_enabled() and chunk_hidden.requires_grad:
+                    partial = torch.utils.checkpoint.checkpoint(
+                        _chunk_row_cross_entropy,
+                        chunk_hidden,
+                        chunk_labels,
+                        weight,
+                        chunk_rows,
+                        row_count,
+                        use_reentrant=False,
+                    )
+                else:
+                    partial = _chunk_row_cross_entropy(
+                        chunk_hidden, chunk_labels, weight, chunk_rows, row_count
+                    )
+                nll = nll + partial.float()
+                if with_correct:
+                    prediction = F.linear(chunk_hidden, weight).argmax(dim=-1)
+                    hit = prediction.eq(chunk_labels) & chunk_labels.ne(-100)
+                    correct.index_add_(0, chunk_rows, hit.float())
+    return nll, correct, tokens
+
+
+def sequence_lm_loss(
+    hidden, labels, head, mask=None, positions=None, max_logits_rows=256,
+):
+    """Per-row mean next-token cross entropy over a whole sequence.
 
     ``hidden`` is ``[B, S, H]``: the backbone's own last hidden state for a sequence whose
     keys/values were prefixed by the memory. ``hidden[i]`` scores ``labels[i]`` **directly**
-    -- this function does *not* shift, unlike :func:`qa_loss` -- so the caller shifts once
-    and any ``positions`` it passes index the same aligned pair that is scored.
+    -- this function does *not* shift, so the caller shifts once and any ``positions`` it
+    passes index the same aligned pair that is scored.
 
-    The vocabulary head is applied once over the sequence, with optional position sampling and
-    chunking to bound logits memory.
-
-    The head is materialised outside checkpointed chunks so recomputation remains pure.
+    Returns ``(row_losses, row_mask)``: the per-row mean over that row's active tokens (0 for
+    a row with none) and a boolean ``[B]`` mask telling the caller which rows contributed.
+    ``supervision_objectives`` uses the mask so an empty row cannot dilute a task's mean.
     """
-    if hidden.ndim != 3:
-        raise ValueError("sequence_lm hidden must have shape [B, S, H]")
-    if labels.shape != hidden.shape[:2]:
-        raise ValueError(f"sequence_lm labels {tuple(labels.shape)} do not match hidden {tuple(hidden.shape)}")
-    if mask is None:
-        mask = labels.ne(-100)
-    else:
-        mask = mask.bool() & labels.ne(-100)
+    if labels.shape[:2] != hidden.shape[:2]:
+        raise ValueError(
+            f"labels {tuple(labels.shape[:2])} do not match hidden {tuple(hidden.shape[:2])}"
+        )
+    mask = _resolve_mask(labels, mask)
     if positions is not None:
-        # `sample_positions` writes -1 into the slots it could not fill (a row with fewer
-        # valid positions than the budget). Those must not be scored: gathering them with a
-        # clamped index and ANDing in "was this slot real" is what drops them. Relying on
-        # the gathered mask alone is not enough, because a duplicate would point at a
-        # position that is itself valid.
-        valid = positions >= 0
-        safe = positions.clamp_min(0)
-        index = safe.unsqueeze(-1).expand(-1, -1, hidden.size(-1))
-        hidden = hidden.gather(1, index)
-        labels = labels.gather(1, safe)
-        mask = mask.gather(1, safe) & valid
+        hidden, labels, mask = _gather_positions(hidden, labels, mask, positions)
     labels = labels.masked_fill(~mask, -100)
-    head_dtype = getattr(head, "compute_dtype", None) or head.weight.dtype
-    weight = (
-        head.materialized_weight()
-        if hasattr(head, "materialized_weight") else head.weight
+    nll, _, tokens = _row_statistics(
+        hidden, labels, head, max_logits_rows, with_correct=False
     )
-    flat_hidden = hidden.reshape(-1, hidden.size(-1)).to(head_dtype)
-    flat_labels = labels.reshape(-1)
-    rows = flat_hidden.size(0)
-    step = max(1, min(int(max_logits_rows), rows)) if rows else 1
-    total = None
-    count = 0
-    with no_autocast(hidden.device):
-        for start in range(0, rows, step):
-            chunk_hidden = flat_hidden[start:start + step]
-            chunk_labels = flat_labels[start:start + step]
-            active = int(chunk_labels.ne(-100).sum())
-            if active == 0:
-                continue
-            if torch.is_grad_enabled() and chunk_hidden.requires_grad:
-                chunk_sum = torch.utils.checkpoint.checkpoint(
-                    _chunk_cross_entropy, chunk_hidden, chunk_labels, weight,
-                    use_reentrant=False,
-                )
-            else:
-                chunk_sum = _chunk_cross_entropy(chunk_hidden, chunk_labels, weight)
-            total = chunk_sum if total is None else total + chunk_sum
-            count += active
-    if total is None or count == 0:
-        return hidden.sum() * 0.0
-    return total / count
+    row_mask = tokens > 0
+    row_losses = nll / tokens.clamp_min(1.0)
+    return row_losses, row_mask
+
+
+def teacher_forced_row_stats(hidden, labels, head, max_logits_rows=256):
+    """Per-row token count, exact-match count and summed NLL of one aligned batch.
+
+    Used by the evaluation-only reconstruction metric: the same memory-prefixed hidden states
+    the training loss scores, reduced to the three numbers an accuracy / perplexity needs. No
+    generation, so it costs one forward instead of ``max_context_tokens`` decodes.
+    """
+    mask = _resolve_mask(labels, None)
+    labels = labels.masked_fill(~mask, -100)
+    nll, correct, tokens = _row_statistics(
+        hidden, labels, head, max_logits_rows, with_correct=True
+    )
+    return {"nll": nll, "correct": correct, "tokens": tokens}
+
 
 def kl_distill_loss(student_hidden, teacher_hidden, head, mask=None, temperature=1.0,
                     positions=None, max_logits_rows=256, topk=0, entropy_weight=False):
@@ -166,13 +239,9 @@ def kl_distill_loss(student_hidden, teacher_hidden, head, mask=None, temperature
         mask = torch.ones(student_hidden.shape[:2], dtype=torch.bool, device=student_hidden.device)
     else:
         mask = mask.bool()
-    head_dtype = getattr(head, "compute_dtype", None) or head.weight.dtype
-    weight = (
-        head.materialized_weight()
-        if hasattr(head, "materialized_weight") else head.weight
-    )
+    weight, head_dtype = _head_weight(head)
     if positions is not None:
-        # See sequence_lm_loss: -1 means "this sampled slot could not be filled" and must
+        # See sample_positions: -1 means "this sampled slot could not be filled" and must
         # not be scored, which the gathered mask alone cannot express.
         valid = positions >= 0
         safe = positions.clamp_min(0)
@@ -215,8 +284,12 @@ def kl_distill_loss(student_hidden, teacher_hidden, head, mask=None, temperature
         return student_hidden.sum() * 0.0
     return total / weight_sum
 
-def memory_objectives(model, prefix, context_ids, context_mask, cfg):
-    """Unweighted context-level losses; disabled branches do no decoder work."""
+
+def memory_objectives(model, prefix, context_ids, context_mask, cfg, generator=None):
+    """Unweighted context-level losses; disabled branches do no decoder work.
+
+    ``generator`` drives the distillation position sampling (see :func:`sample_positions`).
+    """
     zero = prefix.memory.sum() * 0.0
     terms = {"distill_loss": zero}
     if cfg.distill_weight:
@@ -224,7 +297,11 @@ def memory_objectives(model, prefix, context_ids, context_mask, cfg):
             prefix, model.qwen.get_input_embeddings()(context_ids), context_mask
         )[:, :-1]
         mask = context_mask[:, 1:]
-        positions = sample_positions(mask, cfg.distill_positions)[0] if cfg.distill_positions else None
+        positions = (
+            sample_positions(mask, cfg.distill_positions, generator=generator)[0]
+            if cfg.distill_positions
+            else None
+        )
         terms["distill_loss"] = kl_distill_loss(
             hidden,
             prefix.context_hidden[:, :-1],
@@ -232,6 +309,7 @@ def memory_objectives(model, prefix, context_ids, context_mask, cfg):
             mask,
             cfg.distill_temperature,
             positions=positions,
+            max_logits_rows=cfg.max_logits_rows,
             topk=cfg.distill_topk,
             entropy_weight=cfg.distill_entropy_weight,
         )
@@ -239,7 +317,10 @@ def memory_objectives(model, prefix, context_ids, context_mask, cfg):
 
 
 def objective_total(qa, terms, cfg):
-    return cfg.qa_weight * qa + sum(getattr(cfg, name.removesuffix("_loss") + "_weight") * loss for name, loss in terms.items())
+    return cfg.qa_weight * qa + sum(
+        getattr(cfg, name.removesuffix("_loss") + "_weight") * loss
+        for name, loss in terms.items()
+    )
 
 
 def scheduled_task_weights(step, total_steps, cfg):
@@ -263,9 +344,22 @@ def scheduled_task_weights(step, total_steps, cfg):
     return 1.0 - ratio, ratio, ratio
 
 
-def supervision_objectives(row_losses, task_ids, cfg, qa_weight=None, recon_weight=None):
-    """Per-task means with externally scheduled task weights."""
+def supervision_objectives(
+    row_losses, task_ids, cfg, qa_weight=None, recon_weight=None, row_mask=None,
+):
+    """Per-task means with externally scheduled task weights.
+
+    ``row_mask`` selects the supervision rows that actually carried a target; without it a
+    row with no active token (which scores 0) would drag its task's mean towards zero.
+    """
     recon_mask, qa_mask = task_ids.eq(0), task_ids.eq(1)
+    if row_mask is not None:
+        row_mask = row_mask.to(task_ids.device, dtype=torch.bool)
+        if row_mask.shape != task_ids.shape:
+            raise ValueError(
+                f"row_mask {tuple(row_mask.shape)} does not match task ids {tuple(task_ids.shape)}"
+            )
+        qa_mask, recon_mask = qa_mask & row_mask, recon_mask & row_mask
     qa_weight = cfg.qa_weight if qa_weight is None else qa_weight
     recon_weight = cfg.recon_weight if recon_weight is None else recon_weight
     zero = row_losses.sum() * 0

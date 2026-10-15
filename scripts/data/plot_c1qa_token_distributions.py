@@ -13,7 +13,6 @@ import numpy as np
 from scipy.ndimage import gaussian_filter1d
 from transformers import AutoTokenizer
 
-
 FIELDS = ("context", "question", "answer")
 COLORS = {"context": "#2563eb", "question": "#16a34a", "answer": "#dc2626"}
 PLOT_MAX = {"context": 4096, "question": 256, "answer": 256}
@@ -44,7 +43,7 @@ def _lengths(tokenizer, texts: list[str], batch_size: int) -> np.ndarray:
 
 def _plot_one(dataset: str, stats: dict[str, np.ndarray], output: Path) -> None:
     fig, axes = plt.subplots(1, 3, figsize=(18, 5), constrained_layout=True)
-    for ax, field in zip(axes, FIELDS):
+    for ax, field in zip(axes, FIELDS, strict=True):
         values = stats[field]
         plot_max = PLOT_MAX[field]
         plot_values = np.minimum(values, plot_max)
@@ -90,14 +89,16 @@ def main() -> None:
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("data/generated/ift_c1qa_from_hf_cache.jsonl"),
+        default=Path("contexts/1qa/ift_c1qa_from_hf_cache.jsonl"),
     )
     parser.add_argument(
         "--tokenizer",
         type=Path,
         default=Path("/data/lz/hf_cache/hub/models--Qwen--Qwen3-8B"),
     )
-    parser.add_argument("--output-dir", type=Path, default=Path("data/generated/c1qa_token_distributions"))
+    parser.add_argument(
+        "--output-dir", type=Path, default=Path("contexts/1qa/c1qa_token_distributions")
+    )
     parser.add_argument("--batch-size", type=int, default=2048)
     args = parser.parse_args()
 
@@ -117,7 +118,12 @@ def main() -> None:
     all_stats: dict[str, dict[str, dict[str, float | int]]] = {}
     for dataset, columns in texts.items():
         arrays = {field: _lengths(tokenizer, columns[field], args.batch_size) for field in FIELDS}
-        _plot_one(dataset, arrays, args.output_dir / f"{dataset.replace('/', '_').replace('(', '_').replace(')', '')}.png")
+        _plot_one(
+            dataset,
+            arrays,
+            args.output_dir
+            / f"{dataset.replace('/', '_').replace('(', '_').replace(')', '')}.png",
+        )
         all_stats[dataset] = {
             field: {
                 "min": int(values.min()),

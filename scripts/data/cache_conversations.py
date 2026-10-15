@@ -9,8 +9,8 @@ result is reusable by later runs with the same source file, tokenizer and data l
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -18,8 +18,8 @@ if str(ROOT) not in sys.path:
 
 from transformers import AutoTokenizer
 
-from src.pipeline import data_cache_dir, make_context_dataset, resolve_split_limit
 from src.data import SortishSampler
+from src.pipeline import data_cache_dir, make_context_dataset, resolve_split_limit
 from utils.config import TrainConfig
 
 
@@ -81,12 +81,12 @@ def main() -> None:
         trust_remote_code=True,
         local_files_only=True,
     )
-    cache_dir = data_cache_dir()
+    cache_dir = data_cache_dir(cfg)
     splits = ("train", "validation") if args.split == "both" else (args.split,)
 
     for split in splits:
         print(
-            f"[cache] preparing {split} split from {getattr(cfg.data, f'{split}_conversation_file', None) or cfg.data.conversation_file}",
+            f"[cache] preparing {split} split from {cfg.data.split_file(split)}",
             flush=True,
         )
         dataset = make_context_dataset(

@@ -233,7 +233,11 @@ class ContextMemoryResampler(nn.Module):
             for parameter in self.output_projection.parameters():
                 parameter.requires_grad = False
         else:
-            for parameter in self.layerwise_output_projection.parameters() if self.layerwise_output_projection is not None else ():
+            for parameter in (
+                self.layerwise_output_projection.parameters()
+                if self.layerwise_output_projection is not None
+                else ()
+            ):
                 parameter.requires_grad = False
         if dtype is not None:
             self.to(dtype=dtype)

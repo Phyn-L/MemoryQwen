@@ -17,9 +17,11 @@ Four behaviours a single-epoch run depends on, and that are easy to lose in a re
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
+import math
 import sys
-import tempfile
+from pathlib import Path
+
+import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -46,16 +48,11 @@ def _train_module():
 def test_log_every_defaults_to_the_historical_resolution_and_is_validated():
     assert LoggingConfig().log_every == 10
 
-    broken = CONFIG.read_text(encoding="utf-8").replace("log_every: 25", "log_every: 0")
-    with tempfile.TemporaryDirectory() as root:
-        path = Path(root) / "broken.yaml"
-        path.write_text(broken, encoding="utf-8")
-        try:
-            TrainConfig.from_file(path).validate()
-        except ValueError as error:
-            assert "log_every" in str(error)
-        else:
-            raise AssertionError("logging.log_every = 0 must be rejected")
+    # Built from a dict on purpose: patching the tracked YAML's text made this test depend on
+    # a literal ("log_every: 25") that a config edit silently moved out from under it.
+    cfg = TrainConfig.from_dict({"logging": {"log_every": 0}})
+    with pytest.raises(ValueError, match="log_every"):
+        cfg.validate()
 
 
 def test_the_last_step_is_always_evaluated():
@@ -81,7 +78,7 @@ def test_the_loop_takes_its_cadences_from_the_config():
 def test_the_loop_echoes_the_resolved_schedule():
     source = _train_source()
     assert '"schedule: "' in source
-    for field in ("steps=", "ranks=", "warmup=", "checkpoint_every=", "log_every="):
+    for field in ("steps=", "ranks=", "warmup=", "log_every="):
         assert field in source, field
 
 
@@ -166,3 +163,32 @@ if __name__ == "__main__":
                 print(f"ok   {name}")
     print("\nVERDICT:", "ALL PASSED" if not failures else f"{failures} FAILED")
     raise SystemExit(1 if failures else 0)
+
+
+def test_the_progress_line_carries_loss_qa_recon_and_ppl_at_once():
+    """One postfix call, four fields: tqdm replaces the fields on every call.
+
+    The loop used to set `{loss, ppl}` per micro-batch and then `{loss}` at every optimizer
+    step, so with the default accumulation of 1 the perplexity was wiped on every step.
+    """
+    module = _train_module()
+    # Sums over a two-micro-batch group (what `group_terms` holds at the boundary).
+    terms = {"loss": 24.0, "qa_loss": 20.0, "recon_loss": 4.0, "distill_loss": 0.0}
+    postfix = module.step_postfix(terms, 2)
+    assert postfix["loss"] == "12.0000"
+    assert postfix["qa"] == "10.0000"
+    assert postfix["recon"] == "2.0000"
+    assert postfix["ppl"] == "22026.47"
+    assert list(postfix) == ["loss", "qa", "recon", "ppl"]
+
+    # A single-micro-batch view is the running mean of the group, and the perplexity of a
+    # large QA loss is clamped instead of overflowing.
+    assert module.step_postfix(terms, 1)["loss"] == "24.0000"
+    assert module.step_postfix({"loss": 1.0, "qa_loss": 1e6}, 1)["ppl"] == f"{math.exp(20.0):.2f}"
+
+
+def test_the_loop_does_not_overwrite_the_postfix_with_loss_only():
+    source = _train_source()
+    assert "progress.set_postfix(step_postfix(group_terms, group_micro_batches))" in source
+    assert "set_postfix(loss=" not in source, "a loss-only call wipes the other fields"
+    assert "set_postfix(**" not in source, "keyword arguments would be sorted alphabetically"

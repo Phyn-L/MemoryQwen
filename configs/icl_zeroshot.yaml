@@ -2,7 +2,7 @@ model:
   name: Qwen3-1.7B  # 用于 ICL 评估的模型名称
   dtype: bfloat16  # 模型权重数据类型
 data:
-  root: ${DATA_ROOT:-/data/lz/contexts/aggregated}  # 聚合数据集根目录
+  root: ${DATA_ROOT:-contexts}  # 聚合数据集根目录
   datasets:
   - squad  # 参与评估的数据集名称
   split: validation  # 评估数据集划分

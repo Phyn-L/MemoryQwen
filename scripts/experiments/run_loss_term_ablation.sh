@@ -56,7 +56,7 @@ from utils.config import TrainConfig
 
 base_path = Path(os.environ["BASE_CONFIG"])
 out_root = Path(os.environ["OUTPUT_ROOT"])
-base = yaml.safe_load(base_path.read_text(encoding="utf-8"))
+base = TrainConfig.from_file(base_path).to_dict()
 
 # Keep the experiment controlled: only the loss weights differ across runs.
 runs = {
@@ -69,8 +69,8 @@ runs = {
 
 for name, overrides in runs.items():
     config = copy.deepcopy(base)
-    memory = config.setdefault("memory", {})
-    memory.update(overrides)
+    loss = config.setdefault("loss", {})
+    loss.update(overrides)
     config.setdefault("checkpoint", {})["output_dir"] = str(out_root / name)
     logging = config.setdefault("logging", {})
     logging["aim_run_name"] = f"{out_root.name}_{name}"

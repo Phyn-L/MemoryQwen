@@ -7,6 +7,29 @@ pip install -e '.[train]'
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 ```
 
+## 0. 数据
+
+训练数据由 `scripts/data/` 构建，默认落在 `data.files.root`（`${DATA_ROOT:-contexts}`）下：
+
+```bash
+# 原始数据：本地 HF cache -> contexts/1qa/meta/（不依赖配置）
+python scripts/data/build_1qa.py
+python scripts/data/build_1qa.py --dry-run       # 只看每数据集/划分的统计，不写盘
+
+# 过滤后的训练/验证集：过滤规则来自训练 YAML -> contexts/1qa/cache/
+python scripts/data/build_cache.py --config configs/train_baseline.yaml
+python scripts/data/build_cache.py --config configs/train_baseline.yaml --splits validation --dry-run
+python scripts/data/build_cache.py --config configs/train_baseline.yaml --num-workers 16   # 默认 min(8, CPU)
+```
+
+手动构建时每个划分会显示一个进度条（按文件字节推进，postfix 是 `rows/contexts/qa_pairs`）；`--quiet` 或 `--no-progress` 关掉，非主进程（多卡训练自动补建时）本来就不画。
+
+`scripts/train.py` 会在启动时自动补建缺失或过期的 cache（多卡只建一次），所以上面的第二条命令是可选的；数据根要被多个实验共用、或想先确认过滤后有多少 context 时，手动跑一次更省事。
+
+**手动构建过 cache 之后，训练不会再重复过滤**：loader 会核对 `cache/build.json` 里的指纹（源 meta 文件 + tokenizer + 过滤规则），一致就直接读 `cache/train.jsonl`，日志里打印 `[data] train: train.jsonl is this config's filtered cache (loader-side re-filter skipped)`。指纹不一致（改了过滤参数、换了 tokenizer、或用了 `--data-file` 指向原始文件）才会退回旧路径：逐行过滤并在 `<data.root>/1qa/cache/loader/` 下另存一份（`data.preprocess_cache_dir` 可改到本地快盘；排序长度缓存 `sortish_lengths-*.json` 也放这里）。所以你之前看到的 `Filtering train.jsonl … / Reading train.jsonl …` 那两分钟（以及一份重复的 GB 级文件）只在指纹不匹配时才会出现。
+
+1QA 划分从数据根解析为 `<root>/1qa/1qa-{train,validation,test}.jsonl`，可以用 `--data-root` 或 `data.files.<split>_conversation_file` 覆盖。旧的 `/data/lz/contexts/aggregated` 语料已弃用，不再出现在任何默认值里。
+
 ## 1. train.sh
 
 ```bash
@@ -15,7 +38,17 @@ bash scripts/train.sh --machine h200 --config configs/train_baseline.yaml
 bash scripts/train.sh --machine h200 --config configs/train_baseline.yaml --resume outputs/<run>/last.pt
 ```
 
-学习率、batch size、数据集、memory 大小、reader 开关、dtype、调度、日志和 checkpoint 路径均来自完整训练 YAML。恢复训练必须使用与原运行相符的配置。`<run>` 替换为实际路径。
+学习率、batch size、数据集、memory 大小、reader 开关、dtype、调度、日志和 checkpoint 路径来自配置：`configs/harness.yaml`（共享 harness）+ `configs/models/<模型>.yaml`（模型层）+ 实验文件（`_base_` 组合前两者，只写自己的差异）。恢复训练必须使用与原运行相符的配置。`<run>` 替换为实际路径。
+
+显存不够时用梯度累积而不是缩小有效 batch：
+
+```yaml
+training:
+  batch_size: 2
+  gradient_accumulation_steps: 8   # 有效 batch = 2 × 8 × 卡数
+```
+
+`loss`/`scheduler`/`evaluation` 的间隔都按**优化器步**计（累积组算一步），checkpoint 也只在评估步保存。
 
 训练任务组合由 YAML 控制：
 
@@ -31,7 +64,7 @@ data:
   max_input_tokens: 40960
 ```
 
-`train_tasks: qa` 和 `train_tasks: recon` 分别执行单任务训练；`mix` 同时构造两类监督，并按动态 `recon_schedule` / `recon_ratio_*` 加权。QA 输入来自 JSONL 的 `conversations`，由 Qwen 原生 chat template 渲染；Recon reader 不输入 question token，直接从 memory prefix 预测 context。
+目标权重与蒸馏参数在 `loss:` 段（`loss.qa_weight` / `loss.recon_weight` / `loss.distill_*` / `loss.max_logits_rows`），`memory:` 只放结构参数；旧字段名会直接报错。`train_tasks: qa` 和 `train_tasks: recon` 分别执行单任务训练；`mix` 同时构造两类监督，并按动态 `recon_schedule` / `recon_ratio_*` 加权。QA 输入来自 JSONL 的 `conversations`，由 Qwen 原生 chat template 渲染；Recon reader 不输入 question token，直接从 memory prefix 预测 context。
 
 两阶段训练使用 `--init-from`：
 
@@ -79,7 +112,9 @@ shot 数、生成长度、输入长度、dtype、seed、chat template、数据 s
 | 4090 | `/data/lz/hf_cache/hub` | `/data/lz/contexts` |
 | h200 | `/home/lijie/proj2/xmu/lz` | `/home/lijie/proj2/xmu/lz/contexts` |
 
-训练数据采用 `<DATA_ROOT>/ift_c1qa.jsonl` 或 `<DATA_ROOT>/ift_pwc.jsonl` 的 conversation schema：每行包含 context + conversations。PWC 保留多轮 user/assistant 历史；C1QA 通常每行一个 assistant turn。独立 ICL 评估仍使用其自身配置的数据源。
+1QA 训练数据采用 `<DATA_ROOT>/1qa/cache/train.jsonl` 与 `cache/validation.jsonl`（每个 context 一行，`qa_pairs` 里放该 context 的多个 QA），由 `<DATA_ROOT>/1qa/meta/meta_<split>.json` 按配置过滤而来；评测套件读 `<DATA_ROOT>/1qa/meta/<split>/<slug>.json`。只有 `configs/conversation_*.yaml` 仍使用 `<DATA_ROOT>/ift_c1qa.jsonl` / `ift_pwc.jsonl` 这种 conversation schema：每行包含 context + conversations。PWC 保留多轮 user/assistant 历史；C1QA 通常每行一个 assistant turn。独立 ICL 评估仍使用其自身配置的数据源。
+
+**评估抽样确定、解码贪心**：QA 评估按 `training.seed` 对每个数据集独立随机抽取至多 `evaluation.max_eval_sample_per_dataset` 条，无合计条数上限；Recon 复用入选 QA 涉及的去重 context。解码一律 `argmax`（贪心，遇 EOS 停止），没有 temperature/top-p/beam。同一配置和 checkpoint 的评估样本固定且可复现。
 
 两条路径均使用现有答案评分，不计算 supporting-fact/joint 指标。训练 memory 数据先按 `data.max_input_tokens` 的模型窗口检查，再按 `data.max_context_tokens` 截断；ICL 的对应限制写在 YAML 的 `data.max_context_tokens`，默认 null。公平比较时需对齐这个限制与样本集合，不能只对齐 bs。
 
