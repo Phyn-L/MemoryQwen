@@ -21,6 +21,14 @@ sys.path.insert(0, str(REPO))
 from utils.config import TrainConfig, expand_env, expand_env_values  # noqa: E402
 
 
+@pytest.mark.parametrize("interval", [0, -1, True, 1.5])
+def test_context_checkpoint_interval_must_be_a_positive_integer(interval):
+    cfg = TrainConfig()
+    cfg.training.gradient_checkpoint_every_n_layers = interval
+    with pytest.raises(ValueError, match="training.gradient_checkpoint_every_n_layers"):
+        cfg.validate()
+
+
 def test_default_is_used_when_the_variable_is_unset():
     os.environ.pop("MEMORYQWEN_TEST_ROOT", None)
     assert expand_env("${MEMORYQWEN_TEST_ROOT:-/fallback}/x") == "/fallback/x"
@@ -117,22 +125,29 @@ def test_the_training_config_set_is_not_empty():
     assert TRAINING_CONFIGS, "the default-resolution tests below would pass vacuously"
 
 
-def test_per_dataset_eval_cap_is_validated_and_serialized():
+def test_per_dataset_context_cap_is_validated_and_serialized():
     cfg = TrainConfig()
-    cfg.evaluation.max_eval_sample_per_dataset = 17
-    assert cfg.to_dict()["evaluation"]["max_eval_sample_per_dataset"] == 17
-    cfg.evaluation.max_eval_sample_per_dataset = 0
-    with pytest.raises(ValueError, match="max_eval_sample_per_dataset"):
+    cfg.evaluation.max_eval_contexts_per_dataset = 17
+    assert cfg.to_dict()["evaluation"]["max_eval_contexts_per_dataset"] == 17
+    cfg.evaluation.max_eval_contexts_per_dataset = 0
+    with pytest.raises(ValueError, match="max_eval_contexts_per_dataset"):
         cfg.validate()
 
 
-def test_old_eval_budget_is_migrated_only_for_saved_configs(capsys):
-    raw = {"evaluation": {"evaluation_max_samples": 37}}
-    with pytest.raises(ValueError, match="was replaced"):
-        TrainConfig.from_dict(raw)
-    cfg = TrainConfig.from_dict(raw, tolerate_removed_data_fields=True)
-    assert cfg.evaluation.max_eval_sample_per_dataset == 37
-    assert "QA cap per dataset" in capsys.readouterr().err
+def test_old_eval_budget_name_is_not_accepted():
+    with pytest.raises(TypeError, match="max_eval_sample_per_dataset"):
+        TrainConfig.from_dict(
+            {"evaluation": {"max_eval_sample_per_dataset": 37}},
+            tolerate_removed_data_fields=True,
+        )
+
+
+def test_old_qa_per_context_name_is_not_accepted():
+    with pytest.raises(ValueError, match="qa_per_context"):
+        TrainConfig.from_dict(
+            {"data": {"qa_per_context": 4}},
+            tolerate_removed_data_fields=True,
+        )
 
 
 def test_removed_recon_context_budget_only_migrates_from_saved_configs(capsys):
@@ -264,7 +279,7 @@ def test_the_harness_and_model_layers_are_bases_not_presets():
     assert "Qwen3-1.7B" in baseline.model.name_or_path
     # An experiment file changes the architecture, never the harness defaults it does not name.
     assert four_b.evaluation.max_new_tokens == 32 and baseline.evaluation.max_new_tokens == 64
-    assert four_b.logging.log_every == baseline.logging.log_every == 100
+    assert four_b.logging.log_every == baseline.logging.log_every == harness["logging"]["log_every"]
 
 
 def test_a_saved_config_may_still_carry_removed_fields():

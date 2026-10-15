@@ -13,7 +13,7 @@ BATCH_SIZE="${BATCH_SIZE:-8}"
 MAX_INPUT_TOKENS="${MAX_INPUT_TOKENS:-1024}"
 MAX_CONTEXT_TOKENS="${MAX_CONTEXT_TOKENS:-1024}"
 MAX_CONTEXTS="${MAX_CONTEXTS:-}"
-QA_PER_CONTEXT="${QA_PER_CONTEXT:-}"
+MAX_QA_SAMPLE_PER_CONTEXT="${MAX_QA_SAMPLE_PER_CONTEXT:-}"
 CONTEXT_SHUFFLE_SEED="${CONTEXT_SHUFFLE_SEED:-42}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-32}"
 OUTPUT_DIR="${OUTPUT_DIR:-}"
@@ -26,7 +26,9 @@ args=(--machine "$MACHINE" --model "$MODEL" --datasets "${dataset_args[@]}"
       --bs "$BATCH_SIZE" --max-input-tokens "$MAX_INPUT_TOKENS"
       --max-new-tokens "$MAX_NEW_TOKENS" --max-context-tokens "$MAX_CONTEXT_TOKENS")
 if [[ -n "$MAX_CONTEXTS" ]]; then args+=(--max-contexts "$MAX_CONTEXTS"); fi
-if [[ -n "$QA_PER_CONTEXT" ]]; then args+=(--qa-per-context "$QA_PER_CONTEXT"); fi
+if [[ -n "$MAX_QA_SAMPLE_PER_CONTEXT" ]]; then
+  args+=(--max-qa-sample-per-context "$MAX_QA_SAMPLE_PER_CONTEXT")
+fi
 args+=(--context-shuffle-seed "$CONTEXT_SHUFFLE_SEED")
 if [[ -n "$OUTPUT_DIR" ]]; then args+=(--output-dir "$OUTPUT_DIR"); fi
 exec python -m scripts.evaluation.test_icl_suite "${args[@]}" "$@"

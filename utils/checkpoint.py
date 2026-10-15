@@ -119,6 +119,29 @@ class CheckpointManager:
         finally:
             temporary.unlink(missing_ok=True)
 
+    def update_best(self, checkpoint, score):
+        score = float(score)
+        if not math.isfinite(score) or (
+            self.best_f1 is not None and score <= self.best_f1
+        ):
+            return False
+        state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        state.update(
+            validation_f1=score,
+            best_f1=score,
+            best_step=int(state["step"]),
+        )
+        target = self.output_dir / "best.pt"
+        temporary = target.with_suffix(".pt.tmp")
+        try:
+            torch.save(state, temporary)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        self.best_f1 = score
+        self.best_step = int(state["step"])
+        return True
+
     def load(self, path, model, optimizer=None, scheduler=None, allow_missing_trainable=False, restore_rng=True):
         """Restore the trainable subset of ``model`` from ``path``.
 
@@ -169,6 +192,12 @@ class CheckpointManager:
             _restore_rng_state(state["rng"])
         self.best_f1 = state.get("best_f1")
         self.best_step = state.get("best_step")
+        best_path = self.output_dir / "best.pt"
+        if best_path.is_file():
+            best_state = torch.load(best_path, map_location="cpu", weights_only=False)
+            if best_state.get("best_f1") is not None:
+                self.best_f1 = best_state["best_f1"]
+                self.best_step = best_state.get("best_step")
         self.loaded = {
             "step": int(state.get("step", 0)),
             "world_size": int(state.get("world_size", 1) or 1),

@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import math
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import partial
 
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.checkpoint import checkpoint
 
 from .dtypes import no_autocast
 from .resampler import ContextMemoryResampler, LearnedPrefix, QuestionResampler
@@ -224,7 +221,7 @@ class ContextMemoryModel(nn.Module):
         memory_resampler_hidden_size=256, memory_resampler_ffn_ratio=2,
         memory_resampler_output_mode="layer0",
         reader_memory_source="memory_hidden", context_gradient_checkpointing=False,
-        context_gradient_checkpointing_every_n_layers=None,
+        gradient_checkpoint_every_n_layers=1,
     ):
         super().__init__()
         self.rank, self.alpha = rank, alpha
@@ -256,16 +253,11 @@ class ContextMemoryModel(nn.Module):
         if not 0 < memory_length <= self.window_limit:
             raise ValueError("memory_length must be within the backbone window")
         self.context_gradient_checkpointing = bool(context_gradient_checkpointing)
-        if context_gradient_checkpointing_every_n_layers is not None and (
-            type(context_gradient_checkpointing_every_n_layers) is not int
-            or context_gradient_checkpointing_every_n_layers <= 0
-        ):
+        if type(gradient_checkpoint_every_n_layers) is not int or gradient_checkpoint_every_n_layers <= 0:
             raise ValueError(
-                "context_gradient_checkpointing_every_n_layers must be a positive integer"
+                "gradient_checkpoint_every_n_layers must be a positive integer"
             )
-        self.context_gradient_checkpointing_every_n_layers = (
-            context_gradient_checkpointing_every_n_layers
-        )
+        self.gradient_checkpoint_every_n_layers = gradient_checkpoint_every_n_layers
         self.context_layer_indices = tuple(context_layer_indices)
         depth = int(self.qwen.config.num_hidden_layers)
         if not self.context_layer_indices or any(
@@ -459,10 +451,6 @@ class ContextMemoryModel(nn.Module):
         if layers is None:
             raise RuntimeError("Qwen transformer body does not expose decoder layers")
         depth = len(layers)
-        checkpoint_every = self.context_gradient_checkpointing_every_n_layers
-        if checkpoint_every is None:
-            checkpoint_every = math.ceil(math.sqrt(depth))
-        self.context_gradient_checkpointing_interval = checkpoint_every
         resolved = [index if index >= 0 else depth + index for index in self.context_layer_indices]
         if any(index < 0 or index >= depth for index in resolved):
             raise ValueError(
@@ -471,18 +459,9 @@ class ContextMemoryModel(nn.Module):
             )
         captured: dict[int, torch.Tensor] = {}
         hooks = []
-        checkpoint_flags = []
-        if self.context_gradient_checkpointing and self.training and torch.is_grad_enabled():
-            for index, layer in enumerate(layers):
-                checkpoint_flags.append((
-                    layer, layer.gradient_checkpointing,
-                    getattr(layer, "_gradient_checkpointing_func", None),
-                ))
-                layer.gradient_checkpointing = index % checkpoint_every == 0
-                if layer.gradient_checkpointing:
-                    layer._gradient_checkpointing_func = partial(
-                        checkpoint, use_reentrant=False,
-                    )
+        checkpointing = (
+            self.context_gradient_checkpointing and self.training and torch.is_grad_enabled()
+        )
         for index in sorted(set(resolved)):
             if index == depth - 1:
                 continue
@@ -491,6 +470,14 @@ class ContextMemoryModel(nn.Module):
                 captured[layer_index] = value
             hooks.append(layers[index].register_forward_hook(capture))
         try:
+            if checkpointing:
+                body.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={
+                        "use_reentrant": False,
+                        "preserve_rng_state": True,
+                    },
+                    every_n_layers=self.gradient_checkpoint_every_n_layers,
+                )
             out = body(
                 inputs_embeds=context_embeds,
                 attention_mask=None if bool(context_mask.all()) else context_mask,
@@ -500,14 +487,12 @@ class ContextMemoryModel(nn.Module):
                 return_dict=True,
             )
         finally:
+            if checkpointing:
+                body.gradient_checkpointing_disable()
+                # Manual LoRA is not detected by Transformers' PEFT hook cleanup.
+                body.disable_input_require_grads()
             for hook in hooks:
                 hook.remove()
-            for layer, enabled, function in checkpoint_flags:
-                layer.gradient_checkpointing = enabled
-                if function is None:
-                    layer.__dict__.pop("_gradient_checkpointing_func", None)
-                else:
-                    layer._gradient_checkpointing_func = function
         captured[depth - 1] = out.last_hidden_state
         selected = []
         for index in resolved:
@@ -1133,9 +1118,7 @@ def load_model(cfg):
         max_context_tokens=cfg.data.max_context_tokens,
         trainable_dtype=dtype_from_name(cfg.model.trainable_dtype),
         context_gradient_checkpointing=cfg.model.context_gradient_checkpointing,
-        context_gradient_checkpointing_every_n_layers=(
-            cfg.model.context_gradient_checkpointing_every_n_layers
-        ),
+        gradient_checkpoint_every_n_layers=cfg.training.gradient_checkpoint_every_n_layers,
         distillation=cfg.loss.distill_weight > 0,
         readout_length=cfg.memory.readout_length,
         readout_mode=cfg.memory.readout_mode,

@@ -26,10 +26,8 @@ import os
 import socket
 from collections.abc import Mapping
 
-# ``DATA_ROOT`` is the tree that holds the 1QA splits (``<DATA_ROOT>/1qa/1qa-*.jsonl``),
-# which is what ``scripts/data/build_*.py`` writes: the repository's own ``contexts/``
-# directory. The older aggregated/SHINE conversation corpus lives elsewhere and is selected
-# separately by ``CONVERSATION_ROOT`` (see configs/README.md).
+# ``DATA_ROOT`` holds the 1QA corpus written by ``scripts/data/build_*.py``. The separate
+# aggregated/SHINE conversation corpus is selected with ``CONVERSATION_ROOT``.
 MACHINES: dict[str, dict[str, str]] = {
     # 4x RTX 4090: local data tree and local model weights.
     "4090": {

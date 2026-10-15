@@ -1,6 +1,6 @@
 """The 1QA builder: source conventions, and the layout the readers expect.
 
-The corpus has three artifacts and a small set of conventions (``contexts/README.md``):
+The corpus has three artifact groups with one row per context and its QA pairs:
 one line per context with all of its QA pairs, no filtering beyond dropping structurally empty
 samples, MS MARCO contexts built from the selected passages only, and the per-dataset
 evaluation files under the directory names ``src/eval_data.py`` owns.

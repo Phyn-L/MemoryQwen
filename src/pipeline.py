@@ -145,7 +145,7 @@ class Collate:
             max_answer_tokens=cfg.data.max_answer_tokens,
             append_eos=cfg.data.append_eos,
             chat_template_enable_thinking=cfg.data.chat_template_enable_thinking,
-            qa_per_context=cfg.data.qa_per_context,
+            max_qa_sample_per_context=cfg.data.max_qa_sample_per_context,
             sample_qa=self.sample_qa,
             question_padding_side=cfg.data.question_padding_side,
             training=self.training,
@@ -219,42 +219,55 @@ class _EvaluationSelection:
     context_counts: tuple[tuple[str, int], ...]
 
 
-def select_evaluation_samples(dataset, budget: int, seed: int) -> _EvaluationSelection:
-    """Sample at most ``budget`` QA turns per dataset with stable, independent RNG streams."""
+def select_evaluation_samples(
+    dataset, max_contexts_per_dataset: int, max_qa_sample_per_context: int, seed: int,
+) -> _EvaluationSelection:
+    """Sample contexts per dataset, then cap selected QA turns within each context."""
     candidates = {}
     for context, record in enumerate(dataset):
+        by_dataset = {}
         for index, turn in enumerate(record.turns()):
             name = str(getattr(turn, "dataset", "") or getattr(record, "dataset", ""))
-            candidates.setdefault(name, []).append((context, index))
+            by_dataset.setdefault(name, []).append(index)
+        for name, indices in by_dataset.items():
+            candidates.setdefault(name, []).append((context, tuple(indices)))
 
-    chosen = []
+    chosen_by_context = {}
+    context_datasets = {}
     for name in sorted(candidates):
-        rows = candidates[name]
-        rng = random.Random(f"{int(seed)}:{name}")
-        chosen.extend(rng.sample(rows, min(int(budget), len(rows))))
-    chosen.sort()
+        contexts = candidates[name]
+        rng = random.Random(f"{int(seed)}:{name}:contexts")
+        sampled = rng.sample(
+            contexts, min(int(max_contexts_per_dataset), len(contexts)),
+        )
+        for context, turn_indices in sampled:
+            turn_rng = random.Random(f"{int(seed)}:{name}:{context}:turns")
+            chosen_turns = turn_rng.sample(
+                turn_indices,
+                min(int(max_qa_sample_per_context), len(turn_indices)),
+            )
+            chosen_by_context.setdefault(context, []).extend(chosen_turns)
+            context_datasets.setdefault(context, set()).add(name)
 
-    by_context = []
-    for context, turn_index in chosen:
-        if not by_context or by_context[-1][0] != context:
-            by_context.append((context, [turn_index]))
-        else:
-            by_context[-1][1].append(turn_index)
+    by_context = [
+        (context, tuple(sorted(set(turn_indices))))
+        for context, turn_indices in sorted(chosen_by_context.items())
+    ]
     qa_counts = {}
     context_counts = {}
     for context, turn_indices in by_context:
         record = dataset[context]
         turns = record.turns()
         record_name = str(getattr(record, "dataset", ""))
-        context_name = str(getattr(turns[turn_indices[-1]], "dataset", "") or record_name)
-        context_counts[context_name] = context_counts.get(context_name, 0) + 1
+        for context_name in context_datasets[context]:
+            context_counts[context_name] = context_counts.get(context_name, 0) + 1
         for turn_index in turn_indices:
             turn = turns[turn_index]
             name = str(getattr(turn, "dataset", "") or record_name)
             qa_counts[name] = qa_counts.get(name, 0) + 1
     return _EvaluationSelection(
-        contexts=tuple((context, tuple(indices)) for context, indices in by_context),
-        qa_rows=len(chosen),
+        contexts=tuple(by_context),
+        qa_rows=sum(qa_counts.values()),
         qa_counts=tuple(sorted(qa_counts.items())),
         context_counts=tuple(sorted(context_counts.items())),
     )
@@ -266,11 +279,12 @@ def format_evaluation_sample_counts(selection, *, seed: int, recon_enabled: bool
     lines = [f"[eval] sampled counts (global, seed={seed}):"]
     for name in sorted(qa_counts.keys() | context_counts.keys()):
         lines.append(
-            f"[eval] dataset={name or 'unknown'} QA={qa_counts.get(name, 0)} "
+            f"[eval] dataset={name or 'unknown'} contexts={context_counts.get(name, 0)} "
+            f"QA={qa_counts.get(name, 0)} "
             f"Recon_contexts={context_counts.get(name, 0) if recon_enabled else 0}"
         )
     lines.append(
-        f"[eval] total QA={selection.qa_rows} "
+        f"[eval] total contexts={len(selection.contexts)} QA={selection.qa_rows} "
         f"Recon_contexts={len(selection.contexts) if recon_enabled else 0}"
     )
     if not recon_enabled:
@@ -278,45 +292,64 @@ def format_evaluation_sample_counts(selection, *, seed: int, recon_enabled: bool
     return "\n".join(lines)
 
 
+def _balanced_context_shards(dataset, selection, world: int, max_new_tokens: int):
+    """Assign whole contexts to the least-loaded rank using a deterministic cost estimate."""
+    shards = [[] for _ in range(max(1, int(world)))]
+    loads = [0] * len(shards)
+    entries = []
+    for context, turn_indices in selection.contexts:
+        text_length = max(1, len(str(dataset[context].context)))
+        # Context encoding is quadratic in input length; answer decoding scales with
+        # selected QA rows and the generation budget. Character length is a cheap,
+        # tokenizer-independent proxy available on every dataset record.
+        cost = text_length * text_length + (
+            len(turn_indices) * max(1, int(max_new_tokens)) * 256
+        )
+        entries.append((cost, context, turn_indices))
+    for cost, context, turn_indices in sorted(entries, key=lambda item: (-item[0], item[1])):
+        rank = min(range(len(shards)), key=lambda index: (loads[index], index))
+        shards[rank].append((context, turn_indices))
+        loads[rank] += cost
+    for shard in shards:
+        shard.sort(key=lambda item: item[0])
+    return shards
+
+
 def evaluation_window_loader(
     dataset, collate, *, budget, unit, rank, world, batch_size,
-    seed=0, selection=None, num_workers=0, pin_memory=False, persistent_workers=False,
+    seed=0, selection=None, max_qa_sample_per_context=8, max_new_tokens=64,
+    num_workers=0, pin_memory=False, persistent_workers=False,
 ):
     """Load the sampled QA rows or their unique contexts for one rank.
 
     Selection is deterministic and global; rank only partitions that fixed sample.
     ``selected_contexts`` reuses the QA sample for Recon.
     """
-    from .evaluator import row_window
-
     if unit == "rows":
-        selection = selection or select_evaluation_samples(dataset, budget, seed)
-        flat_rows = [
-            (context, turn_index)
-            for context, turn_indices in selection.contexts
-            for turn_index in turn_indices
-        ]
-        window = row_window(selection.qa_rows, rank, world)
-        local_rows = flat_rows[window[0]:window[1]]
-        grouped = []
-        for context, turn_index in local_rows:
-            if not grouped or grouped[-1][0] != context:
-                grouped.append((context, [turn_index]))
-            else:
-                grouped[-1][1].append(turn_index)
+        selection = selection or select_evaluation_samples(
+            dataset, budget, max_qa_sample_per_context, seed,
+        )
+        shards = _balanced_context_shards(
+            dataset, selection, world, max_new_tokens,
+        )
+        grouped = shards[min(max(0, int(rank)), len(shards) - 1)]
         selected = _EvaluationRows(
             dataset, tuple((context, tuple(indices)) for context, indices in grouped)
         )
-        base = window[0]
+        base = 0
         total = selection.qa_rows
+        local_rows = sum(len(indices) for _, indices in grouped)
     elif unit == "selected_contexts":
         if selection is None:
             raise ValueError("selected_contexts requires the QA evaluation selection")
-        window = row_window(len(selection.contexts), rank, world)
-        local_selection = selection.contexts[window[0]:window[1]]
+        shards = _balanced_context_shards(
+            dataset, selection, world, max_new_tokens,
+        )
+        local_selection = shards[min(max(0, int(rank)), len(shards) - 1)]
         selected = _EvaluationRows(dataset, local_selection)
-        base = window[0]
+        base = 0
         total = len(selection.contexts)
+        local_rows = len(local_selection)
     else:
         raise ValueError(f"unknown evaluation budget unit: {unit!r}")
     loader = DataLoader(
@@ -332,4 +365,6 @@ def evaluation_window_loader(
     loader.evaluation_selection = selection
     loader.evaluation_source_dataset = dataset
     loader.evaluation_collate = collate
+    loader.evaluation_prepartitioned = True
+    loader.evaluation_local_rows = local_rows
     return loader, base

@@ -222,7 +222,7 @@ def test_generation_prefills_the_same_positions_as_training():
 
 
 def test_the_first_generated_token_sits_where_training_supervised_it():
-    """The README's original invariant: same supervised position and inference position."""
+    """Training and generation use the same position for the first answer token."""
     if not _requirements_available():
         return
     model = _model()

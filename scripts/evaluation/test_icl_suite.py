@@ -59,10 +59,7 @@ def _default_paths(overrides=None):
     )
 
 
-# The data default is the same tree the training pipeline uses (data.root in
-# configs/*/train.yaml), and the only supported one: `src.icl_baseline.iter_examples` reads the
-# aggregated context schema and rejects anything else. See the README section "The SQuAD
-# evaluation set, in detail" for what that file actually contains.
+# The data default is the training pipeline's data.root; src.eval_data resolves split files.
 DEFAULT_MODEL, DEFAULT_DATA = _default_paths(_machine_overrides())
 
 
@@ -114,7 +111,7 @@ def parse_args(argv=None):
         help="Keep only the first N distinct contexts of the file, the unit the memory "
         "evaluator's data.validation_max_samples uses",
     )
-    parser.add_argument("--qa-per-context", type=int,
+    parser.add_argument("--max-qa-sample-per-context", type=int,
                         help="Keep at most this many QA rows from each sampled context.")
     parser.add_argument("--context-shuffle-seed", type=int, default=42)
     parser.add_argument(
@@ -405,7 +402,8 @@ def worker_main():
             max_context_tokens=args.max_context_tokens,
             tokenizer=tokenizer,
         )
-        records = sample_context_rows(records, args.max_contexts, args.qa_per_context,
+        records = sample_context_rows(
+            records, args.max_contexts, args.max_qa_sample_per_context,
                                       args.context_shuffle_seed)
         if not records:
             raise SystemExit(f"{dataset}: no examples left after the subset filters")
@@ -444,13 +442,13 @@ def suite_main(argv=None):
     parser.add_argument('--max-new-tokens', type=int, default=32)
     parser.add_argument('--max-samples', type=int)
     parser.add_argument('--max-contexts', type=int)
-    parser.add_argument('--qa-per-context', type=int)
+    parser.add_argument('--max-qa-sample-per-context', type=int)
     parser.add_argument('--context-shuffle-seed', type=int, default=42)
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
     for key in (
         'bs', 'max_input_tokens', 'max_new_tokens', 'max_context_tokens',
-        'max_samples', 'max_contexts', 'qa_per_context',
+        'max_samples', 'max_contexts', 'max_qa_sample_per_context',
     ):
         value = getattr(args, key)
         if value is not None and value < 1:
@@ -474,8 +472,11 @@ def suite_main(argv=None):
                    '--max-context-tokens', str(args.max_context_tokens)]
         if args.max_contexts is not None:
             command += ['--max-contexts', str(args.max_contexts)]
-        if args.qa_per_context is not None:
-            command += ['--qa-per-context', str(args.qa_per_context)]
+        if args.max_qa_sample_per_context is not None:
+            command += [
+                '--max-qa-sample-per-context',
+                str(args.max_qa_sample_per_context),
+            ]
         command += ['--context-shuffle-seed', str(args.context_shuffle_seed)]
         if machine:
             command += ['--machine', machine]

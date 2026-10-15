@@ -4,13 +4,49 @@ import math
 
 import torch
 import torch.distributed as dist
-from tqdm.auto import tqdm
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+    TimeRemainingColumn,
+)
 
 from utils.ddp import is_main_process
+from utils.progress import StepSpeedColumn
 
 from .icl_baseline import parse_race_prediction
 from .metrics import METRIC_KEYS, answer_line, best_reference_metrics, normalize_answer
 from .model import TASK_QA, TASK_RECON
+
+
+def _make_eval_progress(total, description, rank, enabled, metric_name):
+    progress = Progress(
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        StepSpeedColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        TextColumn(f"[green]{{task.fields[{metric_name}]}}"),
+        console=Console(stderr=True),
+        disable=not enabled,
+        transient=False,
+        refresh_per_second=5,
+    )
+    task = progress.add_task(
+        description,
+        total=total,
+        position=rank,
+        speed_start_completed=0,
+        **{metric_name: f"{metric_name} 0"},
+    )
+    progress.start()
+    return progress, task
 
 
 def _distributed_sum(values, device):
@@ -27,7 +63,9 @@ def _distributed_sum(values, device):
     """
     if not (dist.is_available() and dist.is_initialized()):
         return [float(value) for value in values]
-    tensor = torch.tensor([float(value) for value in values], dtype=torch.float64, device=device)
+    tensor = torch.tensor(
+        [float(value) for value in values], dtype=torch.float64, device=device
+    )
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
     return tensor.tolist()
 
@@ -55,7 +93,7 @@ def row_window(total: int, rank: int, world_size: int) -> tuple[int, int]:
     """
     if total <= 0 or world_size <= 1:
         return 0, max(0, total)
-    per_rank = -(-int(total) // int(world_size))          # ceil
+    per_rank = -(-int(total) // int(world_size))  # ceil
     start = min(int(total), int(rank) * per_rank)
     return start, min(int(total), start + per_rank)
 
@@ -124,16 +162,24 @@ class Evaluator:
         return False
 
     @torch.no_grad()
-    def autoregressive(self, model, loader, device, max_qa=None, task_id=TASK_QA,
-                       row_loader=None, row_base=0, pre_windowed=False):
+    def autoregressive(
+        self,
+        model,
+        loader,
+        device,
+        max_contexts_per_dataset=None,
+        max_qa_sample_per_context=8,
+        task_id=TASK_QA,
+        row_loader=None,
+        row_base=0,
+        pre_windowed=False,
+    ):
         """Headline evaluation: every answer token is produced by the model itself.
 
         Metrics are computed from generated answers and gold references.
 
-        ``max_qa`` caps QA turns per dataset. The selected sequence is split across
-        ranks by ``pipeline.evaluation_window_loader``; it has no combined sample cap.
-        ``row_base`` is this rank's start in that sequence. Original turns preserve
-        their history even when a rank boundary splits a multi-turn context.
+        ``max_contexts_per_dataset`` caps contexts; each contributes at most
+        ``max_qa_sample_per_context`` QA turns. Contexts are balanced across ranks.
         """
         was_training = model.training
         model.eval()
@@ -144,24 +190,45 @@ class Evaluator:
         race_count = 0
         samples = 0
         first_token_hit = 0
-        enabled = is_main_process()
         world, rank = _distributed_world_size(), _distributed_rank()
-        if max_qa is not None and not pre_windowed:
+        enabled = is_main_process() or world > 1
+        if max_contexts_per_dataset is not None and not pre_windowed:
             from .pipeline import evaluation_window_loader
 
             source = loader if row_loader is None else row_loader
             row_loader, row_base = evaluation_window_loader(
-                source.dataset, source.collate_fn, budget=max_qa, unit="rows",
-                rank=rank, world=world, batch_size=source.batch_size,
+                source.dataset,
+                source.collate_fn,
+                budget=max_contexts_per_dataset,
+                unit="rows",
+                max_qa_sample_per_context=max_qa_sample_per_context,
+                rank=rank,
+                world=world,
+                batch_size=source.batch_size,
             )
             pre_windowed = True
-        total = getattr(row_loader, "evaluation_total", None) if max_qa is not None else None
-        if max_qa is not None and total is None:
-            raise ValueError("Capped QA evaluation requires a per-dataset evaluation loader")
-        window, row_source = self._evaluation_window(
-            "evaluation.max_eval_sample_per_dataset", total, row_loader, loader, world, rank
+        total = (
+            getattr(row_loader, "evaluation_total", None)
+            if max_contexts_per_dataset is not None
+            else None
         )
-        cursor = int(row_base)
+        if max_contexts_per_dataset is not None and total is None:
+            raise ValueError(
+                "Capped QA evaluation requires a per-dataset evaluation loader"
+            )
+        if getattr(row_loader, "evaluation_prepartitioned", False):
+            window, row_source = (0, None), row_loader
+            cursor = 0
+        else:
+            window, row_source = self._evaluation_window(
+                "evaluation.max_eval_contexts_per_dataset",
+                total,
+                row_loader,
+                loader,
+                world,
+                rank,
+            )
+            cursor = int(row_base)
         task_name = "qa" if task_id == TASK_QA else "recon"
         desc = f"Validation (autoregressive, {task_name} task)"
         if world > 1:
@@ -172,12 +239,12 @@ class Evaluator:
             local_batch_count = _window_batch_count(
                 window, getattr(row_source, "batch_size", None)
             )
-        progress = tqdm(
-            total=local_batch_count,
-            desc=desc,
-            unit="batch",
-            disable=not enabled,
-            leave=True,
+        progress, progress_task = _make_eval_progress(
+            local_batch_count,
+            desc,
+            rank,
+            enabled,
+            "qa_rows",
         )
         for batch in row_source:
             rows = batch["qa_input_ids"].size(0)
@@ -237,28 +304,37 @@ class Evaluator:
                 first_token_hit += int(
                     bool(row) and self._first_token_hit(row[0], record)
                 )
-                prediction = answer_line(self.tokenizer.decode(row, skip_special_tokens=True))
+                prediction = answer_line(
+                    self.tokenizer.decode(row, skip_special_tokens=True)
+                )
                 metrics = best_reference_metrics(prediction, record.references)
                 for key, value in metrics.items():
                     sums[key] += value
-                    dataset_sums.setdefault(record.dataset, dict.fromkeys(METRIC_KEYS, 0.0))[key] += value
-                dataset_counts[record.dataset] = dataset_counts.get(record.dataset, 0) + 1
+                    dataset_sums.setdefault(
+                        record.dataset, dict.fromkeys(METRIC_KEYS, 0.0)
+                    )[key] += value
+                dataset_counts[record.dataset] = (
+                    dataset_counts.get(record.dataset, 0) + 1
+                )
                 if record.dataset == "race":
                     _, predicted_letter = parse_race_prediction(prediction)
                     race_correct += int(predicted_letter == record.answer_letter)
                     race_count += 1
                 samples += 1
-            progress.update(1)
-            progress.set_postfix({"qa_rows": samples}, refresh=False)
+            progress.update(progress_task, advance=1, qa_rows=f"QA rows {samples:,}")
             if window[1] is not None and cursor >= window[1]:
                 break
-        progress.close()
+        progress.stop()
         model.train(was_training)
-        (first_token_hit, race_correct, race_count, samples) = _distributed_sum(
+        first_token_hit, race_correct, race_count, samples = _distributed_sum(
             [first_token_hit, race_correct, race_count, samples], device
         )
         sums = dict(
-            zip(METRIC_KEYS, _distributed_sum([sums[key] for key in METRIC_KEYS], device), strict=True)
+            zip(
+                METRIC_KEYS,
+                _distributed_sum([sums[key] for key in METRIC_KEYS], device),
+                strict=True,
+            )
         )
         result = {key: value / max(1, samples) for key, value in sums.items()}
         dataset_names = sorted(dataset_sums)
@@ -296,11 +372,14 @@ class Evaluator:
                 flush=True,
             )
             return (0, total), loader
-        return row_window(total, rank, world), (loader if row_loader is None else row_loader)
+        return row_window(total, rank, world), (
+            loader if row_loader is None else row_loader
+        )
 
     @torch.no_grad()
-    def recon_teacher_forced(self, model, loader, device, row_loader=None,
-                             context_base=0, pre_windowed=False):
+    def recon_teacher_forced(
+        self, model, loader, device, row_loader=None, context_base=0, pre_windowed=False
+    ):
         """Reconstruction score of the memory without decoding anything.
 
         Every validation context is reproduced behind ``[memory, recon_task_embedding]`` and
@@ -315,24 +394,28 @@ class Evaluator:
         """
         was_training = model.training
         model.eval()
-        enabled = is_main_process()
         world, rank = _distributed_world_size(), _distributed_rank()
+        enabled = is_main_process() or world > 1
         window = (0, None)
         row_source = loader if row_loader is None else row_loader
-        max_logits_rows = getattr(getattr(self.cfg, "loss", None), "max_logits_rows", 256)
+        max_logits_rows = getattr(
+            getattr(self.cfg, "loss", None), "max_logits_rows", 256
+        )
         sums: dict[str, list[float]] = {}
         cursor = int(context_base)
-        progress = tqdm(
-            total=(
+        progress, progress_task = _make_eval_progress(
+            (
                 len(row_source)
                 if pre_windowed or window[1] is None
-                else _window_batch_count(window, getattr(row_source, "batch_size", None))
+                else _window_batch_count(
+                    window, getattr(row_source, "batch_size", None)
+                )
             ),
-            desc="Validation (teacher-forced reconstruction)"
+            "Validation (teacher-forced reconstruction)"
             + (f" [rank {rank}/{world}]" if world > 1 else ""),
-            unit="batch",
-            disable=not enabled,
-            leave=True,
+            rank,
+            enabled,
+            "contexts",
         )
         for batch in row_source:
             context_rows = batch["context_ids"].size(0)
@@ -345,11 +428,17 @@ class Evaluator:
                     break
                 continue
             records = batch["records"]
-            ids = {key: value.to(device) for key, value in batch.items() if key != "records"}
+            ids = {
+                key: value.to(device)
+                for key, value in batch.items()
+                if key != "records"
+            }
             context_ids, context_mask = ids["context_ids"], ids["context_mask"]
             # A context row is reported under the dataset of the QA turns that point at it.
             datasets = [""] * context_rows
-            for turn, context_index in zip(records, ids["qa_context_indices"].tolist(), strict=True):
+            for turn, context_index in zip(
+                records, ids["qa_context_indices"].tolist(), strict=True
+            ):
                 datasets[context_index] = turn.dataset
             embedding = model.qwen.get_input_embeddings()
             prefix = model.encode_context_prefix(embedding(context_ids), context_mask)
@@ -361,19 +450,26 @@ class Evaluator:
                 max_logits_rows=max_logits_rows,
             )
             nll, correct, tokens = (
-                stats["nll"].tolist(), stats["correct"].tolist(), stats["tokens"].tolist(),
+                stats["nll"].tolist(),
+                stats["correct"].tolist(),
+                stats["tokens"].tolist(),
             )
             for row in range(start_row - batch_start, end_row - batch_start):
-                bucket = sums.setdefault(datasets[row] or "unknown", [0.0, 0.0, 0.0, 0.0])
+                bucket = sums.setdefault(
+                    datasets[row] or "unknown", [0.0, 0.0, 0.0, 0.0]
+                )
                 bucket[0] += nll[row]
                 bucket[1] += correct[row]
                 bucket[2] += tokens[row]
                 bucket[3] += 1.0
-            progress.update(1)
-            progress.set_postfix({"contexts": int(sum(v[3] for v in sums.values()))}, refresh=False)
+            progress.update(
+                progress_task,
+                advance=1,
+                contexts=f"Contexts {int(sum(v[3] for v in sums.values())):,}",
+            )
             if window[1] is not None and cursor >= window[1]:
                 break
-        progress.close()
+        progress.stop()
         model.train(was_training)
         dataset_names = sorted(sums)
         if dist.is_available() and dist.is_initialized():
@@ -390,7 +486,7 @@ class Evaluator:
         reduced = _distributed_sum(flat, device)
         result: dict[str, float] = {}
         for index, name in enumerate(dataset_names):
-            nll, correct, tokens, _ = reduced[4 * index:4 * index + 4]
+            nll, correct, tokens, _ = reduced[4 * index : 4 * index + 4]
             result[f"dataset/{name}/recon_ce"] = nll / max(tokens, 1.0)
             result[f"dataset/{name}/recon_token_accuracy"] = correct / max(tokens, 1.0)
             result[f"dataset/{name}/contexts"] = reduced[4 * index + 3]
@@ -403,23 +499,45 @@ class Evaluator:
 
     @torch.no_grad()
     def compare_reader_tasks(
-        self, model, loader, device, max_qa=None, row_loader=None,
-        include_recon=True, recon_loader=None, row_base=0, recon_row_loader=None,
-        recon_base=0, pre_windowed=False,
+        self,
+        model,
+        loader,
+        device,
+        max_contexts_per_dataset=None,
+        max_qa_sample_per_context=8,
+        row_loader=None,
+        include_recon=True,
+        recon_loader=None,
+        row_base=0,
+        recon_row_loader=None,
+        recon_base=0,
+        pre_windowed=False,
     ):
         """Evaluate a shared deterministic QA sample with QA and Recon readers."""
-        if max_qa is not None and row_loader is None:
+        if max_contexts_per_dataset is not None and row_loader is None:
             from .pipeline import evaluation_window_loader
 
             seed = getattr(getattr(self.cfg, "training", None), "seed", 0)
             world, rank = _distributed_world_size(), _distributed_rank()
             row_loader, row_base = evaluation_window_loader(
-                loader.dataset, loader.collate_fn, budget=max_qa, unit="rows",
-                seed=seed, rank=rank, world=world, batch_size=loader.batch_size,
+                loader.dataset,
+                loader.collate_fn,
+                budget=max_contexts_per_dataset,
+                unit="rows",
+                max_qa_sample_per_context=max_qa_sample_per_context,
+                seed=seed,
+                rank=rank,
+                world=world,
+                batch_size=loader.batch_size,
+                max_new_tokens=getattr(
+                    getattr(self.cfg, "evaluation", None),
+                    "max_new_tokens",
+                    64,
+                ),
             )
             pre_windowed = True
         if (
-            max_qa is not None
+            max_contexts_per_dataset is not None
             and row_loader is not None
             and recon_row_loader is None
             and hasattr(row_loader, "evaluation_selection")
@@ -427,22 +545,38 @@ class Evaluator:
             from .pipeline import evaluation_window_loader
 
             recon_row_loader, recon_base = evaluation_window_loader(
-                row_loader.evaluation_source_dataset, row_loader.evaluation_collate,
-                budget=max_qa,
-                unit="selected_contexts", selection=row_loader.evaluation_selection,
-                rank=_distributed_rank(), world=_distributed_world_size(),
+                row_loader.evaluation_source_dataset,
+                row_loader.evaluation_collate,
+                budget=max_contexts_per_dataset,
+                unit="selected_contexts",
+                selection=row_loader.evaluation_selection,
+                rank=_distributed_rank(),
+                world=_distributed_world_size(),
                 batch_size=row_loader.batch_size,
+                max_new_tokens=getattr(
+                    getattr(self.cfg, "evaluation", None),
+                    "max_new_tokens",
+                    64,
+                ),
+                max_qa_sample_per_context=max_qa_sample_per_context,
             )
         metrics = {
             "qa_task": self.autoregressive(
-                model, loader, device, max_qa=max_qa, task_id=TASK_QA,
-                row_loader=row_loader, row_base=row_base, pre_windowed=pre_windowed,
+                model,
+                loader,
+                device,
+                max_contexts_per_dataset=max_contexts_per_dataset,
+                max_qa_sample_per_context=max_qa_sample_per_context,
+                task_id=TASK_QA,
+                row_loader=row_loader,
+                row_base=row_base,
+                pre_windowed=pre_windowed,
             )
         }
         if not include_recon:
             return metrics
         settings = getattr(self.cfg, "evaluation", None)
-        teacher_forced = getattr(settings, "recon_metrics", True)
+        teacher_forced = getattr(settings, "recon_teacherforce", True)
         autoregressive = getattr(settings, "recon_autoregressive", False)
         if teacher_forced:
             metrics["recon_task"] = self.recon_teacher_forced(
@@ -455,7 +589,14 @@ class Evaluator:
             )
         if autoregressive:
             metrics["recon_autoregressive"] = self.autoregressive(
-                model, loader, device, max_qa=max_qa, task_id=TASK_RECON,
-                row_loader=row_loader, row_base=row_base, pre_windowed=pre_windowed,
+                model,
+                loader,
+                device,
+                max_contexts_per_dataset=max_contexts_per_dataset,
+                max_qa_sample_per_context=max_qa_sample_per_context,
+                task_id=TASK_RECON,
+                row_loader=row_loader,
+                row_base=row_base,
+                pre_windowed=pre_windowed,
             )
         return metrics

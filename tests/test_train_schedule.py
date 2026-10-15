@@ -77,8 +77,14 @@ def test_the_loop_takes_its_cadences_from_the_config():
 
 def test_the_loop_echoes_the_resolved_schedule():
     source = _train_source()
-    assert '"schedule: "' in source
-    for field in ("steps=", "ranks=", "warmup=", "log_every="):
+    assert 'title="Training Schedule"' in source
+    for field in (
+        '"Machine"',
+        '"Effective Batch"',
+        '"Warmup"',
+        '"Eval Every"',
+        '"Log Every"',
+    ):
         assert field in source, field
 
 
@@ -189,6 +195,6 @@ def test_the_progress_line_carries_loss_qa_recon_and_ppl_at_once():
 
 def test_the_loop_does_not_overwrite_the_postfix_with_loss_only():
     source = _train_source()
-    assert "progress.set_postfix(step_postfix(group_terms, group_micro_batches))" in source
-    assert "set_postfix(loss=" not in source, "a loss-only call wipes the other fields"
-    assert "set_postfix(**" not in source, "keyword arguments would be sorted alphabetically"
+    assert "postfix = step_postfix(group_terms, group_micro_batches)" in source
+    assert 'status=" · ".join(' in source
+    assert "set_postfix(loss=" not in source

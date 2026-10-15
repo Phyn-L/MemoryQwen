@@ -14,7 +14,7 @@ This entry point writes only the **raw, unfiltered** corpus under ``--root`` (de
 The filtered products a run actually trains on (``cache/train.jsonl``,
 ``cache/validation.jsonl``) are built from these files by ``scripts/data/build_cache.py``.
 
-Conventions (see ``contexts/README.md``):
+Conventions:
 
 * each line is ONE context with every QA pair that belongs to it; a context never borrows text
   from another row, and questions that share a context are aggregated into that one line;

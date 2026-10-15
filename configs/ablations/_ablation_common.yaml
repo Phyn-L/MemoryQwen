@@ -10,7 +10,7 @@ data:
     validation_datasets: [squad]
 evaluation:
   autoregressive_every: 400
-  max_eval_sample_per_dataset: 1024
+  max_eval_contexts_per_dataset: 1024
   max_new_tokens: 32  # 生成 token 上限
   qa_batch_size: 4
 memory:

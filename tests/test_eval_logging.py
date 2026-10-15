@@ -5,6 +5,7 @@ teacher-forced reconstruction pass (``recon_*`` metrics). The payload builder is
 generic -- it logs the scalars an evaluation returned, so a new metric only has to be returned
 by the evaluator, not also registered here.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -13,7 +14,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-spec = importlib.util.spec_from_file_location("_train_script", REPO / "scripts/train.py")
+spec = importlib.util.spec_from_file_location(
+    "_train_script", REPO / "scripts/train.py"
+)
 train = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(train)
 
@@ -22,14 +25,16 @@ ANSWER_METRIC_KEYS = ("em", "f1", "rouge_l", "first_token_em", "accuracy")
 
 def test_generated_answer_metrics_and_dataset_metrics_are_logged():
     metrics = {key: 0.7 for key in ANSWER_METRIC_KEYS}
-    metrics.update({
-        "dataset/squad/em": 0.8,
-        "dataset/squad/f1": 0.7,
-        "dataset/squad/rouge_l": 0.6,
-        "dataset/squad/count": 256,
-        "dataset/hotpotqa(distractor)/f1": 0.5,
-    })
-    payload, = train.eval_log_payloads({"qa_task": metrics, "recon_task": metrics})
+    metrics.update(
+        {
+            "dataset/squad/em": 0.8,
+            "dataset/squad/f1": 0.7,
+            "dataset/squad/rouge_l": 0.6,
+            "dataset/squad/count": 256,
+            "dataset/hotpotqa(distractor)/f1": 0.5,
+        }
+    )
+    (payload,) = train.eval_log_payloads({"qa_task": metrics, "recon_task": metrics})
     for task_name in ("qa_task", "recon_task"):
         prefix = f"val_autoregressive_{task_name}/"
         assert payload[prefix + "squad_EM"] == 0.8
@@ -53,7 +58,7 @@ def test_teacher_forced_reconstruction_metrics_are_logged():
         "dataset/squad/contexts": 256,
         "dataset/hotpotqa(distractor)/recon_ce": 1.4,
     }
-    payload, = train.eval_log_payloads({"recon_task": metrics})
+    (payload,) = train.eval_log_payloads({"recon_task": metrics})
     prefix = "val_autoregressive_recon_task/"
     assert payload[prefix + "recon_ce"] == 1.25
     assert payload[prefix + "recon_ppl"] == 3.49
@@ -98,10 +103,21 @@ def test_eval_metrics_table_groups_datasets_and_metrics():
             }
         }
     )
-    assert all(label in table for label in ("dataset", "EM", "F1", "ROUGE-L", "first_token_em", "accuracy", "count"))
-    assert "| foo/bar " in table
-    assert "| squad " in table
-    assert "| overall " in table
+    assert all(
+        label in table
+        for label in (
+            "dataset",
+            "EM",
+            "F1",
+            "ROUGE-L",
+            "first_token_em",
+            "accuracy",
+            "count",
+        )
+    )
+    assert "foo/bar" in table
+    assert "squad" in table
+    assert "overall" in table
     assert "0.9000" in table
     assert "0.8000" in table
 
@@ -121,9 +137,11 @@ def test_eval_metrics_table_renders_the_reconstruction_pass():
         }
     )
     assert "teacher-forced" in table
-    assert all(label in table for label in ("recon_ce", "recon_ppl", "token_acc", "contexts"))
-    assert "| squad " in table
-    assert "| overall " in table
+    assert all(
+        label in table for label in ("recon_ce", "recon_ppl", "token_acc", "contexts")
+    )
+    assert "squad" in table
+    assert "overall" in table
     assert "1.2500" in table
     assert "0.4200" in table
 
@@ -151,5 +169,5 @@ def test_the_evaluator_has_the_teacher_forced_reconstruction_path():
     from utils.config import EvaluationConfig
 
     clock = EvaluationConfig()
-    assert clock.recon_metrics is True
+    assert clock.recon_teacherforce is True
     assert clock.recon_autoregressive is False

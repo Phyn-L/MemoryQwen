@@ -102,38 +102,45 @@ def test_the_windowed_loader_fetches_only_the_window(tmp_path: Path):
     )
     assert evaluation_row_index(dataset) == [0, 1, 3, 6, 7]
 
-    # Both ranks partition the same seeded sample, even when a context's turns cross a rank
-    # boundary.
+    # Contexts remain whole while all ranks partition the same seeded QA sample.
     loader, base = evaluation_window_loader(
         dataset, lambda rows: rows, budget=4, unit="rows", seed=7,
-        rank=1, world=2, batch_size=8,
+        rank=0, world=2, batch_size=8,
     )
     selection = loader.evaluation_selection
-    expected_rows = [
-        (context, dataset[context].turns()[turn].question)
+    actual = []
+    for rank in range(2):
+        rows_loader, rows_base = evaluation_window_loader(
+            dataset, lambda rows: rows, budget=4, unit="rows", seed=7,
+            rank=rank, world=2, batch_size=8,
+        )
+        contexts_loader, contexts_base = evaluation_window_loader(
+            dataset, lambda rows: rows, budget=4, unit="selected_contexts",
+            selection=selection, rank=rank, world=2, batch_size=8,
+        )
+        assert rows_base == contexts_base == 0
+        row_records = [record for batch in rows_loader for record in batch]
+        recon_records = [record for batch in contexts_loader for record in batch]
+        row_contexts = {
+            int(record.context.rsplit(" ", 1)[-1]): tuple(record.turns())
+            for record in row_records
+        }
+        recon_contexts = {
+            int(record.context.rsplit(" ", 1)[-1]): tuple(record.turns())
+            for record in recon_records
+        }
+        assert row_contexts == recon_contexts
+        actual.extend(
+            (context, dataset[context].turns().index(turn))
+            for context, turns in row_contexts.items()
+            for turn in turns
+        )
+    expected = [
+        (context, turn)
         for context, turns in selection.contexts
         for turn in turns
     ]
-    start, stop = ((len(expected_rows) + 1) // 2, len(expected_rows))
-    actual_rows = [
-        (int(record.context.rsplit(" ", 1)[-1]), turn.question)
-        for batch in loader for record in batch
-        for turn in record.turns()
-    ]
-    assert base == start
-    assert actual_rows == expected_rows[start:stop]
-
-    # Recon receives each selected context once, including only the sampled turns.
-    contexts_loader, contexts_base = evaluation_window_loader(
-        dataset, lambda rows: rows, budget=4, unit="selected_contexts",
-        selection=selection, rank=1, world=2, batch_size=8,
-    )
-    assert contexts_base == (len(selection.contexts) + 1) // 2
-    recon_records = [record for batch in contexts_loader for record in batch]
-    assert len(recon_records) == len(selection.contexts) - contexts_base
-    assert [len(record.turns()) for record in recon_records] == [
-        len(turns) for _, turns in selection.contexts[contexts_base:]
-    ]
+    assert sorted(actual) == sorted(expected)
 
 
 def test_an_unknown_budget_unit_is_rejected():
@@ -157,19 +164,24 @@ def test_per_dataset_random_samples_are_seeded_and_independent_of_world_size():
         record.dataset = name
         records.append(record)
 
-    selection = select_evaluation_samples(records, budget=3, seed=42)
-    assert selection == select_evaluation_samples(records, budget=3, seed=42)
-    assert selection != select_evaluation_samples(records, budget=3, seed=43)
-    assert selection.qa_rows == 7  # 3 + 3 + 1; the cap is per dataset.
+    selection = select_evaluation_samples(records, 3, 2, seed=42)
+    assert selection == select_evaluation_samples(records, 3, 2, seed=42)
+    assert selection != select_evaluation_samples(records, 3, 2, seed=43)
+    assert selection.qa_rows <= len(selection.contexts) * 2
+    context_counts = dict(selection.context_counts)
+    qa_counts = dict(selection.qa_counts)
+    assert all(count <= 3 for count in context_counts.values())
+    assert all(qa_counts[name] <= 2 * count for name, count in context_counts.items())
 
     def selected(world):
         result = []
         for rank in range(world):
             loader, _ = evaluation_window_loader(
                 records, list, budget=3, unit="rows", seed=42,
+                max_qa_sample_per_context=2,
                 rank=rank, world=world, batch_size=2,
             )
-            assert loader.evaluation_total == 7
+            assert loader.evaluation_total == selection.qa_rows
             result.extend(
                 (record.context, turn)
                 for batch in loader for record in batch for turn in record.turns()
@@ -181,10 +193,10 @@ def test_per_dataset_random_samples_are_seeded_and_independent_of_world_size():
         for context, turns in selection.contexts for turn in turns
     ]
     for world in (1, 2, 4, 8):
-        assert selected(world) == expected
+        assert sorted(selected(world)) == sorted(expected)
 
 
-def test_sliced_conversation_turn_retains_its_history():
+def test_rank_sharding_keeps_conversation_turn_history():
     from src.data import ContextRecord, ConversationMessage
 
     record = ContextRecord(
@@ -197,12 +209,13 @@ def test_sliced_conversation_turn_retains_its_history():
     )
     loader, base = evaluation_window_loader(
         [record], list, budget=2, unit="rows", seed=1,
-        rank=1, world=2, batch_size=1,
+        rank=0, world=2, batch_size=1,
     )
-    assert base == 1
-    turn, = next(iter(loader))[0].turns()
-    assert turn == record.turns()[1]
-    assert any(message.content == "first answer" for message in turn.messages)
+    assert base == 0
+    turns = [
+        turn for batch in loader for row in batch for turn in row.turns()
+    ]
+    assert turns == list(record.turns())
 
 
 def test_empty_qa_selection_has_no_batches():
@@ -272,13 +285,15 @@ def test_evaluator_scores_every_dataset_without_a_combined_cap():
         if pre_windowed:
             selected, base = evaluation_window_loader(
                 records, collate, budget=3, unit="rows", seed=0,
+                max_qa_sample_per_context=2,
                 rank=0, world=1, batch_size=1,
             )
             options = dict(row_loader=selected, row_base=base, pre_windowed=True)
         metrics = evaluator.autoregressive(
-            model, loader, torch.device("cpu"), max_qa=3, **options,
+            model, loader, torch.device("cpu"),
+            max_contexts_per_dataset=3, max_qa_sample_per_context=2, **options,
         )
-        assert metrics["dataset/squad/count"] == 3
+        assert metrics["dataset/squad/count"] == 4
         assert metrics["dataset/hotpotqa/count"] == 1
         assert metrics["em"] == 1
         assert model.training
@@ -324,9 +339,9 @@ def test_compare_reader_tasks_reuses_the_sampled_contexts_for_recon():
         object(),
         DataLoader(records, batch_size=2, collate_fn=list),
         torch.device("cpu"),
-        max_qa=2,
+        max_contexts_per_dataset=2, max_qa_sample_per_context=1,
     )
-    expected = select_evaluation_samples(records, budget=2, seed=cfg.training.seed)
+    expected = select_evaluation_samples(records, 2, 1, seed=cfg.training.seed)
     assert recon_seen["contexts"] == [
         records[context].context for context, _ in expected.contexts
     ]

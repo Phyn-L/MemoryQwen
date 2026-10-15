@@ -43,6 +43,28 @@ def test_best_retention_resume_and_final_alias_integrity(tmp_path):
     assert len(list(tmp_path.glob('*.pt'))) == 5
 
 
+def test_pre_eval_checkpoint_can_be_selected_as_best_after_eval(tmp_path):
+    model = torch.nn.Linear(1, 1)
+    optimizer = torch.optim.AdamW(model.parameters())
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
+    manager = CheckpointManager(tmp_path)
+    with torch.no_grad():
+        model.weight.fill_(12)
+    checkpoint = manager.save(model, optimizer, scheduler, 12, {})
+
+    assert manager.update_best(checkpoint, .75)
+    best = torch.load(tmp_path / "best.pt", weights_only=False)
+    assert best["step"] == 12
+    assert best["validation_f1"] == .75
+    assert best["best_f1"] == .75
+    assert not manager.update_best(checkpoint, .7)
+
+    resumed = CheckpointManager(tmp_path)
+    resumed.load(tmp_path / "last.pt", model, optimizer, scheduler)
+    assert resumed.best_f1 == .75
+    assert resumed.best_step == 12
+
+
 def test_legacy_save_cadence_is_removed_from_resolved_config():
     cfg = TrainConfig.from_dict({'checkpoint': {'save_every_steps': 42}})
     assert 'save_every_steps' not in cfg.to_dict()['checkpoint']

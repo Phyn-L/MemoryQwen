@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from rich.console import Console
+from rich.progress import BarColumn, DownloadColumn, Progress, TextColumn, TransferSpeedColumn
 from torch.utils.data import Dataset, Sampler
 from tqdm.auto import tqdm
 
@@ -585,8 +587,17 @@ class ConversationDataset(Dataset):
         """
         rows = []
         size = path.stat().st_size
-        bar = (
-            tqdm(total=size, desc=f"Reading {path.name}", unit="B", unit_scale=True)
+        progress = (
+            Progress(
+                TextColumn("[bold blue]{task.description}"),
+                BarColumn(),
+                DownloadColumn(),
+                TransferSpeedColumn(),
+                TextColumn("[green]{task.fields[rows]}"),
+                console=Console(stderr=True),
+                transient=False,
+                refresh_per_second=5,
+            )
             if (
                 limit is None
                 and size >= cls.READ_BAR_MIN_BYTES
@@ -594,22 +605,30 @@ class ConversationDataset(Dataset):
             )
             else None
         )
+        task = None
+        if progress is not None:
+            task = progress.add_task(f"Reading {path.name}", total=size, rows="0 rows")
+            progress.start()
         try:
             with path.open(encoding='utf-8') as handle:
                 for line in handle:
                     if not line.strip():
                         continue
                     rows.append(json.loads(line))
-                    if bar is not None:
-                        bar.update(len(line.encode('utf-8')))
+                    if progress is not None:
+                        progress.update(
+                            task,
+                            advance=len(line.encode('utf-8')),
+                            refresh=False,
+                        )
                         if len(rows) % cls.READ_BAR_POSTFIX_EVERY == 0:
-                            bar.set_postfix(rows=len(rows), refresh=False)
+                            progress.update(task, rows=f"{len(rows):,} rows", refresh=False)
                     if limit is not None and len(rows) >= limit:
                         break
         finally:
-            if bar is not None:
-                bar.set_postfix(rows=len(rows))
-                bar.close()
+            if progress is not None:
+                progress.update(task, rows=f"{len(rows):,} rows")
+                progress.stop()
         return rows
 
     @staticmethod
@@ -911,7 +930,7 @@ def collate_context_records(
     max_answer_tokens=64,
     append_eos=True,
     chat_template_enable_thinking=False,
-    qa_per_context=4,
+    max_qa_sample_per_context=4,
     sample_qa=True,
     question_padding_side="left",
     training=False,
@@ -943,7 +962,7 @@ def collate_context_records(
                 "conversation training requires at least one assistant turn"
             )
         if training and train_tasks == "mix":
-            qa_turns = _sample_turns(record, turns, qa_per_context, epoch)
+            qa_turns = _sample_turns(record, turns, max_qa_sample_per_context, epoch)
             chosen = [
                 *qa_turns,
                 ConversationTurn(
@@ -965,10 +984,13 @@ def collate_context_records(
             ]
             chosen_tasks = [0]
         elif training:
-            chosen = _sample_turns(record, turns, qa_per_context, epoch)
+            chosen = _sample_turns(record, turns, max_qa_sample_per_context, epoch)
             chosen_tasks = [1] * len(chosen)
         else:
-            chosen = _sample_turns(record, turns, qa_per_context, epoch) if sample_qa else turns
+            chosen = (
+                _sample_turns(record, turns, max_qa_sample_per_context, epoch)
+                if sample_qa else turns
+            )
             chosen_tasks = [1] * len(chosen)
         selected.extend(chosen)
         mapping.extend([row_index] * len(chosen))

@@ -15,7 +15,6 @@ MEMORY_BS="${MEMORY_BS:-256}"
 SYSTEM_PROMPT_MODE="${SYSTEM_PROMPT_MODE:-context}"
 MAX_CONTEXT_TOKENS="${MAX_CONTEXT_TOKENS:-1024}"
 MAX_CONTEXT_ROWS="${MAX_CONTEXT_ROWS:-10000}"
-QA_PER_CONTEXT="${QA_PER_CONTEXT:-8}"
 CONTEXT_SHUFFLE_SEED="${CONTEXT_SHUFFLE_SEED:-42}"
 OUTPUT_DIR="${OUTPUT_DIR:-outputs/eval_ab_loss_term}"
 DRY_RUN="${DRY_RUN:-0}"
@@ -41,7 +40,6 @@ args=(
 )
 if [[ -n "$DATA_ROOT" ]]; then args+=(--data-root "$DATA_ROOT"); fi
 if [[ -n "$MAX_CONTEXT_ROWS" ]]; then args+=(--max-context-rows "$MAX_CONTEXT_ROWS"); fi
-if [[ -n "$QA_PER_CONTEXT" ]]; then args+=(--qa-per-context "$QA_PER_CONTEXT"); fi
 args+=(--context-shuffle-seed "$CONTEXT_SHUFFLE_SEED")
 if has_option --checkpoint "$@" || has_option --ckpt "$@" || has_option --ckpt-dir "$@"; then
   : # Explicit checkpoint arguments below take precedence over CKPT_DIR.

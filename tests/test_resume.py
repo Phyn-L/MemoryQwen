@@ -93,12 +93,19 @@ def test_startup_report_lists_trainable_tensors_and_resolves_checkpoint_interval
     parameters, total = module.trainable_parameter_report(model)
     assert [name for name, _, _ in parameters] == ["0.bias", "1.weight", "1.bias"]
     assert total == sum(count for _, _, count in parameters)
-
-    model.qwen = nn.Module()
-    model.qwen.config = type("Config", (), {"num_hidden_layers": 28})()
-    assert module.context_checkpoint_interval(model, None) == 6
-    assert module.context_checkpoint_interval(model, 3) == 3
-
+    assert module.trainable_parameter_groups(parameters) == [
+        ("0", 1, 2),
+        ("1", 2, 3),
+    ]
+    assert module.compact_parameter_count(1_234_567) == "1.2 M"
+    table = module.format_trainable_parameter_table(parameters)
+    assert "Name" in table and "Type" in table and "Params" in table
+    assert "Trainable params" in table and "5" in table
+    resampler_table = module.format_trainable_parameter_table(
+        [("resampler.latents", (4, 8), 32)]
+    )
+    assert "question_resampler" in resampler_table
+    assert "QuestionResampler" in resampler_table
 
 @pytest.mark.parametrize("rank", range(4))
 @pytest.mark.parametrize("epoch", (0, 2))

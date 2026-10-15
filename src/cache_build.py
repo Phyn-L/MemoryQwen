@@ -9,7 +9,8 @@ line per context with every QA pair). This module applies the *config's* filter 
 
 The filter is the *same* function the loader uses (``filter_rows_batch``), so a row that
 survives here is exactly a row the loader would keep: one rule set, not a build-time copy of
-it. Rows keep **all** of their QA pairs; per-epoch turn sampling (``data.qa_per_context``)
+it. Rows keep **all** of their QA pairs; per-epoch turn sampling
+(``data.max_qa_sample_per_context``)
 still happens in the collate.
 
 ``scripts/data/build_cache.py`` is the CLI, and ``scripts/train.py`` calls :func:`ensure_cache`

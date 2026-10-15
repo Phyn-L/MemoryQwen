@@ -200,7 +200,9 @@ def test_the_fingerprint_ignores_unrelated_fields(tmp_path):
     source = _meta(tmp_path, "train", [_row("short context", ["q"])])
     tokenizer = _Tokenizer()
     config = _config(tmp_path)
-    same = _config(tmp_path, num_workers=4, pin_memory=False, qa_per_context=16)
+    same = _config(
+        tmp_path, num_workers=4, pin_memory=False, max_qa_sample_per_context=16,
+    )
     assert cache_fingerprint(config, "train", source, tokenizer) == cache_fingerprint(
         same, "train", source, tokenizer
     )
@@ -257,7 +259,7 @@ def test_chunks_are_bounded_by_rows_and_bytes(tmp_path):
 
 
 class _Bar:
-    """Records what the build tells tqdm, without drawing anything."""
+    """Records updates from a progress renderer, without drawing anything."""
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -273,6 +275,29 @@ class _Bar:
 
     def close(self):
         self.closed = True
+
+
+class _RichProgress:
+    def __init__(self, bars, *args, **kwargs):
+        self.bars = bars
+        self.options = kwargs
+        self.bar = None
+
+    def add_task(self, desc, total, **fields):
+        self.bar = _Bar(desc=desc, total=total, fields=fields)
+        self.bars.append(self.bar)
+        return 0
+
+    def start(self):
+        pass
+
+    def update(self, task, advance=0, refresh=True, **fields):
+        self.bar.updates.append(advance)
+        if fields:
+            self.bar.postfix.append(fields)
+
+    def stop(self):
+        self.bar.closed = True
 
 
 def test_the_progress_bar_accounts_for_the_file_and_reports_the_counts(tmp_path, monkeypatch):
@@ -417,7 +442,7 @@ def test_a_large_cache_read_draws_a_progress_bar(tmp_path, monkeypatch):
 
     made: list[_Bar] = []
     monkeypatch.setattr(
-        data_module, "tqdm", lambda **kwargs: made.append(_Bar(**kwargs)) or made[-1]
+        data_module, "Progress", lambda *args, **kwargs: _RichProgress(made, *args, **kwargs)
     )
     source = _meta(tmp_path, "train", [_row("short context", ["q1", "q2"], index=0)])
     monkeypatch.setattr(ConversationDataset, "READ_BAR_MIN_BYTES", 1)
@@ -428,7 +453,7 @@ def test_a_large_cache_read_draws_a_progress_bar(tmp_path, monkeypatch):
     assert bar.kwargs["total"] == source.stat().st_size
     assert bar.kwargs["desc"] == f"Reading {source.name}"
     assert sum(bar.updates) == source.stat().st_size, "every byte is accounted for"
-    assert bar.postfix[-1] == {"rows": 1}
+    assert bar.postfix[-1] == {"rows": "1 rows"}
     assert bar.closed
 
 
@@ -439,7 +464,7 @@ def test_a_capped_read_stays_silent_and_stops_early(tmp_path, monkeypatch):
 
     made: list[_Bar] = []
     monkeypatch.setattr(
-        data_module, "tqdm", lambda **kwargs: made.append(_Bar(**kwargs)) or made[-1]
+        data_module, "Progress", lambda *args, **kwargs: _RichProgress(made, *args, **kwargs)
     )
     source = _meta(tmp_path, "train", [_row(f"context {i}", [f"q{i}"], index=i) for i in range(5)])
     monkeypatch.setattr(ConversationDataset, "READ_BAR_MIN_BYTES", 1)
@@ -551,10 +576,14 @@ def test_a_stale_or_mismatched_sidecar_is_ignored(tmp_path):
 
     # The described file changed -> the lengths may not match its rows any more.
     original = _json.loads(sidecar.read_text())
+    original_stat = cache_path.stat()
     cache_path.write_text(cache_path.read_text() + "\n", encoding="utf-8")
     assert read_context_lengths(dataset, tokenizer) is None
 
     cache_path.write_text(cache_path.read_text().rstrip("\n") + "\n", encoding="utf-8")
+    import os
+
+    os.utime(cache_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
     sidecar.write_text(_json.dumps(original), encoding="utf-8")
     assert read_context_lengths(dataset, tokenizer) is not None
 

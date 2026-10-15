@@ -20,10 +20,7 @@ def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[st
     """Merge nested configuration mappings; scalar and list values are replaced."""
     merged = dict(base)
     for key, value in override.items():
-        if (
-            isinstance(merged.get(key), Mapping)
-            and isinstance(value, Mapping)
-        ):
+        if isinstance(merged.get(key), Mapping) and isinstance(value, Mapping):
             merged[key] = _deep_merge(merged[key], value)
         else:
             merged[key] = value
@@ -58,8 +55,8 @@ def _load_yaml_with_base(path: Path, stack: tuple[Path, ...] = ()) -> dict[str, 
 #: must say *which* field moved rather than unfold it into unrelated keywords.
 REMOVED_DATA_FIELDS = {
     "validation_max_samples_per_dataset": (
-        "the evaluation does not sample any more; bound it with validation_max_samples and "
-        "evaluation.max_eval_sample_per_dataset"
+        "bound validation data with validation_max_samples and "
+        "evaluation.max_eval_contexts_per_dataset"
     ),
     "validation_source_file": "validation always reads <data.files.root>/1qa/cache/validation.jsonl",
     "validation_output_dir": "there is no sampled validation subset any more",
@@ -67,7 +64,9 @@ REMOVED_DATA_FIELDS = {
 }
 
 
-def drop_removed_data_fields(data: Mapping[str, Any]) -> tuple[dict[str, Any], list[str]]:
+def drop_removed_data_fields(
+    data: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[str]]:
     """Remove fields that no longer exist from a *saved* config; returns the names dropped.
 
     Only for configs written by an older version of this project (a checkpoint's embedded
@@ -110,7 +109,9 @@ def _flatten_data_groups(data: Mapping[str, Any]) -> dict[str, Any]:
             nested = _flatten_data_groups(value)
             duplicate = set(flattened).intersection(nested)
             if duplicate:
-                raise ValueError(f"duplicate data fields after grouping: {sorted(duplicate)}")
+                raise ValueError(
+                    f"duplicate data fields after grouping: {sorted(duplicate)}"
+                )
             flattened.update(nested)
         else:
             if key in flattened:
@@ -121,7 +122,11 @@ def _flatten_data_groups(data: Mapping[str, Any]) -> dict[str, Any]:
     unknown = sorted(set(flattened) - set(DataConfig.__dataclass_fields__))
     if unknown:
         hints = [
-            f"{name} ({REMOVED_DATA_FIELDS[name]})" if name in REMOVED_DATA_FIELDS else name
+            (
+                f"{name} ({REMOVED_DATA_FIELDS[name]})"
+                if name in REMOVED_DATA_FIELDS
+                else name
+            )
             for name in unknown
         ]
         raise ValueError(f"unknown data field(s): {', '.join(hints)}")
@@ -184,7 +189,6 @@ class ModelConfig:
     torch_dtype: str = "bfloat16"
     attn_implementation: str = "sdpa"
     context_gradient_checkpointing: bool = True
-    context_gradient_checkpointing_every_n_layers: int | None = None
     # Dtype of the trainable pieces (memory writer, LoRA, recon decoders).
     # Kept separate from torch_dtype so that AdamW keeps float32 parameters and
     # moments while the frozen backbone stays at its checkpoint dtype.
@@ -292,9 +296,7 @@ class DataConfig:
     max_conversation_tokens: int = 768
     max_samples: int | None = None
     train_max_samples: int | None = None
-    #: Deterministic cap on the validation contexts loaded (``None`` = all of them). The
-    #: autoregressive budget (``evaluation.max_eval_sample_per_dataset``) bounds decoding; the
-    #: evaluation takes the first capped QA rows of each dataset in file order.
+    #: Deterministic cap on the validation contexts loaded (``None`` = all of them).
     validation_max_samples: int | None = None
     #: Where the loader's own preprocessing caches go (filtered rows for a file that is not the
     #: built cache, and the per-context lengths the sortish sampler buckets by). ``None`` puts
@@ -309,7 +311,7 @@ class DataConfig:
     cache_filtered_dataset: bool = True
     append_eos: bool = True
     chat_template_enable_thinking: bool = False
-    qa_per_context: int = 8
+    max_qa_sample_per_context: int = 8
     # Left-padding keeps the question's real tokens adjacent to the answer; right
     # padding inserts pad positions between them, so the first answer token would be
     # supervised from a padding hidden state.  Set to "right" only to reproduce old runs.
@@ -388,13 +390,13 @@ class EvaluationConfig:
     qa_batch_size: int = 4
     # Teacher-forced reconstruction score on the unique contexts referenced by the
     # selected QA sample. One memory-prefixed forward per context, no decoding.
-    recon_metrics: bool = True
+    recon_teacherforce: bool = True
     # Autoregressive context reconstruction (``max_context_tokens`` decodes per context).
-    # Off by default; ``recon_metrics`` is the cheap stand-in.
+    # Off by default; ``recon_teacherforce`` is the cheap stand-in.
     recon_autoregressive: bool = False
-    # Seeded QA sample per dataset, across all ranks. No combined QA sample cap.
-    # Selection is deterministic and independent of the number of GPUs.
-    max_eval_sample_per_dataset: int = 1280
+    # Seeded context sample per dataset, across all ranks. No combined sample cap.
+    # Each selected context contributes at most data.max_qa_sample_per_context QA turns.
+    max_eval_contexts_per_dataset: int = 1280
 
 
 @dataclass
@@ -404,6 +406,7 @@ class TrainingConfig:
     # ``batch_size * gradient_accumulation_steps * world_size``. 1 keeps the historical
     # behaviour (one optimizer step per DataLoader batch).
     gradient_accumulation_steps: int = 1
+    gradient_checkpoint_every_n_layers: int = 1
     epochs: int = 1
     max_grad_norm: float = 1.0
     seed: int = 42
@@ -422,7 +425,9 @@ class LoggingConfig:
     # Online runs require an explicit private host (or SWANLAB_HOST).
     swanlab_host: str | None = None
     swanlab_mode: str = "online"
-    swanlab_log_dir: str | None = None  # Automatically set to the checkpoint run directory.
+    swanlab_log_dir: str | None = (
+        None  # Automatically set to the checkpoint run directory.
+    )
     swanlab_workspace: str | None = None
     # Dashboard name; empty means model name + timestamp.
     swanlab_run_name: str | None = None
@@ -469,7 +474,9 @@ class TrainConfig:
 
     @classmethod
     def from_dict(
-        cls, raw: Mapping[str, Any], machine: str | None = None,
+        cls,
+        raw: Mapping[str, Any],
+        machine: str | None = None,
         tolerate_removed_data_fields: bool = False,
     ) -> TrainConfig:
         unknown = set(raw) - set(cls.__dataclass_fields__)
@@ -513,9 +520,7 @@ class TrainConfig:
             )
         # The objective moved out of ``memory:``; a stale YAML must say so instead of
         # silently training with the default weights.
-        moved = sorted(
-            set(memory_values).intersection(LossConfig.__dataclass_fields__)
-        )
+        moved = sorted(set(memory_values).intersection(LossConfig.__dataclass_fields__))
         if moved:
             raise ValueError(
                 f"memory.{', memory.'.join(moved)} moved to the loss section; "
@@ -536,19 +541,6 @@ class TrainConfig:
             print(
                 "warning: ignoring saved evaluation.recon_max_contexts; Recon now uses "
                 "contexts from the sampled QA rows",
-                file=sys.stderr,
-            )
-        if "evaluation_max_samples" in evaluation_values:
-            if not tolerate_removed_data_fields:
-                raise ValueError(
-                    "evaluation.evaluation_max_samples was replaced by "
-                    "evaluation.max_eval_sample_per_dataset (QA cap per dataset)"
-                )
-            previous = evaluation_values.pop("evaluation_max_samples")
-            evaluation_values.setdefault("max_eval_sample_per_dataset", previous)
-            print(
-                "warning: saved evaluation.evaluation_max_samples is now interpreted as "
-                "evaluation.max_eval_sample_per_dataset (QA cap per dataset)",
                 file=sys.stderr,
             )
         return cls(
@@ -572,14 +564,6 @@ class TrainConfig:
         d, m, loss = self.data, self.memory, self.loss
         if self.model.attn_implementation not in {"sdpa", "eager"}:
             raise ValueError("model.attn_implementation must be sdpa or eager")
-        if (
-            self.model.context_gradient_checkpointing_every_n_layers is not None
-            and (
-                type(self.model.context_gradient_checkpointing_every_n_layers) is not int
-                or self.model.context_gradient_checkpointing_every_n_layers <= 0
-            )
-        ):
-            raise ValueError("model.context_gradient_checkpointing_every_n_layers must be a positive integer")
         if d.max_context_tokens <= 0:
             raise ValueError("data.max_context_tokens must be positive")
         if not str(d.root).strip():
@@ -587,9 +571,7 @@ class TrainConfig:
         if d.max_input_tokens <= 0:
             raise ValueError("data.max_input_tokens must be positive")
         if d.max_input_tokens < d.max_context_tokens:
-            raise ValueError(
-                "data.max_input_tokens must be >= data.max_context_tokens"
-            )
+            raise ValueError("data.max_input_tokens must be >= data.max_context_tokens")
         if d.tokenizer_filter_batch_size <= 0:
             raise ValueError("data.tokenizer_filter_batch_size must be positive")
         if d.num_workers < 0:
@@ -635,11 +617,13 @@ class TrainConfig:
             or d.max_conversation_tokens <= 0
             or d.max_answer_tokens <= 0
         ):
-            raise ValueError("question/conversation/answer token limits must be positive")
+            raise ValueError(
+                "question/conversation/answer token limits must be positive"
+            )
         if d.sortish_bucket_multiplier <= 0:
             raise ValueError("sortish_bucket_multiplier must be positive")
-        if d.qa_per_context <= 0:
-            raise ValueError("data.qa_per_context must be positive")
+        if d.max_qa_sample_per_context <= 0:
+            raise ValueError("data.max_qa_sample_per_context must be positive")
         if d.question_padding_side not in {"left", "right"}:
             raise ValueError("data.question_padding_side must be left or right")
         if self.model.trainable_dtype not in {"float32", "float16", "bfloat16"}:
@@ -728,18 +712,24 @@ class TrainConfig:
             raise ValueError("batch_size and epochs must be positive")
         if t.gradient_accumulation_steps <= 0:
             raise ValueError("training.gradient_accumulation_steps must be positive")
+        if type(t.gradient_checkpoint_every_n_layers) is not int or t.gradient_checkpoint_every_n_layers <= 0:
+            raise ValueError("training.gradient_checkpoint_every_n_layers must be a positive integer")
         if t.max_grad_norm <= 0:
             raise ValueError("training.max_grad_norm must be positive")
         if self.evaluation.autoregressive_every <= 0:
             raise ValueError("evaluation.autoregressive_every must be positive")
         if self.evaluation.qa_batch_size <= 0:
             raise ValueError("evaluation.qa_batch_size must be positive")
-        if self.evaluation.max_eval_sample_per_dataset <= 0:
-            raise ValueError("evaluation.max_eval_sample_per_dataset must be positive")
+        if self.evaluation.max_eval_contexts_per_dataset <= 0:
+            raise ValueError(
+                "evaluation.max_eval_contexts_per_dataset must be positive"
+            )
         if self.logging.log_every <= 0:
             raise ValueError("logging.log_every must be positive")
         if self.logging.swanlab_mode not in {"online", "offline", "local", "disabled"}:
-            raise ValueError("logging.swanlab_mode must be online, offline, local or disabled")
+            raise ValueError(
+                "logging.swanlab_mode must be online, offline, local or disabled"
+            )
 
 
 def dtype_from_name(name: str):

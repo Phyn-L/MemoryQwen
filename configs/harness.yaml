@@ -5,6 +5,7 @@
 training:
   batch_size: 2  # 每个进程的 micro-batch 大小
   gradient_accumulation_steps: 2  # 每个优化器步累积的 micro-batch 数
+  gradient_checkpoint_every_n_layers: 2  # 每隔几层启用一次 context gradient checkpoint；1 表示逐层
   epochs: 1  # 训练轮数
   max_grad_norm: 1.0  # 梯度裁剪最大范数
   seed: 42  # 随机种子
@@ -12,7 +13,7 @@ training:
 data:
   # 数据文件路径：1QA 数据由 scripts/data/ 写入 <root>/1qa/
   files:
-    root: ${DATA_ROOT:-contexts}  # 数据根目录（含 1qa/1qa-train.jsonl 等）
+    root: ${DATA_ROOT:-contexts}  # 数据根目录（含 1qa/meta/ 和 1qa/cache/）
   # 输入长度上限：训练与验证共用这一处配置
   limits:
     max_context_tokens: 1536
@@ -33,12 +34,12 @@ data:
     recon_ratio_start: 1.0
     recon_ratio_end: 0.1
     recon_ratio_min: 0.1
-    qa_per_context: 8
+    max_qa_sample_per_context: 8
     # sortish bucket 相对 batch size 的倍数
     sortish_bucket_multiplier: 50
     train_datasets: all
     train_max_samples: null
-    # 验证集：评估时用 training.seed 对每个数据集独立随机抽取至多 N 条 QA。
+    # 验证集：每数据集抽至多 N 个 context，每个 context 最多取 max_qa_sample_per_context 条 QA。
     validation_datasets: [squad, msmarcov1.1, msmarcov2.1, hotpotqa(distractor), race]
     validation_max_samples: null
 loss:
@@ -52,10 +53,10 @@ loss:
   max_logits_rows: 256  # 每次词表投影的行数上限（显存/核数量权衡）
 evaluation:
   autoregressive_every: 5000  # 自回归验证与 checkpoint 的训练步间隔
-  max_eval_sample_per_dataset: 2560  # 每个数据集的自回归评估 QA 条数上限，无总条数限制
+  max_eval_contexts_per_dataset: 1024  # 每个数据集的自回归评估 context 数上限
   max_new_tokens: 64  # 自回归验证生成 token 上限
-  qa_batch_size: 4  # QA 验证批大小
-  recon_metrics: true  # teacher-forced recon 指标（无需生成）
+  qa_batch_size: 8  # QA 验证批大小
+  recon_teacherforce: true  # teacher-forced recon 指标（无需生成）
   recon_autoregressive: false  # 自回归 recon 评估（昂贵，默认关闭）
 optimizer:
   name: adamw  # 优化器名称
@@ -72,5 +73,5 @@ logging:
   swanlab_mode: online  # online / offline / local / disabled
   swanlab_log_dir: null  # 自动设置为最终 checkpoint 输出目录
   swanlab_workspace: phyn
-  log_every: 100  # 训练日志记录间隔（步）
+  log_every: 50  # 训练日志记录间隔（步）
   swanlab_project: MemoryQwen  # SwanLab 项目名称

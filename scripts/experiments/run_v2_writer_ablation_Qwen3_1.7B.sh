@@ -97,7 +97,7 @@ base.setdefault("data", {}).update(
     recon_ratio_start=0.5,
     recon_ratio_end=0.5,
     recon_ratio_min=0.1,
-    qa_per_context=4,
+    max_qa_sample_per_context=4,
 )
 base["data"]["train_max_samples"] = (
     None if os.environ["TRAIN_MAX_SAMPLES"] == "null"
@@ -109,7 +109,7 @@ base.setdefault("evaluation", {}).update(
     # 250k contexts x two mixed tasks / global batch 32 ~= 15.6k steps.
     # AR every 2000 gives several checkpoints plus the mandatory final evaluation.
     autoregressive_every=int(os.environ["AR_EVERY"]),
-    max_eval_sample_per_dataset=1024,
+    max_eval_contexts_per_dataset=1024,
     qa_batch_size=8,
     max_new_tokens=32,
 )

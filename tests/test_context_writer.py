@@ -9,10 +9,10 @@ from src.model import ContextMemoryModel, MetaLoRA, load_model
 from utils.config import TrainConfig
 
 
-def tiny_model(vocab_size=64, **kwargs):
+def tiny_model(vocab_size=64, num_hidden_layers=3, **kwargs):
     torch.manual_seed(7)
     config = Qwen3Config(
-        vocab_size=vocab_size, hidden_size=32, intermediate_size=64, num_hidden_layers=3,
+        vocab_size=vocab_size, hidden_size=32, intermediate_size=64, num_hidden_layers=num_hidden_layers,
         num_attention_heads=4, num_key_value_heads=2, head_dim=8,
         max_position_embeddings=64, tie_word_embeddings=True,
     )
@@ -126,48 +126,134 @@ def test_context_checkpointing_preserves_cache_outputs_and_gradients():
             torch.testing.assert_close(p.grad, q.grad, atol=1e-6, rtol=1e-4)
 
 
-@pytest.mark.parametrize(
-    ("interval", "expected"),
-    [
-        (None, [True, False, True]),
-        (1, [True, True, True]),
-        (2, [True, False, True]),
-        (3, [True, False, False]),
-    ],
-)
-def test_context_checkpointing_interval_selects_layers(interval, expected):
+@pytest.mark.parametrize("interval", [1, 2, 4, 6])
+def test_context_checkpointing_uses_transformers_selected_layers(interval, monkeypatch):
     model = tiny_model(
+        num_hidden_layers=7,
         context_gradient_checkpointing=True,
-        context_gradient_checkpointing_every_n_layers=interval,
+        gradient_checkpoint_every_n_layers=interval,
     ).train()
     observed = []
-    context_call = 0
+    body = model._transformer_body
+    layers = body.layers
+    enable = body.gradient_checkpointing_enable
+    options = []
+
+    def record_options(**kwargs):
+        options.append(kwargs)
+        enable(**kwargs)
+
+    monkeypatch.setattr(body, "gradient_checkpointing_enable", record_options)
 
     def observe_checkpointed_layers(*_):
-        nonlocal context_call
-        if context_call == 0:
-            observed.extend(
-                layer.gradient_checkpointing for layer in model._transformer_body.layers
-            )
-        context_call += 1
+        assert body.layers is layers
+        observed.append([layer.gradient_checkpointing for layer in layers])
 
-    handle = model._transformer_body.register_forward_pre_hook(
-        observe_checkpointed_layers
-    )
+    handle = body.register_forward_pre_hook(observe_checkpointed_layers)
     try:
-        encode(model)
+        encode(model).memory.square().mean().backward()
     finally:
         handle.remove()
-    assert model.context_gradient_checkpointing_interval == (interval or 2)
-    assert observed == expected
-    assert not any(layer.gradient_checkpointing for layer in model._transformer_body.layers)
+    assert observed == [
+        [index % interval == 0 for index in range(7)], [False] * 7,
+    ]
+    assert options == [{
+        "gradient_checkpointing_kwargs": {"use_reentrant": False, "preserve_rng_state": True},
+        "every_n_layers": interval,
+    }]
+    assert not any(layer.gradient_checkpointing for layer in layers)
+    for _ in range(2):
+        encode(model).memory.square().mean().backward()
+    embedding = model.qwen.get_input_embeddings()
+    assert not embedding._forward_hooks
+    assert not embedding(torch.zeros(1, 1, dtype=torch.long)).requires_grad
+
+
+@pytest.mark.parametrize("interval", [1, 2, 4, 6])
+@pytest.mark.parametrize("padded", [False, True])
+def test_transformers_checkpointing_matches_loss_and_trainable_gradients(interval, padded):
+    plain = tiny_model(
+        num_hidden_layers=7, context_layer_indices=(-1, 0, 3),
+        readout_length=2, dropout=0.1,
+    ).train()
+    for name, parameter in plain.named_parameters():
+        if "lora_B" in name:
+            torch.nn.init.normal_(parameter, std=0.02)
+    checked = copy.deepcopy(plain)
+    checked.context_gradient_checkpointing = True
+    checked.gradient_checkpoint_every_n_layers = interval
+    embeds = torch.randn(2, 17, 32)
+    mask = torch.ones(2, 17, dtype=torch.bool)
+    if padded:
+        mask[0, -3:] = False
+    question_ids = torch.randint(0, 64, (2, 3))
+    answer_ids = torch.randint(0, 64, (2, 2))
+    context_labels = torch.randint(0, 64, (2, 17)).masked_fill(~mask, -100)
+    losses = []
+    for model in (plain, checked):
+        torch.manual_seed(42)
+        prefix = model.encode_context_prefix(embeds, mask)
+        embedding = model.qwen.get_input_embeddings()
+        qa = model.forward_with_memory_prefix(
+            prefix, torch.arange(2), embedding(question_ids), torch.ones_like(question_ids).bool(),
+            embedding(answer_ids), torch.ones_like(answer_ids).bool(), answer_ids,
+            loss_only=True,
+        )
+        recon = model.forward_recon_with_memory_prefix(
+            prefix, torch.arange(2), embeds, mask, context_labels, loss_only=True,
+        )
+        loss = qa.supervision_losses.mean() + recon.supervision_losses.mean()
+        losses.append(loss.detach())
+        loss.backward()
+    torch.testing.assert_close(losses[0], losses[1], atol=1e-6, rtol=1e-5)
+    plain_parameters = dict(plain.named_parameters())
+    checked_parameters = dict(checked.named_parameters())
+    assert plain_parameters.keys() == checked_parameters.keys()
+    for name, parameter in plain_parameters.items():
+        if not parameter.requires_grad:
+            continue
+        other = checked_parameters[name]
+        assert (parameter.grad is None) == (other.grad is None), name
+        assert parameter.grad is not None, name
+        if parameter.grad is not None:
+            torch.testing.assert_close(
+                parameter.grad, other.grad, atol=1e-6, rtol=1e-4, msg=name,
+            )
+
+
+def test_context_checkpointing_supports_mixed_attention_types():
+    model = tiny_model(context_gradient_checkpointing=True).train()
+    model.qwen.config.layer_types = [
+        "full_attention",
+        "sliding_attention",
+        "full_attention",
+    ]
+    model.qwen.config.sliding_window = 4
+    model._transformer_body.has_sliding_layers = True
+    model._transformer_body.layers[1].self_attn.sliding_window = 4
+    model.gradient_checkpoint_every_n_layers = 2
+    plain = copy.deepcopy(model)
+    plain.context_gradient_checkpointing = False
+    embeds = torch.randn(2, 17, 32)
+    mask = torch.ones(2, 17, dtype=torch.bool)
+    outputs = []
+    for candidate in (plain, model):
+        prefix = candidate.encode_context_prefix(embeds, mask)
+        outputs.append(prefix.memory)
+        prefix.memory.square().mean().backward()
+    torch.testing.assert_close(outputs[0], outputs[1])
+    for (name, parameter), (_, other) in zip(
+        plain.named_parameters(), model.named_parameters(), strict=True,
+    ):
+        if parameter.grad is not None:
+            torch.testing.assert_close(parameter.grad, other.grad, atol=1e-6, rtol=1e-4, msg=name)
 
 
 def test_context_checkpointing_restores_state_after_forward_failure(monkeypatch):
     model = tiny_model(context_layer_indices=(-1, 0), context_gradient_checkpointing=True).train()
     layers = model._transformer_body.layers
-    before = [(layer.gradient_checkpointing, getattr(layer, "_gradient_checkpointing_func", None),
-               set(layer._forward_hooks)) for layer in layers]
+    before = [(layer.gradient_checkpointing, set(layer._forward_hooks)) for layer in layers]
+    embedding_hooks = set(model.qwen.get_input_embeddings()._forward_hooks)
 
     def fail(*args, **kwargs):
         raise RuntimeError("injected forward failure")
@@ -175,9 +261,24 @@ def test_context_checkpointing_restores_state_after_forward_failure(monkeypatch)
     monkeypatch.setattr(model._transformer_body, "forward", fail)
     with pytest.raises(RuntimeError, match="injected"):
         encode(model)
-    after = [(layer.gradient_checkpointing, getattr(layer, "_gradient_checkpointing_func", None),
-              set(layer._forward_hooks)) for layer in layers]
+    after = [(layer.gradient_checkpointing, set(layer._forward_hooks)) for layer in layers]
     assert after == before
+    assert set(model.qwen.get_input_embeddings()._forward_hooks) == embedding_hooks
+
+
+@pytest.mark.parametrize("interval", [0, -1, True, 1.5])
+def test_context_checkpoint_interval_requires_a_positive_integer(interval):
+    config = Qwen3Config(
+        vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=3,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=8,
+        max_position_embeddings=64, tie_word_embeddings=True,
+    )
+    with pytest.raises(ValueError, match="must be a positive integer"):
+        ContextMemoryModel(
+            Qwen3ForCausalLM(config), memory_length=4,
+            memory_resampler_hidden_size=16, memory_resampler_heads=2,
+            gradient_checkpoint_every_n_layers=interval,
+        )
 
 
 def test_manual_lora_writer_forward_backward():
