@@ -17,6 +17,7 @@ include = ["utils*", "src*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-q"
 markers = ["gpu: requires a CUDA device with free memory"]
 filterwarnings = [

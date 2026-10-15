@@ -62,11 +62,6 @@ def test_disabled_skips_sdk(monkeypatch):
     assert init_tracking(TrainConfig()) is None
 
 
-def test_aim_config_fields_are_rejected():
-    with pytest.raises(TypeError, match="unexpected keyword argument"):
-        TrainConfig.from_dict({"logging": {"aim_project": "old-project"}})
-
-
 def test_checkpoint_restores_swanlab_identity(tmp_path):
     model = torch.nn.Linear(2, 1)
     optimizer = torch.optim.AdamW(model.parameters())

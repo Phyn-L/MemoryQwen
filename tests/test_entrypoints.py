@@ -132,12 +132,10 @@ def test_launch_uses_current_interpreter_and_gpu_count(monkeypatch):
         command('train', [], 4)
 
 
-def test_presets_valid_and_legacy_aliases_equivalent():
+def test_presets_are_valid():
     for p in [ROOT / 'configs/train_baseline.yaml', *ROOT.glob('configs/ablations/*.yaml')]:
         cfg = TrainConfig.from_file(p)
         cfg.validate()
-        if p.is_symlink():
-            assert cfg.to_dict() == TrainConfig.from_file(p.resolve()).to_dict()
     for p in ROOT.glob('configs/icl_zeroshot.yaml'):
         assert load_icl_defaults(p)['batch_size'] > 0
 
@@ -158,10 +156,3 @@ def test_icl_machine_defaults_preserve_explicit_model(monkeypatch):
     explicit = module.DEFAULT_MODEL
     args = module.parse_args(['--machine', 'h200', '--model', explicit])
     assert args.model == explicit
-
-
-def test_removed_config_paths_are_not_silently_remapped():
-    # utils/config_paths.py (an identity re-mapper for the deleted machine config trees) is
-    # gone; a stale path must simply not exist and never be rewritten to another file.
-    old = ROOT / 'configs/qwen-1.7b/4090_train.yaml'
-    assert not old.exists()

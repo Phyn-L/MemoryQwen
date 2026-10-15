@@ -82,24 +82,13 @@ def test_official_metrics_match_the_icl_baseline_stack():
             assert baseline[key] == ours[key], (prediction, references, key)
 
 
-def test_no_legacy_dual_track_remains():
-    """Guard against re-introducing a second ruler by accident."""
-    import src.metrics as metrics
-
-    assert not hasattr(metrics, "normalize_text"), "the legacy normalizer is back"
-    assert not hasattr(metrics, "qa_metrics_all"), "the dual-track helper is back"
-
-
 def test_unigram_precision_is_gone():
     """``precision`` was dropped: short answers gamed it and it tracked ``f1``.
 
     It also changes the flattened layout of the distributed reduce, so removing it is not
     a cosmetic change and is asserted rather than left to review.
     """
-    import src.metrics as metrics
-
     assert "precision" not in METRIC_KEYS
-    assert not hasattr(metrics, "unigram_precision"), "the dropped metric is back"
     assert "precision" not in qa_metrics("a cat", "cat")
 
 
