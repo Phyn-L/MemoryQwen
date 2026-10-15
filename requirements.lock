@@ -1,12 +1,12 @@
-# 以下为 CPU 测试套件与 4090 训练运行所验证的版本；由 `source /home/lz/miniconda3/etc/profile.d/conda.sh && conda activate shine && python -c "import importlib.metadata as m; [print(f'{n}=={m.version(n)}') for n in ('torch','transformers','pyyaml','tqdm','datasets','accelerate','aim','peft','numpy','pytest')]"` 生成，按 name==version 字母序排列。
+# 以下为 CPU 测试套件与 4090 训练运行所验证的版本；由 `source /home/lz/miniconda3/etc/profile.d/conda.sh && conda activate shine && python -c "import importlib.metadata as m; [print(f'{n}=={m.version(n)}') for n in ('torch','transformers','pyyaml','tqdm','datasets','accelerate','swanlab','peft','numpy','pytest')]"` 生成，按 name==version 字母序排列。
 accelerate==1.14.0
-aim==3.29.1
 datasets==4.4.1
 numpy==2.3.5
 peft==0.21.0
 pytest==9.1.1
 pyyaml==6.0.3
+swanlab==0.10.2
 torch==2.13.0+cu132
 tqdm==4.67.3
 transformers==5.16.1
-# 无缺失包：上述 10 个包在 shine 环境中均已安装。
+# SwanLab 迁移版本为 shine 环境中已安装的 0.10.2；训练端私有服务连接需单独验证。

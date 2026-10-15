@@ -9,7 +9,7 @@ requires-python = ">=3.10"
 dependencies = ["torch>=2.2", "transformers>=5.16.1,<6", "pyyaml>=6.0", "tqdm>=4.66", "datasets>=2.20"]
 
 [project.optional-dependencies]
-train = ["accelerate>=0.30", "aim>=3.4", "peft>=0.12"]
+train = ["accelerate>=0.30", "swanlab>=0.10.2,<0.11", "peft>=0.12"]
 
 [tool.setuptools.packages.find]
 where = ["."]

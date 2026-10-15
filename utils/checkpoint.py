@@ -63,7 +63,7 @@ class CheckpointManager:
         self.loaded = {}
 
     def save(self, model, optimizer, scheduler, step, config, final=False,
-             aim_run_id=None, world_size=1, validation_f1=None):
+             swanlab_run_id=None, world_size=1, validation_f1=None):
         path = self.output_dir / ("last.pt" if final else f"step-{step}.pt")
         path.parent.mkdir(parents=True, exist_ok=True)
         # Only trainable tensors are stored: the frozen Qwen backbone is ~1.7B parameters
@@ -75,7 +75,7 @@ class CheckpointManager:
             "scheduler": scheduler.state_dict(),
             "step": step,
             "config": config,
-            "aim_run_id": aim_run_id,
+            "swanlab_run_id": swanlab_run_id,
             "world_size": int(world_size),
             "rng": _capture_rng_state(),
         }
@@ -174,4 +174,4 @@ class CheckpointManager:
             "world_size": int(state.get("world_size", 1) or 1),
             "config": state.get("config") or {},
         }
-        return self.loaded["step"], state.get("aim_run_id")
+        return self.loaded["step"], state.get("swanlab_run_id")

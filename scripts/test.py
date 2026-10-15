@@ -133,8 +133,8 @@ def main():
     cfg.validate()
     checkpoint_path = Path(args.checkpoint).resolve()
     cfg.checkpoint.output_dir = str(checkpoint_path.parent)
-    if not cfg.logging.aim_run_name:
-        cfg.logging.aim_run_name = checkpoint_path.parent.name
+    if not cfg.logging.swanlab_run_name:
+        cfg.logging.swanlab_run_name = checkpoint_path.parent.name
     # Multi-GPU evaluation: `torchrun` (utils.launcher starts one worker per GPU)
     # gives every rank one card, and only the *loader* is sharded here. The evaluator
     # all-reduces its own accumulators (src/evaluator.py::_distributed_sum), so sharding the

@@ -1,6 +1,6 @@
 """Per-machine locations, so a run needs one ``machine`` field instead of an env file.
 
-The Qwen weights, conversation data, and Aim repositories sit in different places on the machines
+The Qwen weights and conversation data sit in different places on the machines
 this project trains on, and that used to be a gitignored ``scripts/env.local.sh`` exporting
 ``MODEL_ROOT`` / ``DATA_ROOT``. Keeping the table in the repository makes a run
 self-describing: ``machine: h200`` in the config, ``--machine h200`` on the command line, or
@@ -18,8 +18,6 @@ mechanism:
   it still exists, keeps working as before).
 
 Edit ``MACHINES`` to add a machine.
-Aim repository selection separately respects ``AIM_REPO`` and an explicit
-``logging.aim_repo_path`` before using the selected machine's default.
 """
 
 from __future__ import annotations
@@ -27,7 +25,6 @@ from __future__ import annotations
 import os
 import socket
 from collections.abc import Mapping
-from pathlib import Path
 
 # ``DATA_ROOT`` is the tree that holds the 1QA splits (``<DATA_ROOT>/1qa/1qa-*.jsonl``),
 # which is what ``scripts/data/build_*.py`` writes: the repository's own ``contexts/``
@@ -38,18 +35,15 @@ MACHINES: dict[str, dict[str, str]] = {
     "4090": {
         "MODEL_ROOT": "/data/lz/hf_cache/hub",
         "DATA_ROOT": "/data/lz/MemoryQwen/contexts",
-        "AIM_REPO": "/data/lz/MemoryQwen/.aim",
     },
     # 8x H200: model and data live under the shared project tree.
     "h200": {
         "MODEL_ROOT": "/home/lijie/proj2/xmu/lz/Qwen",
         "DATA_ROOT": "/home/lijie/proj2/xmu/lz/MemoryQwen/contexts",
-        "AIM_REPO": "/home/lijie/proj2/xmu/lz/MemoryQwen/.aim",
     },
     "a800": {
         "MODEL_ROOT": "/mnt/beegfs-storage-a8002/seanlz/Qwen",
         "DATA_ROOT": "/mnt/beegfs-storage-a8002/seanlz/MemoryQwen/contexts",
-        "AIM_REPO": "/mnt/beegfs-storage-a8002/seanlz/MemoryQwen/.aim",
     },
 }
 
@@ -86,18 +80,6 @@ def machine_environ(name: str | None) -> dict[str, str]:
     if canonical is None:
         return {}
     return dict(MACHINES[canonical])
-
-
-def resolve_aim_repo_path(
-    machine: str | None, configured_path: str | None, output_dir: str
-) -> str:
-    """Choose the Aim repository, preserving launch and config overrides."""
-    return (
-        os.environ.get("AIM_REPO")
-        or configured_path
-        or machine_environ(machine).get("AIM_REPO")
-        or str(Path(output_dir) / ".aim")
-    )
 
 
 def resolve_machine(explicit: str | None = None) -> tuple[str | None, bool]:

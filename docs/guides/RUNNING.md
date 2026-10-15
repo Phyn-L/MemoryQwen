@@ -7,6 +7,35 @@ pip install -e '.[train]'
 export CUDA_VISIBLE_DEVICES=0,1,2,3
 ```
 
+## SwanLab 私有实例
+
+训练日志默认发送到自部署的 SwanLab，首次运行前配置私有服务地址及该实例的 API Key：
+
+```bash
+export SWANLAB_HOST="http://<私有服务主机>:<端口>"
+read -rs 'SWANLAB_API_KEY?Private SwanLab API key: '
+export SWANLAB_API_KEY
+bash scripts/train.sh --machine 4090 --config configs/train_baseline.yaml
+```
+
+以上密钥输入命令适用于 zsh。也可提前使用 `swanlab login --host "$SWANLAB_HOST"`
+交互登录私有实例。API Key 不写入 YAML、checkpoint 或版本库。
+`SWANLAB_HOST` 优先于 `logging.swanlab_host`；在线模式缺少显式地址时直接报错。
+H200 上训练时，地址必须能从 H200 访问，`localhost` 指向 H200 自己。
+
+`logging.swanlab_project` 控制项目，`swanlab_workspace` 控制工作空间，
+`swanlab_run_name` 同时控制实验名和 checkpoint 子目录。
+只由主进程上传指标，训练和验证曲线沿用原指标名，横轴为优化器步。
+日志目录默认是 `<运行 checkpoint 目录>/swanlog`，
+可由 `SWANLAB_LOG_DIR` 或 `logging.swanlab_log_dir` 覆盖。
+
+`--resume` 从 checkpoint 恢复 SwanLab run ID，并要求原实验存在；
+`--swanlab-run-id <ID>` 可显式指定要续写的实验。
+
+无服务连接时设置 `SWANLAB_MODE=offline` 保存本地日志，
+或设置 `SWANLAB_MODE=disabled` 关闭实验记录；
+也可在 YAML 中设置 `logging.swanlab_mode`，环境变量优先。
+
 ## 0. 数据
 
 训练数据由 `scripts/data/` 构建，默认落在 `data.files.root`（`${DATA_ROOT:-contexts}`）下：
@@ -74,7 +103,7 @@ bash scripts/train.sh --machine 4090 --config configs/train_qa.yaml \
   --init-from outputs/<recon-run>/last.pt
 ```
 
-`--init-from` 只加载模型的 trainable tensors，不恢复 optimizer、scheduler、global step、W&B run ID 或随机状态；`--resume` 才是同一运行的完整续训。
+`--init-from` 只加载模型的 trainable tensors，不恢复 optimizer、scheduler、global step、SwanLab run ID 或随机状态；`--resume` 才是同一运行的完整续训。
 
 默认每张可见 GPU 一个进程；Python launcher 使用当前解释器的 torchrun，训练代码依据 YAML dtype 初始化 Accelerator。不再在 shell 固定 bf16 或实验超参数。旧 `CONFIG=...`、`MACHINE=...` 和 `NUM_PROCESSES=...` 命令仍可用；新命令推荐通过 CUDA_VISIBLE_DEVICES 选择 GPU。
 

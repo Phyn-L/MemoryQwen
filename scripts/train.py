@@ -27,10 +27,11 @@ from src.pipeline import (
 )
 from utils import CheckpointManager, build_optimizer, build_scheduler, seed_everything
 from utils.config import TrainConfig, dtype_from_name
-from utils.machines import machine_names, resolve_aim_repo_path
+from utils.machines import machine_names
+from utils.tracking import init_tracking
 
 AUTOREGRESSIVE_SECTION = "val_autoregressive"
-# Aim key spelling for the answer metrics; the reconstruction metrics keep their own names.
+# SwanLab key spelling for the answer metrics; the reconstruction metrics keep their own names.
 METRIC_LABELS = {"em": "EM", "f1": "F1", "rouge_l": "ROUGE-L"}
 
 
@@ -112,7 +113,7 @@ def step_postfix(terms: dict[str, float], micro_batches: int, max_ppl_exponent: 
     if "recon_loss" in means:
         postfix["recon"] = f"{means['recon_loss']:.4f}"
     if "qa_loss" in means:
-        # Same definition as `loss/ppl` in the Aim payload: perplexity of the QA objective.
+        # Same definition as `loss/ppl` in the SwanLab payload: perplexity of the QA objective.
         postfix["ppl"] = f"{math.exp(min(means['qa_loss'], max_ppl_exponent)):.2f}"
     return postfix
 
@@ -140,11 +141,11 @@ def _gradient_norm(parameters) -> torch.Tensor:
 
 
 def eval_log_payloads(task_metrics=None):
-    """Log every scalar an evaluation returns, one Aim group per task.
+    """Log every scalar an evaluation returns, one SwanLab group per task.
 
     Generic on purpose: the QA pass reports answer metrics and the teacher-forced
     reconstruction pass reports reconstruction metrics, and a new metric must not need a
-    second list of names here before it becomes visible in Aim.
+    second list of names here before it becomes visible in SwanLab.
     """
     if task_metrics is None:
         return []
@@ -159,7 +160,7 @@ def eval_log_payloads(task_metrics=None):
             elif isinstance(value, (int, float)) and not isinstance(value, bool):
                 # Overall keys keep their snake_case spelling: the answer metrics have been
                 # logged as ``f1``/``em``/``rouge_l`` since the first run and renaming them
-                # would break every existing Aim curve. Only the per-dataset keys are
+                # would break comparisons with historical curves. Only the per-dataset keys are
                 # prettified, exactly as before.
                 payload[f"{section}/{key}"] = value
     return [payload] if payload else []
@@ -270,11 +271,11 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
     if resume:
         run_dir = Path(resume).resolve().parent
         cfg.checkpoint.output_dir = str(run_dir)
-        cfg.logging.aim_run_name = cfg.logging.aim_run_name or run_dir.name
+        cfg.logging.swanlab_run_name = cfg.logging.swanlab_run_name or run_dir.name
         return
     is_main = accelerator is None or accelerator.is_main_process
     run_name = (
-        (cfg.logging.aim_run_name or new_run_name(cfg.model.name_or_path))
+        (cfg.logging.swanlab_run_name or new_run_name(cfg.model.name_or_path))
         if is_main
         else None
     )
@@ -283,7 +284,7 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
         names = [run_name]
         torch.distributed.broadcast_object_list(names, src=0)
         run_name = names[0]
-    cfg.logging.aim_run_name = run_name
+    cfg.logging.swanlab_run_name = run_name
     # Both explicit and generated names live under the configured output root.
     cfg.checkpoint.output_dir = str(Path(cfg.checkpoint.output_dir) / run_name)
 
@@ -309,7 +310,7 @@ def main() -> None:
         "--init-from",
         help="Initialize model weights only; start a new optimizer, schedule and run.",
     )
-    parser.add_argument("--aim-run-id")
+    parser.add_argument("--swanlab-run-id")
     args = parser.parse_args()
 
     cfg = TrainConfig.from_file(args.config, machine=args.machine)
@@ -498,8 +499,8 @@ def main() -> None:
     step = 0
     if args.resume:
         step, saved_run_id = manager.load(args.resume, model, optimizer, scheduler)
-        if not cfg.logging.aim_run_id:
-            cfg.logging.aim_run_id = saved_run_id
+        if not cfg.logging.swanlab_run_id:
+            cfg.logging.swanlab_run_id = saved_run_id
         # The sampler is deterministic only for a fixed sharding; a different rank count
         # would make "skip the batches this run already saw" skip the wrong ones.
         ranks = 1 if accelerator is None else accelerator.num_processes
@@ -520,8 +521,8 @@ def main() -> None:
             flush=True,
         )
     finished = False
-    if args.aim_run_id:
-        cfg.logging.aim_run_id = args.aim_run_id
+    if args.swanlab_run_id:
+        cfg.logging.swanlab_run_id = args.swanlab_run_id
 
     if accelerator is not None:
         # The scheduler is deliberately NOT prepared. `accelerator.prepare` wraps an
@@ -542,24 +543,7 @@ def main() -> None:
 
     run = None
     if accelerator is None or accelerator.is_main_process:
-        try:
-            from aim import Run
-
-            # Launch override, explicit config, selected machine, then output root.
-            aim_repo = resolve_aim_repo_path(
-                cfg.machine, cfg.logging.aim_repo_path, cfg.checkpoint.output_dir
-            )
-            run_kwargs = {
-                "repo": aim_repo,
-                "experiment": cfg.logging.aim_project,
-            }
-            if cfg.logging.aim_run_id:
-                run_kwargs["run_hash"] = cfg.logging.aim_run_id
-            run = Run(**run_kwargs)
-            run["name"] = cfg.logging.aim_run_name
-            run["hparams"] = cfg.to_dict()
-        except ImportError:
-            pass
+        run = init_tracking(cfg)
 
     model.train()
     # Deterministic objective sampling: the distillation position subset is drawn from a
@@ -740,8 +724,7 @@ def main() -> None:
                         "data/recon_probability": float(effective_ratio),
                         "data/micro_batches_per_step": float(micro_batches_in_step),
                     }
-                    for name, value in payload.items():
-                        run.track(value, name=name, step=step)
+                    run.log(payload, step=step)
             is_main = accelerator is None or accelerator.is_main_process
             # Validation runs on EVERY rank.  accelerator.prepare shards the validation
             # loader, so evaluating only on the main process would (a) score one shard
@@ -790,8 +773,7 @@ def main() -> None:
                     )
             if run and is_main:
                 for payload in eval_log_payloads(metrics):
-                    for name, value in payload.items():
-                        run.track(value, name=name, step=step)
+                    run.log(payload, step=step)
             if accelerator is not None:
                 # Resynchronise explicitly so a rank whose shard finished early cannot
                 # race ahead into the next training step.
@@ -819,7 +801,7 @@ def main() -> None:
                     step,
                     cfg.to_dict(),
                     validation_f1=metrics["qa_task"]["f1"],
-                    aim_run_id=getattr(run, "hash", None),
+                    swanlab_run_id=getattr(run, "id", None),
                     world_size=1 if accelerator is None else accelerator.num_processes,
                 )
         if finished:
@@ -836,12 +818,12 @@ def main() -> None:
             step,
             cfg.to_dict(),
             final=True,
-            aim_run_id=getattr(run, "hash", None),
+            swanlab_run_id=getattr(run, "id", None),
             world_size=1 if accelerator is None else accelerator.num_processes,
         )
     progress.close()
     if run:
-        run.close()
+        run.finish()
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 

@@ -57,7 +57,7 @@ python scripts/data/build_cache.py --config configs/train_baseline.yaml --no-pro
 
 ## 运行名称
 
-通过 `logging.aim_run_name: my_experiment` 显式指定运行名称，同时用于 Aim
+通过 `logging.swanlab_run_name: my_experiment` 显式指定运行名称，同时用于 SwanLab
 和 checkpoint 子目录：`<checkpoint.output_dir>/my_experiment/`。
 省略该字段、设为 `null` 或空字符串时，自动使用模型名和时间，例如
 `Qwen1.7B_20260922_153000`。显式名称应使用单个目录名；相同名称会复用同一路径。

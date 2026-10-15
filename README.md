@@ -86,7 +86,7 @@ bash scripts/sync_remote.sh all
 - `scripts/`：现有训练、评测、实验及数据入口；`test.py` 是模型评测入口。
 - `tests/`：回归测试。
 - `configs/`：按模型规模组织的完整 YAML。
-- `outputs/`、`logs/`、`wandb/`：本地运行产物，保持现有路径并由 Git 忽略。
+- `outputs/`、`logs/`、`swanlog/`：本地运行产物，保持现有路径并由 Git 忽略。
 
 文档中的历史实验数字不代表当前重新测量；当前使用说明、历史证据和待验证计划分别索引。
 

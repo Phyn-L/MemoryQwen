@@ -1,7 +1,7 @@
 """Resuming a run: the model/optimizer/LR come back, and so does the position in the stream.
 
 ``--resume`` restores the trainable tensors, the optimizer, the scheduler, the step, the
-RNG and the Aim run hash. What it used to get wrong was the *data*: the epoch loop restarted
+RNG and the SwanLab run hash. What it used to get wrong was the *data*: the epoch loop restarted
 at batch 0 (so a resumed run re-consumed everything it had already seen) and then ran a
 full ``epochs`` pass on top of the loaded step, overrunning ``total_steps``. These tests
 pin the fixed behaviour, which is what makes a crashed arm salvageable without turning the
@@ -104,7 +104,7 @@ def test_a_fresh_run_nests_its_directory_under_the_configured_output_dir():
     output_root = Path(config.checkpoint.output_dir)
     train._configure_run_paths(config, None, None)
     assert Path(config.checkpoint.output_dir).parent == output_root
-    assert config.logging.aim_run_name in config.checkpoint.output_dir
+    assert config.logging.swanlab_run_name in config.checkpoint.output_dir
 
     # Resuming keeps the checkpoint's own directory instead of making a new one.
     resumed = TrainConfig.from_file(REPO / "configs/train_baseline.yaml")

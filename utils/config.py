@@ -417,12 +417,15 @@ class CheckpointConfig:
 
 @dataclass
 class LoggingConfig:
-    aim_project: str = "MemoryQwen"
-    # Optional override of the machine's Aim repository; ``AIM_REPO`` wins at launch.
-    aim_repo_path: str | None = None
+    swanlab_project: str = "MemoryQwen"
+    # Online runs require an explicit private host (or SWANLAB_HOST).
+    swanlab_host: str | None = None
+    swanlab_mode: str = "online"
+    swanlab_log_dir: str | None = None
+    swanlab_workspace: str | None = None
     # Run name and checkpoint subdirectory; empty means model name + timestamp.
-    aim_run_name: str | None = None
-    aim_run_id: str | None = None
+    swanlab_run_name: str | None = None
+    swanlab_run_id: str | None = None
     # Cadence of the training-loss scalars (``train/*``), in optimizer steps. The two
     # evaluation sections keep their own cadence, so this only controls how densely the
     # loss curves are sampled. 10 is the historical value; a single-epoch run can afford
@@ -443,7 +446,7 @@ class TrainConfig:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     # Which entry of ``utils/machines.py::MACHINES`` supplied the paths (None = the config's
-    # own defaults). Recorded so a run's aim config and checkpoint say where it ran.
+    # own defaults). Recorded so a run's SwanLab config and checkpoint say where it ran.
     machine: str | None = None
 
     @classmethod
@@ -518,6 +521,7 @@ class TrainConfig:
                 f"move {'these fields' if len(moved) > 1 else 'this field'} under `loss:`"
             )
         checkpoint_values = dict(values.get("checkpoint", {}))
+        logging_values = dict(values.get("logging", {}))
         # Legacy checkpoints embed this removed scheduling field.
         checkpoint_values.pop("save_every_steps", None)
         evaluation_values = dict(values.get("evaluation", {}))
@@ -556,7 +560,7 @@ class TrainConfig:
             evaluation=EvaluationConfig(**evaluation_values),
             training=TrainingConfig(**values.get("training", {})),
             checkpoint=CheckpointConfig(**checkpoint_values),
-            logging=LoggingConfig(**values.get("logging", {})),
+            logging=LoggingConfig(**logging_values),
             machine=resolved,
         )
 
@@ -725,6 +729,8 @@ class TrainConfig:
             raise ValueError("evaluation.max_eval_sample_per_dataset must be positive")
         if self.logging.log_every <= 0:
             raise ValueError("logging.log_every must be positive")
+        if self.logging.swanlab_mode not in {"online", "offline", "local", "disabled"}:
+            raise ValueError("logging.swanlab_mode must be online, offline, local or disabled")
 
 
 def dtype_from_name(name: str):

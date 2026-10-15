@@ -156,8 +156,8 @@ for name, overrides in runs.items():
     for section, values in overrides.items():
         config.setdefault(section, {}).update(values)
     config.setdefault("checkpoint", {})["output_dir"] = str(out_root)
-    config.setdefault("logging", {})["aim_run_name"] = name
-    config["logging"]["aim_run_id"] = None
+    config.setdefault("logging", {})["swanlab_run_name"] = name
+    config["logging"]["swanlab_run_id"] = None
     config["machine"] = os.environ["MACHINE"]
 
     TrainConfig.from_dict(config).validate()

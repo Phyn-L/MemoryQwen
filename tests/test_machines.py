@@ -29,12 +29,11 @@ from utils.machines import (  # noqa: E402
     fill_missing,
     machine_environ,
     machine_names,
-    resolve_aim_repo_path,
 )
 
 REPO = Path(__file__).resolve().parent.parent
 CONFIG = REPO / "configs/train_baseline.yaml"
-MACHINE_VARIABLES = ("MACHINE", "MODEL_ROOT", "DATA_ROOT", "AIM_REPO")
+MACHINE_VARIABLES = ("MACHINE", "MODEL_ROOT", "DATA_ROOT")
 
 
 class _Hidden:
@@ -76,8 +75,6 @@ def test_the_table_holds_both_machines_with_distinct_paths():
     # directory, which is what scripts/data/ writes into.
     assert MACHINES["4090"]["DATA_ROOT"] == "/data/lz/MemoryQwen/contexts"
     assert MACHINES["h200"]["DATA_ROOT"] == "/home/lijie/proj2/xmu/lz/MemoryQwen/contexts"
-    assert MACHINES["4090"]["AIM_REPO"] == "/data/lz/MemoryQwen/.aim"
-    assert MACHINES["h200"]["AIM_REPO"] == "/home/lijie/proj2/xmu/lz/MemoryQwen/.aim"
 
 
 def test_names_and_aliases_resolve_to_the_canonical_machine():
@@ -107,7 +104,7 @@ def test_an_explicit_machine_supplies_the_paths_even_over_an_exported_one():
         assert cfg.machine == "h200"
         assert cfg.data.root == MACHINES["h200"]["DATA_ROOT"]
         assert cfg.model.name_or_path.startswith(MACHINES["h200"]["MODEL_ROOT"] + "/models--")
-        # ... and the config records it for the run's Aim run / checkpoint.
+        # ... and the config records it for the run's SwanLab run / checkpoint.
         assert cfg.to_dict()["machine"] == "h200"
 
 
@@ -128,33 +125,6 @@ def test_the_machine_field_in_the_config_is_honoured(tmp_path):
         cfg = TrainConfig.from_file(path)
         assert cfg.machine == "h200"
         assert cfg.data.root == MACHINES["h200"]["DATA_ROOT"]
-
-
-def test_aim_repo_uses_machine_defaults_and_overrides():
-    with _Hidden(hostname="xmu90"):
-        local = TrainConfig.from_file(CONFIG)
-        assert resolve_aim_repo_path(
-            local.machine, local.logging.aim_repo_path, local.checkpoint.output_dir
-        ) == MACHINES["4090"]["AIM_REPO"]
-        remote = TrainConfig.from_file(CONFIG, machine="h200")
-        assert resolve_aim_repo_path(
-            remote.machine, remote.logging.aim_repo_path, remote.checkpoint.output_dir
-        ) == MACHINES["h200"]["AIM_REPO"]
-        assert resolve_aim_repo_path("h200", "/from/config", "outputs") == "/from/config"
-        os.environ["AIM_REPO"] = "/from/environment"
-        assert resolve_aim_repo_path("h200", "/from/config", "outputs") == "/from/environment"
-    with _Hidden():
-        assert resolve_aim_repo_path(None, None, "outputs") == "outputs/.aim"
-
-
-def test_h200_baseline_uses_selected_machine_aim_repo():
-    with _Hidden(hostname="gpu-lg-cmc-h-h200-0117"):
-        cfg = TrainConfig.from_file(REPO / "configs/h200_train_baseline.yaml")
-        assert cfg.machine == "h200"
-        assert cfg.logging.aim_repo_path is None
-        assert resolve_aim_repo_path(
-            cfg.machine, cfg.logging.aim_repo_path, cfg.checkpoint.output_dir
-        ) == MACHINES["h200"]["AIM_REPO"]
 
 
 def test_the_environment_variable_names_the_machine_before_the_hostname():

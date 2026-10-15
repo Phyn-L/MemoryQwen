@@ -1,6 +1,6 @@
 """Evaluation logging contract.
 
-Two passes report into Aim: the autoregressive QA pass (answer metrics) and the
+Two passes report into SwanLab: the autoregressive QA pass (answer metrics) and the
 teacher-forced reconstruction pass (``recon_*`` metrics). The payload builder is deliberately
 generic -- it logs the scalars an evaluation returned, so a new metric only has to be returned
 by the evaluator, not also registered here.

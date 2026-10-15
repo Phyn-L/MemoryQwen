@@ -2,8 +2,13 @@
 #
 # 这一层不能单独运行（没有 memory 结构，也没有模型选择）：实验配置通过
 #   _base_: [harness.yaml, models/<模型>.yaml]
-checkpoint:
-  output_dir: outputs  # 检查点与日志的输出目录
+training:
+  batch_size: 4  # 每个进程的 micro-batch 大小
+  gradient_accumulation_steps: 1  # 每个优化器步累积的 micro-batch 数
+  epochs: 1  # 训练轮数
+  max_grad_norm: 1.0  # 梯度裁剪最大范数
+  seed: 42  # 随机种子
+  deterministic: true  # 是否启用确定性算法
 data:
   # 数据文件路径：1QA 数据由 scripts/data/ 写入 <root>/1qa/
   files:
@@ -36,18 +41,6 @@ data:
     # 验证集：评估时用 training.seed 对每个数据集独立随机抽取至多 N 条 QA。
     validation_datasets: [squad, msmarcov1.1, msmarcov2.1, hotpotqa(distractor), race]
     validation_max_samples: null
-evaluation:
-  autoregressive_every: 5000  # 自回归验证与 checkpoint 的训练步间隔
-  max_eval_sample_per_dataset: 2560  # 每个数据集的自回归评估 QA 条数上限，无总条数限制
-  max_new_tokens: 64  # 自回归验证生成 token 上限
-  qa_batch_size: 4  # QA 验证批大小
-  recon_metrics: true  # teacher-forced recon 指标（无需生成）
-  recon_autoregressive: false  # 自回归 recon 评估（昂贵，默认关闭）
-logging:
-  aim_run_name: null  # Optional; defaults to model name + timestamp.
-  aim_repo_path: null  # Defaults to the selected machine's Aim repository.
-  log_every: 100  # 训练日志记录间隔（步）
-  aim_project: MemoryQwen  # Aim 项目名称
 loss:
   qa_weight: 1.0  # 问答目标损失权重
   recon_weight: 1.0  # 重建目标损失权重
@@ -57,6 +50,13 @@ loss:
   distill_topk: 0  # 蒸馏教师分布保留的 top-k，0 表示完整分布
   distill_entropy_weight: true  # 是否按教师分布熵加权蒸馏位置
   max_logits_rows: 256  # 每次词表投影的行数上限（显存/核数量权衡）
+evaluation:
+  autoregressive_every: 5000  # 自回归验证与 checkpoint 的训练步间隔
+  max_eval_sample_per_dataset: 2560  # 每个数据集的自回归评估 QA 条数上限，无总条数限制
+  max_new_tokens: 64  # 自回归验证生成 token 上限
+  qa_batch_size: 4  # QA 验证批大小
+  recon_metrics: true  # teacher-forced recon 指标（无需生成）
+  recon_autoregressive: false  # 自回归 recon 评估（昂贵，默认关闭）
 optimizer:
   name: adamw  # 优化器名称
   lr: 0.0001  # 学习率
@@ -64,10 +64,13 @@ optimizer:
 scheduler:
   name: cosine  # 调度器名称
   warmup_steps: 5000  # 学习率预热步数
-training:
-  batch_size: 4  # 每个进程的 micro-batch 大小
-  gradient_accumulation_steps: 1  # 每个优化器步累积的 micro-batch 数
-  epochs: 1  # 训练轮数
-  max_grad_norm: 1.0  # 梯度裁剪最大范数
-  seed: 42  # 随机种子
-  deterministic: true  # 是否启用确定性算法
+checkpoint:
+  output_dir: outputs  # 检查点与日志的输出目录
+logging:
+  swanlab_run_name: null  # Optional; defaults to model name + timestamp.
+  swanlab_host: http://127.0.0.1:8000
+  swanlab_mode: online  # online / offline / local / disabled
+  swanlab_log_dir: swanlab
+  swanlab_workspace: phyn
+  log_every: 100  # 训练日志记录间隔（步）
+  swanlab_project: MemoryQwen  # SwanLab 项目名称

@@ -25,3 +25,7 @@ logs/
 
 # Local Hugging Face cache
 .hf_cache/
+
+# SwanLab local logs and per-project credentials
+swanlog/
+.swanlab/
