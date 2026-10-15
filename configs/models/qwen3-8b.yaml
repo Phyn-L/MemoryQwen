@@ -4,6 +4,7 @@ model:
   torch_dtype: bfloat16  # 冻结骨干模型的数据类型
   attn_implementation: sdpa  # 注意力实现
   context_gradient_checkpointing: true  # 是否对 context 前向启用梯度检查点
+  context_gradient_checkpointing_every_n_layers: null  # null 时取 ceil(sqrt(层数))，正整数可手动指定
   trainable_dtype: float32  # 可训练参数的数据类型
   lora_rank: 8  # LoRA 秩
   lora_alpha: 16.0  # LoRA 缩放系数

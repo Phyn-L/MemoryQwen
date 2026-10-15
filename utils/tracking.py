@@ -1,13 +1,13 @@
 """Main-process experiment tracking against a private SwanLab instance."""
 
 import os
-from pathlib import Path
 
 from utils.config import TrainConfig
 
 
 def init_tracking(cfg: TrainConfig):
     logging = cfg.logging
+    logging.swanlab_log_dir = cfg.checkpoint.output_dir
     mode = os.environ.get("SWANLAB_MODE") or logging.swanlab_mode
     if mode not in {"online", "offline", "local", "disabled"}:
         raise ValueError(f"Invalid SwanLab mode: {mode!r}")
@@ -30,9 +30,7 @@ def init_tracking(cfg: TrainConfig):
         name=logging.swanlab_run_name,
         config=cfg.to_dict(),
         mode=mode,
-        log_dir=os.environ.get("SWANLAB_LOG_DIR")
-        or logging.swanlab_log_dir
-        or str(Path(cfg.checkpoint.output_dir) / "swanlog"),
+        log_dir=logging.swanlab_log_dir,
         id=logging.swanlab_run_id,
         resume="must" if logging.swanlab_run_id else "never",
     )

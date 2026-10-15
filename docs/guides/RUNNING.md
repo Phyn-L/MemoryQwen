@@ -24,10 +24,12 @@ bash scripts/train.sh --machine 4090 --config configs/train_baseline.yaml
 H200 上训练时，地址必须能从 H200 访问，`localhost` 指向 H200 自己。
 
 `logging.swanlab_project` 控制项目，`swanlab_workspace` 控制工作空间，
-`swanlab_run_name` 同时控制实验名和 checkpoint 子目录。
+`swanlab_run_name` 控制看板中的实验名。
 只由主进程上传指标，训练和验证曲线沿用原指标名，横轴为优化器步。
-日志目录默认是 `<运行 checkpoint 目录>/swanlog`，
-可由 `SWANLAB_LOG_DIR` 或 `logging.swanlab_log_dir` 覆盖。
+checkpoint 默认保存在 `outputs/{model-name}/{model-name}_{YYYYMMDD_HHMMSS}/`，
+模型名沿用项目标签规则，例如 `Qwen1.7B`、`Qwen8B`。
+`checkpoint.output_dir` 可设置输出根目录；运行时会追加模型名和带时间的运行目录。
+`logging.swanlab_log_dir` 自动设为最终 checkpoint 目录，不再接受独立路径覆盖。
 
 `--resume` 从 checkpoint 恢复 SwanLab run ID，并要求原实验存在；
 `--swanlab-run-id <ID>` 可显式指定要续写的实验。
@@ -68,6 +70,11 @@ bash scripts/train.sh --machine h200 --config configs/train_baseline.yaml --resu
 ```
 
 学习率、batch size、数据集、memory 大小、reader 开关、dtype、调度、日志和 checkpoint 路径来自配置：`configs/harness.yaml`（共享 harness）+ `configs/models/<模型>.yaml`（模型层）+ 实验文件（`_base_` 组合前两者，只写自己的差异）。恢复训练必须使用与原运行相符的配置。`<run>` 替换为实际路径。
+
+`--resume` 在 sampler 层跳过已消费的 batch，这些 batch 不再访问 Dataset 或执行
+collate/tokenization。多卡跳过在 Accelerate 分片之后进行，保留各 rank 的顺序和尾部补齐；
+要复现原数据流，需保持相同的 batch size、梯度累积、GPU 数、seed 和数据配置。
+启动时仍需读取 JSONL 数据集并恢复模型及 optimizer checkpoint。
 
 显存不够时用梯度累积而不是缩小有效 batch：
 

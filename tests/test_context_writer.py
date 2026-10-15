@@ -126,6 +126,43 @@ def test_context_checkpointing_preserves_cache_outputs_and_gradients():
             torch.testing.assert_close(p.grad, q.grad, atol=1e-6, rtol=1e-4)
 
 
+@pytest.mark.parametrize(
+    ("interval", "expected"),
+    [
+        (None, [True, False, True]),
+        (1, [True, True, True]),
+        (2, [True, False, True]),
+        (3, [True, False, False]),
+    ],
+)
+def test_context_checkpointing_interval_selects_layers(interval, expected):
+    model = tiny_model(
+        context_gradient_checkpointing=True,
+        context_gradient_checkpointing_every_n_layers=interval,
+    ).train()
+    observed = []
+    context_call = 0
+
+    def observe_checkpointed_layers(*_):
+        nonlocal context_call
+        if context_call == 0:
+            observed.extend(
+                layer.gradient_checkpointing for layer in model._transformer_body.layers
+            )
+        context_call += 1
+
+    handle = model._transformer_body.register_forward_pre_hook(
+        observe_checkpointed_layers
+    )
+    try:
+        encode(model)
+    finally:
+        handle.remove()
+    assert model.context_gradient_checkpointing_interval == (interval or 2)
+    assert observed == expected
+    assert not any(layer.gradient_checkpointing for layer in model._transformer_body.layers)
+
+
 def test_context_checkpointing_restores_state_after_forward_failure(monkeypatch):
     model = tiny_model(context_layer_indices=(-1, 0), context_gradient_checkpointing=True).train()
     layers = model._transformer_body.layers

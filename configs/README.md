@@ -57,10 +57,12 @@ python scripts/data/build_cache.py --config configs/train_baseline.yaml --no-pro
 
 ## 运行名称
 
-通过 `logging.swanlab_run_name: my_experiment` 显式指定运行名称，同时用于 SwanLab
-和 checkpoint 子目录：`<checkpoint.output_dir>/my_experiment/`。
+通过 `logging.swanlab_run_name: my_experiment` 显式指定 SwanLab 看板中的实验名称。
+checkpoint 目录始终使用 `<checkpoint.output_dir>/{model-name}/{model-name}_{time}/`，
+默认例如 `outputs/Qwen1.7B/Qwen1.7B_20261015_153000/`。
+`logging.swanlab_log_dir` 自动设为同一 checkpoint 目录。
 省略该字段、设为 `null` 或空字符串时，自动使用模型名和时间，例如
-`Qwen1.7B_20260922_153000`。显式名称应使用单个目录名；相同名称会复用同一路径。
+`Qwen1.7B_20260922_153000`。显式看板名称不影响输出路径。
 `--resume` 始终保留 checkpoint 所在目录。
 
 ## 损失字段
@@ -109,7 +111,7 @@ checkpoint 只在评估步保存，即 `evaluation.autoregressive_every`，没�
 
 context block 的层编号使用零基索引：`0` 是第一个 decoder block，`-1` 是最后一个 block；不存在 embedding 层编号。中间层 hook 取得 block 输出（尚未经过最终 Qwen norm），`-1` 使用最终 `last_hidden_state`（已经过最终 norm），各层由可学习 softmax 权重混合。Qwen3-1.7B 的窗口上限从实际 backbone config 读取；当前 snapshot 为 40960。
 
-长 context 的 batch size 不能只按固定 memory 长度估算显存：未 padding 的 batch 可走 SDPA 的高效路径，带 padding 的 batch 可能生成较大的 attention mask。`context_gradient_checkpointing` 只重算第一次 context pass 的 block，降低训练显存但增加反向计算时间。
+长 context 的 batch size 不能只按固定 memory 长度估算显存：未 padding 的 batch 可走 SDPA 的高效路径，带 padding 的 batch 可能生成较大的 attention mask。`context_gradient_checkpointing` 只重算第一次 context pass 的 block，降低训练显存但增加反向计算时间。`model.context_gradient_checkpointing_every_n_layers` 控制每隔几层启用一次 checkpoint；默认 `null` 时使用 `ceil(sqrt(Qwen层数))`，也可设为正整数手动指定。
 
 ## Readout 模式
 

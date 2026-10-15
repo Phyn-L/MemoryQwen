@@ -19,7 +19,7 @@ QA 将 `[memory, question]` 共同视为 user、answer 视为 assistant；Recon 
 
 Qwen 的 `max_position_embeddings` 是模型窗口，记作 `ContextMemoryModel.window_limit`（当前 Qwen3-1.7B checkpoint 为 40960）。`data.max_context_tokens` 是训练用的 context 上限，构造参数 `max_context_tokens` 会被真正存下来并生效：超过它的 context 直接报错，而 memory + prompt + target 的总长度只受 `window_limit` 约束。writer 接受上限内的非空 context。层编号是零基 decoder block 编号：中间层 hook 取得未经过最终 norm 的 block 输出，`-1` 使用经过最终 norm 的 `last_hidden_state`，不包含 embedding 层。带 context 的 AE pass 还需要 `M + L <=` 模型窗口。
 
-冻结的 backbone 参数和进入 Qwen 的输入保持 checkpoint dtype（通常 bfloat16）；resampler、任务 embedding、层融合权重和 LoRA 使用 `model.trainable_dtype`（默认 float32）。长 context 可启用 `model.context_gradient_checkpointing: true`；它只作用于第一次 context pass，短 memory pass 和 QA cache pass 不启用 checkpointing，因此反向会重算 context block。
+冻结的 backbone 参数和进入 Qwen 的输入保持 checkpoint dtype（通常 bfloat16）；resampler、任务 embedding、层融合权重和 LoRA 使用 `model.trainable_dtype`（默认 float32）。长 context 可启用 `model.context_gradient_checkpointing: true`；它只作用于第一次 context pass，短 memory pass 和 QA cache pass 不启用 checkpointing，因此反向会重算 context block。`model.context_gradient_checkpointing_every_n_layers` 可指定启用间隔，默认 `null` 时自动取 `ceil(sqrt(Qwen层数))`。
 
 训练支持三种任务组合：`train_tasks: qa`、`train_tasks: recon` 和 `train_tasks: mix`。混合训练为每个 context 同时构造 QA 与完整 context Recon 监督，`recon_schedule` 调整损失权重，并由 `recon_ratio_min` 保证 Recon 不会消失。Recon 不输入 question token，只使用 `recon_task_embedding` 和 memory；QA 直接输入 conversation。位置编码只有一个来源：`ContextMemoryModel`/`compact_positions(valid_mask, start)` 按“该 token 在本段有效 token 中的序号”给出绝对位置。context 编码、QA 的 question/read-out/answer 段、Recon 的 task 段和生成路径都调用它，因此同一段 token 在训练、编码与生成中的编号一致，而且与 padding 方向无关（左 padding 与右 padding 得到同一份 memory；旧实现用 `arange`，只在右 padding 下正确）。
 

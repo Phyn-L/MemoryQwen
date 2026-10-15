@@ -751,6 +751,7 @@ class SortishSampler(Sampler[int]):
             seed,
             0,
         )
+        self.start_batch = 0
         metadata = self._cache_metadata(tokenizer, chat_template_enable_thinking)
         self.lengths = self._load_or_build_lengths(
             tokenizer,
@@ -847,14 +848,19 @@ class SortishSampler(Sampler[int]):
     def __iter__(self):
         batches = list(self.buckets)
         random.Random(self.seed + self.epoch).shuffle(batches)
-        return iter([i for batch in batches for i in batch])
+        indices = [i for batch in batches for i in batch]
+        return iter(indices[self.start_batch * self.batch_size:])
 
     def __len__(self):
-        return sum(len(batch) for batch in self.buckets)
+        return max(0, sum(len(batch) for batch in self.buckets) - self.start_batch * self.batch_size)
 
     def set_epoch(self, epoch):
         self.epoch = epoch
         self._rebuild()
+
+    def set_start_batch(self, batch: int = 0):
+        """Start iteration at a batch boundary without materializing skipped samples."""
+        self.start_batch = max(0, int(batch))
 
 
 def _encode(tokenizer, texts, max_length, padding_side=None):

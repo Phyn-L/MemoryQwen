@@ -41,7 +41,8 @@ def test_private_host_and_resume_are_forwarded(monkeypatch, tmp_path):
     )
     args = sdk.init.call_args.kwargs
     assert args["id"] == "existing-run" and args["resume"] == "must"
-    assert args["log_dir"] == str(tmp_path / "swanlog")
+    assert args["log_dir"] == str(tmp_path)
+    assert args["config"]["logging"]["swanlab_log_dir"] == str(tmp_path)
     assert args["config"]["logging"]["swanlab_run_id"] == "existing-run"
 
 

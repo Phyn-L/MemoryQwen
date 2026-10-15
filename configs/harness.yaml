@@ -3,8 +3,8 @@
 # 这一层不能单独运行（没有 memory 结构，也没有模型选择）：实验配置通过
 #   _base_: [harness.yaml, models/<模型>.yaml]
 training:
-  batch_size: 4  # 每个进程的 micro-batch 大小
-  gradient_accumulation_steps: 1  # 每个优化器步累积的 micro-batch 数
+  batch_size: 2  # 每个进程的 micro-batch 大小
+  gradient_accumulation_steps: 2  # 每个优化器步累积的 micro-batch 数
   epochs: 1  # 训练轮数
   max_grad_norm: 1.0  # 梯度裁剪最大范数
   seed: 42  # 随机种子
@@ -65,12 +65,12 @@ scheduler:
   name: cosine  # 调度器名称
   warmup_steps: 5000  # 学习率预热步数
 checkpoint:
-  output_dir: outputs  # 检查点与日志的输出目录
+  output_dir: outputs  # 输出根目录，运行时追加 {model-name}/{model-name}_{time}
 logging:
   swanlab_run_name: null  # Optional; defaults to model name + timestamp.
-  swanlab_host: http://127.0.0.1:8000
+  swanlab_host: http://10.24.116.90:8000
   swanlab_mode: online  # online / offline / local / disabled
-  swanlab_log_dir: swanlab
+  swanlab_log_dir: null  # 自动设置为最终 checkpoint 输出目录
   swanlab_workspace: phyn
   log_every: 100  # 训练日志记录间隔（步）
   swanlab_project: MemoryQwen  # SwanLab 项目名称

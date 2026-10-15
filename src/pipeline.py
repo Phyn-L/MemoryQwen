@@ -44,7 +44,7 @@ def data_cache_dir(cfg) -> Path:
 
 
 def new_run_name(model_path: str) -> str:
-    """``Qwen8B_20260916_213847`` — used for the W&B run and the checkpoint directory."""
+    """``Qwen8B_20260916_213847`` — default experiment name and checkpoint directory."""
     return f"{model_run_label(model_path)}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
 

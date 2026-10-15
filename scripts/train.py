@@ -22,6 +22,7 @@ from src.pipeline import (
     format_evaluation_sample_counts,
     make_collate,
     make_context_dataset,
+    model_run_label,
     new_run_name,
     resolve_split_limit,
 )
@@ -74,6 +75,22 @@ def micro_batch_skip(step: int, steps_per_epoch: int, accumulation: int) -> int:
     if steps_per_epoch <= 0:
         return 0
     return (step % steps_per_epoch) * max(1, int(accumulation))
+
+
+def trainable_parameter_report(model) -> tuple[list[tuple[str, tuple[int, ...], int]], int]:
+    """Describe every trainable tensor; frozen LLM backbone weights are excluded."""
+    parameters = [
+        (name, tuple(parameter.shape), parameter.numel())
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad
+    ]
+    return parameters, sum(count for _, _, count in parameters)
+
+
+def context_checkpoint_interval(model, configured_interval: int | None) -> int:
+    """Resolve the configured or default checkpoint interval from the loaded backbone."""
+    depth = int(model.qwen.config.num_hidden_layers)
+    return configured_interval or math.ceil(math.sqrt(depth))
 
 
 def should_evaluate(step: int, every: int, total_steps: int) -> bool:
@@ -272,10 +289,11 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
         run_dir = Path(resume).resolve().parent
         cfg.checkpoint.output_dir = str(run_dir)
         cfg.logging.swanlab_run_name = cfg.logging.swanlab_run_name or run_dir.name
+        cfg.logging.swanlab_log_dir = cfg.checkpoint.output_dir
         return
     is_main = accelerator is None or accelerator.is_main_process
     run_name = (
-        (cfg.logging.swanlab_run_name or new_run_name(cfg.model.name_or_path))
+        new_run_name(cfg.model.name_or_path)
         if is_main
         else None
     )
@@ -284,9 +302,11 @@ def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> N
         names = [run_name]
         torch.distributed.broadcast_object_list(names, src=0)
         run_name = names[0]
-    cfg.logging.swanlab_run_name = run_name
-    # Both explicit and generated names live under the configured output root.
-    cfg.checkpoint.output_dir = str(Path(cfg.checkpoint.output_dir) / run_name)
+    cfg.logging.swanlab_run_name = cfg.logging.swanlab_run_name or run_name
+    cfg.checkpoint.output_dir = str(
+        Path(cfg.checkpoint.output_dir) / model_run_label(cfg.model.name_or_path) / run_name
+    )
+    cfg.logging.swanlab_log_dir = cfg.checkpoint.output_dir
 
 
 def main() -> None:
@@ -345,6 +365,24 @@ def main() -> None:
         if int(os.environ.get("WORLD_SIZE", "1")) > 1:
             raise RuntimeError("Multi-GPU training requires accelerate") from error
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    if accelerator is None or accelerator.is_main_process:
+        checkpoint_interval = context_checkpoint_interval(
+            model, cfg.model.context_gradient_checkpointing_every_n_layers,
+        )
+        checkpoint_state = (
+            f"enabled every_n_layers={checkpoint_interval}"
+            if cfg.model.context_gradient_checkpointing else "disabled"
+        )
+        print(f"[startup] context_gradient_checkpointing={checkpoint_state}", flush=True)
+        trainable, trainable_total = trainable_parameter_report(model)
+        print(
+            f"[startup] trainable parameters (LLM frozen weights excluded): "
+            f"{len(trainable)} tensors, {trainable_total:,} parameters",
+            flush=True,
+        )
+        for name, shape, count in trainable:
+            print(f"[startup]   {name} shape={shape} numel={count:,}", flush=True)
 
     # The filtered cache (`cache/train.jsonl` + `cache/validation.jsonl`) is built from the
     # raw meta splits with this config's filters. Building it here keeps "which rows does this
@@ -479,7 +517,7 @@ def main() -> None:
             "schedule: "
             f"machine={cfg.machine or 'config-defaults'} "
             f"steps={total_steps} (epochs={cfg.training.epochs}) "
-            f"batch={cfg.training.batch_size}x{ranks} ranks={cfg.training.batch_size * ranks} "
+            f"batch={cfg.training.batch_size}x{ranks} ranks={ranks} "
             f"accum={accumulation} effective_batch={cfg.training.batch_size * ranks * accumulation} "
             f"warmup={cfg.scheduler.warmup_steps} "
             f"autoregressive_every={cfg.evaluation.autoregressive_every} "
@@ -514,10 +552,10 @@ def main() -> None:
             )
     start_epoch, skip_batches = resume_plan(step, steps_per_epoch, cfg.training.epochs)
     skip_micro_batches = micro_batch_skip(step, steps_per_epoch, accumulation)
-    if step:
+    if step and (accelerator is None or accelerator.is_main_process):
         print(
             f"resume: step {step}/{total_steps} -> epoch {start_epoch + 1}/{cfg.training.epochs}, "
-            f"skipping {skip_micro_batches} already-consumed micro-batches",
+            f"skipping {skip_micro_batches} micro-batches at the sampler (no loading/collate)",
             flush=True,
         )
     finished = False
@@ -564,11 +602,24 @@ def main() -> None:
     )
     for epoch in range(start_epoch, cfg.training.epochs):
         sampler.set_epoch(epoch)
+        sampler.set_start_batch(0)
         # Keep the deterministic QA-turn sampling of the collate on the same epoch.
         train_collate.set_epoch(epoch)
-        for batch_index, batch in enumerate(train_loader):
-            if epoch == start_epoch and batch_index < skip_micro_batches:
-                continue
+        epoch_loader = train_loader
+        batch_offset = skip_micro_batches if epoch == start_epoch else 0
+        if batch_offset:
+            if accelerator is not None:
+                # This wraps the prepared batch sampler, so skipped indices never reach
+                # Dataset.__getitem__ or collate_fn on any rank.
+                from accelerate.data_loader import skip_first_batches
+
+                epoch_loader = skip_first_batches(train_loader, skip_micro_batches)
+            else:
+                sampler.set_start_batch(skip_micro_batches)
+                epoch_loader = train_loader
+        if hasattr(epoch_loader, "set_epoch"):
+            epoch_loader.set_epoch(epoch)
+        for batch_index, batch in enumerate(epoch_loader, start=batch_offset):
             if step >= total_steps:
                 finished = True
                 break

@@ -14,12 +14,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
 import torch
 from torch import nn
+from torch.utils.data import DataLoader, Dataset
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from src.data import SortishSampler
 from utils.checkpoint import CheckpointManager  # noqa: E402
 
 TRAIN_PY = REPO / "scripts" / "train.py"
@@ -37,6 +40,86 @@ class _Tiny(nn.Module):
     def __init__(self):
         super().__init__()
         self.lin = nn.Linear(3, 2)
+
+
+class _CountingDataset(Dataset):
+    def __init__(self, size):
+        self.size = size
+        self.reads = []
+        self.collated = []
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, index):
+        self.reads.append(index)
+        return index
+
+    def collate(self, indices):
+        self.collated.extend(indices)
+        return indices
+
+
+def _counting_loader(monkeypatch, size):
+    dataset = _CountingDataset(size)
+    monkeypatch.setattr(
+        SortishSampler, "_load_or_build_lengths",
+        lambda self, *args: list(range(len(self.dataset))),
+    )
+    sampler = SortishSampler(dataset, None, batch_size=4, bucket_multiplier=2)
+    return DataLoader(dataset, batch_size=4, sampler=sampler, collate_fn=dataset.collate), sampler
+
+
+def test_sampler_offset_skips_dataset_reads_and_collation(monkeypatch):
+    loader, sampler = _counting_loader(monkeypatch, 29)
+    sampler.set_epoch(2)
+    expected = list(loader)[3:]
+    loader.dataset.reads.clear()
+    loader.dataset.collated.clear()
+    sampler.set_start_batch(3)
+    assert list(loader) == expected
+    assert len(loader) == len(expected)
+    wanted = [index for batch in expected for index in batch]
+    assert loader.dataset.reads == loader.dataset.collated == wanted
+    sampler.set_start_batch(0)
+    assert len(loader) == 8
+
+
+def test_startup_report_lists_trainable_tensors_and_resolves_checkpoint_interval():
+    module = _train_module()
+    model = nn.Sequential(nn.Linear(3, 2), nn.Linear(2, 1))
+    model[0].weight.requires_grad_(False)
+
+    parameters, total = module.trainable_parameter_report(model)
+    assert [name for name, _, _ in parameters] == ["0.bias", "1.weight", "1.bias"]
+    assert total == sum(count for _, _, count in parameters)
+
+    model.qwen = nn.Module()
+    model.qwen.config = type("Config", (), {"num_hidden_layers": 28})()
+    assert module.context_checkpoint_interval(model, None) == 6
+    assert module.context_checkpoint_interval(model, 3) == 3
+
+
+@pytest.mark.parametrize("rank", range(4))
+@pytest.mark.parametrize("epoch", (0, 2))
+def test_resume_keeps_sharded_tail_and_never_loads_skipped_batches(monkeypatch, rank, epoch):
+    from accelerate.data_loader import prepare_data_loader, skip_first_batches
+
+    loader, sampler = _counting_loader(monkeypatch, 53)
+    prepared = prepare_data_loader(
+        loader, num_processes=4, process_index=rank, device=torch.device("cpu"),
+    )
+    prepared.set_epoch(epoch)
+    expected = list(prepared)[2:]
+    loader.dataset.reads.clear()
+    loader.dataset.collated.clear()
+    sampler.set_epoch(epoch)
+    resumed = skip_first_batches(prepared, 2)
+    resumed.set_epoch(epoch)
+    assert list(resumed) == expected
+    assert len(resumed) == len(expected)
+    wanted = [index for batch in expected for index in batch]
+    assert loader.dataset.reads == loader.dataset.collated == wanted
 
 
 def test_resume_plan_covers_the_three_cases():
@@ -103,8 +186,9 @@ def test_a_fresh_run_nests_its_directory_under_the_configured_output_dir():
     config = TrainConfig.from_file(REPO / "configs/train_baseline.yaml")
     output_root = Path(config.checkpoint.output_dir)
     train._configure_run_paths(config, None, None)
-    assert Path(config.checkpoint.output_dir).parent == output_root
+    assert Path(config.checkpoint.output_dir).parent == output_root / "Qwen1.7B"
     assert config.logging.swanlab_run_name in config.checkpoint.output_dir
+    assert config.logging.swanlab_log_dir == config.checkpoint.output_dir
 
     # Resuming keeps the checkpoint's own directory instead of making a new one.
     resumed = TrainConfig.from_file(REPO / "configs/train_baseline.yaml")
@@ -114,6 +198,22 @@ def test_a_fresh_run_nests_its_directory_under_the_configured_output_dir():
     assert Path(resumed.checkpoint.output_dir).resolve() == Path(
         "outputs/ab_h200_on/Qwen1.7B_x"
     ).resolve()
+    assert resumed.logging.swanlab_log_dir == resumed.checkpoint.output_dir
+
+
+def test_dashboard_name_does_not_replace_timestamped_directory():
+    from utils.config import TrainConfig
+
+    train = _train_module()
+    config = TrainConfig()
+    config.model.name_or_path = "/models/Qwen3-8B"
+    config.logging.swanlab_run_name = "reader-off"
+    config.logging.swanlab_log_dir = "/old/logs"
+    train.new_run_name = lambda _: "Qwen8B_20261015_123456"
+    train._configure_run_paths(config, None, None)
+    assert config.checkpoint.output_dir == "outputs/Qwen8B/Qwen8B_20261015_123456"
+    assert config.logging.swanlab_log_dir == config.checkpoint.output_dir
+    assert config.logging.swanlab_run_name == "reader-off"
 
 
 def test_the_training_loop_honours_the_resumed_position_and_the_step_budget():
@@ -123,7 +223,9 @@ def test_the_training_loop_honours_the_resumed_position_and_the_step_budget():
     assert "micro_batch_skip(step,steps_per_epoch,accumulation)" in compact
     assert "for epoch in range(start_epoch, cfg.training.epochs)" in source
     # Optimizer steps are what resume plans with; the loop indexes micro-batches.
-    assert "batch_index < skip_micro_batches" in source
+    assert "skip_first_batches(train_loader, skip_micro_batches)" in source
+    assert "sampler.set_start_batch(skip_micro_batches)" in source
+    assert "batch_index < skip_micro_batches" not in source
     assert "steps_per_epoch=optimizer_steps(micro_batches_per_rank,accumulation)" in compact
     assert "if step >= total_steps:" in source, (
         "without this a resumed run adds a whole extra epoch on top of the loaded step"

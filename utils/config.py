@@ -184,6 +184,7 @@ class ModelConfig:
     torch_dtype: str = "bfloat16"
     attn_implementation: str = "sdpa"
     context_gradient_checkpointing: bool = True
+    context_gradient_checkpointing_every_n_layers: int | None = None
     # Dtype of the trainable pieces (memory writer, LoRA, recon decoders).
     # Kept separate from torch_dtype so that AdamW keeps float32 parameters and
     # moments while the frozen backbone stays at its checkpoint dtype.
@@ -411,7 +412,7 @@ class TrainingConfig:
 
 @dataclass
 class CheckpointConfig:
-    output_dir: str = "outputs/qwen-metalora"
+    output_dir: str = "outputs"
     init_from: str | None = None
 
 
@@ -421,9 +422,9 @@ class LoggingConfig:
     # Online runs require an explicit private host (or SWANLAB_HOST).
     swanlab_host: str | None = None
     swanlab_mode: str = "online"
-    swanlab_log_dir: str | None = None
+    swanlab_log_dir: str | None = None  # Automatically set to the checkpoint run directory.
     swanlab_workspace: str | None = None
-    # Run name and checkpoint subdirectory; empty means model name + timestamp.
+    # Dashboard name; empty means model name + timestamp.
     swanlab_run_name: str | None = None
     swanlab_run_id: str | None = None
     # Cadence of the training-loss scalars (``train/*``), in optimizer steps. The two
@@ -571,6 +572,14 @@ class TrainConfig:
         d, m, loss = self.data, self.memory, self.loss
         if self.model.attn_implementation not in {"sdpa", "eager"}:
             raise ValueError("model.attn_implementation must be sdpa or eager")
+        if (
+            self.model.context_gradient_checkpointing_every_n_layers is not None
+            and (
+                type(self.model.context_gradient_checkpointing_every_n_layers) is not int
+                or self.model.context_gradient_checkpointing_every_n_layers <= 0
+            )
+        ):
+            raise ValueError("model.context_gradient_checkpointing_every_n_layers must be a positive integer")
         if d.max_context_tokens <= 0:
             raise ValueError("data.max_context_tokens must be positive")
         if not str(d.root).strip():
