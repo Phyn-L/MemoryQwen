@@ -9,5 +9,3 @@ if [ -f "$ROOT/scripts/env.local.sh" ]; then
   source "$ROOT/scripts/env.local.sh"
 fi
 exec python -m utils.launcher train "$@"
-
-sleep 1m
