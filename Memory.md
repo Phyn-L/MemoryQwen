@@ -1,6 +1,6 @@
 # MemoryQwen Agent 上手指南
 
-本文件是唯一的项目说明文档，按当前代码与 YAML 维护；根目录 `AGENTS.md` 单独保留为工作指令。更新日期：2026-10-16。不要新增重复说明文档，也不要把历史改造过程作为当前操作指南。
+本文件是唯一的项目说明文档，按当前代码与 YAML 维护；根目录 `AGENTS.md` 单独保留为工作指令。更新日期：2026-10-17。不要新增重复说明文档，也不要把历史改造过程作为当前操作指南。
 
 ## 环境与常用入口
 
@@ -13,6 +13,8 @@
 - 单 checkpoint 评测：`python scripts/test.py --checkpoint <path> --split validation`；默认恢复 checkpoint 内的配置。
 - 评测套件：`bash scripts/evaluation/test_all_suite.sh`；ICL 对照入口为 `scripts/evaluation/test_icl_suite.py`。
 - 测试：`PYTHONPATH=. python -m pytest -q`；静态检查：`python -m ruff check .` 和 `git diff --check`。
+
+训练入口由 `utils.launcher` 使用 `torch.distributed.run` 启动多进程，训练进程通过 Hugging Face Accelerate 管理 DDP/NCCL、梯度累积和 loader 准备。单卡运行时仍使用同一入口，但不会创建多进程组。
 
 ## 代码导航
 
@@ -35,6 +37,8 @@
 ## 配置与数据链路
 
 配置通过 `_base_` 深度合并：`harness.yaml` 放共享训练、数据、目标权重和评测设置，`models/` 放权重、dtype、LoRA 设置，实验预设的 `memory:` 放架构。目标权重在 `loss:`。读取配置使用 `TrainConfig.from_file`，不要直接用 `yaml.safe_load` 代替配置解析。`--machine` 通过 `utils/machines.py` 提供模型与数据路径。
+
+DataLoader 的运行参数按用途分开配置：`data.loader.train_num_workers`、`train_prefetch_factor`、`train_persistent_workers`、`train_pin_memory` 控制训练；`eval_num_workers`、`eval_prefetch_factor`、`eval_persistent_workers`、`eval_pin_memory` 同时控制普通评估、QA 评估和 Recon 评估。训练将 pinned batch 以 `non_blocking=True` 复制到 GPU。
 
 数据位于 `<data.root>/1qa/`：
 
@@ -63,7 +67,9 @@
 
 评测按 `training.seed` 对每个数据集固定抽取最多 `evaluation.max_eval_contexts_per_dataset` 个 context，每个 context 最多取 `data.task.max_qa_sample_per_context` 条 QA（解析后为 `cfg.data.max_qa_sample_per_context`）。QA 自回归与 Recon 复用入选 context；Recon 开关位于 `evaluation`。各 rank 分配入选数据、共同执行评测与指标汇总，不能只让主 rank 调用评测器。
 
-每次评测前先保存步数 checkpoint 并刷新 `last.pt`；评测后按 QA F1 决定是否更新 `best.pt`。修改多卡流程时留意集合通信顺序，避免 rank 提前进入训练同步。
+每次评测前先保存步数 checkpoint 并刷新 `last.pt`；评测后按 QA F1 决定是否更新 `best.pt`。训练进度条按 optimizer step 更新，micro-batch 只在 GPU 上累积 Tensor；分组梯度范数只在 `logging.log_every` 的 step 计算。评估结束后不主动调用 `torch.cuda.empty_cache()`。修改多卡流程时留意集合通信顺序，避免 rank 提前进入训练同步。
+
+训练和单 checkpoint 评估共同使用 `utils/reporting.py::format_evaluation_report`。项目只支持当前 canonical 数据布局和配置字段；旧路径、旧字段别名和旧 checkpoint 迁移分支不再保留。
 
 ## Context gradient checkpointing
 
@@ -104,4 +110,4 @@ PYTHONPATH=. python scripts/benchmark_context_checkpointing.py \
 
 已有 CPU 测试对比无 checkpoint 路径的 loss 和所有可训练参数梯度，覆盖多个间隔、padding、LoRA、Dropout 和联合目标。BF16 CUDA 路径报告误差，不要求逐位一致。CPU 测试通过不代表完整多卡训练或显存测量通过；修改模型路径后按需补 GPU 验证。
 
-本次整理验证（2026-10-16，`shine`）：297 tests passed，ruff 与 `git diff --check` 通过；未重新运行 GPU 基准或完整训练。
+本次整理验证（2026-10-17，`shine`）：297 tests passed，`ruff check .` 与 `git diff --check` 通过；未重新运行 GPU 基准或完整训练。
