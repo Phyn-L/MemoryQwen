@@ -1,19 +1,27 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 
 import torch
 import yaml
 from torch.utils.data import DataLoader
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+_train_spec = importlib.util.spec_from_file_location(
+    "_memoryqwen_train_reporting", Path(__file__).with_name("train.py")
+)
+_train_module = importlib.util.module_from_spec(_train_spec)
+_train_spec.loader.exec_module(_train_module)
+format_evaluation_report = _train_module.format_evaluation_report
 from src.evaluator import Evaluator
 from src.model import load_model
 from src.pipeline import (
     evaluation_window_loader,
-    format_evaluation_sample_counts,
     make_collate,
     make_context_dataset,
 )
@@ -256,15 +264,6 @@ def main():
     started = time.time()
     if is_main:
         print("[eval] autoregressive pass (headline) ...", flush=True)
-        print(
-            format_evaluation_sample_counts(
-                row_loader.evaluation_selection,
-                seed=cfg.training.seed,
-                recon_enabled=cfg.evaluation.recon_teacherforce
-                or cfg.evaluation.recon_autoregressive,
-            ),
-            flush=True,
-        )
     task_metrics = evaluator.compare_reader_tasks(
         model,
         loader,
@@ -280,7 +279,17 @@ def main():
     if is_main:
         print(f"[eval] autoregressive done in {time.time() - started:.1f}s", flush=True)
     if is_main:
-        print("autoregressive by task embedding:", task_metrics)
+        print(
+            format_evaluation_report(
+                task_metrics,
+                selection=row_loader.evaluation_selection,
+                seed=cfg.training.seed,
+                max_contexts=cfg.evaluation.max_eval_contexts_per_dataset,
+                max_new_tokens=cfg.evaluation.max_new_tokens,
+                recon_enabled=cfg.evaluation.recon_teacherforce
+                or cfg.evaluation.recon_autoregressive,
+            )
+        )
     if is_main:
         report = {
             "checkpoint": str(checkpoint_path),

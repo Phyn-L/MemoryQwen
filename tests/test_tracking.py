@@ -27,7 +27,8 @@ def test_online_requires_explicit_private_host():
 
 
 def test_private_host_and_resume_are_forwarded(monkeypatch, tmp_path):
-    sdk = SimpleNamespace(login=Mock(), init=Mock(return_value=SimpleNamespace(id="existing-run")))
+    run = SimpleNamespace(id="existing-run", define_metric=Mock())
+    sdk = SimpleNamespace(login=Mock(), init=Mock(return_value=run))
     monkeypatch.setitem(sys.modules, "swanlab", sdk)
     monkeypatch.setenv("SWANLAB_HOST", "http://private-server:8000")
     monkeypatch.setenv("SWANLAB_API_KEY", "private-key")
@@ -44,10 +45,15 @@ def test_private_host_and_resume_are_forwarded(monkeypatch, tmp_path):
     assert args["log_dir"] == str(tmp_path)
     assert args["config"]["logging"]["swanlab_log_dir"] == str(tmp_path)
     assert args["config"]["logging"]["swanlab_run_id"] == "existing-run"
+    assert run.define_metric.call_args_list == [
+        (("eval_qa/*",), {"section_name": "eval_qa"}),
+        (("eval_recon/*",), {"section_name": "eval_recon"}),
+    ]
 
 
 def test_offline_never_logs_in_and_records_new_identity(monkeypatch):
-    sdk = SimpleNamespace(login=Mock(), init=Mock(return_value=SimpleNamespace(id="new-run")))
+    run = SimpleNamespace(id="new-run", define_metric=Mock())
+    sdk = SimpleNamespace(login=Mock(), init=Mock(return_value=run))
     monkeypatch.setitem(sys.modules, "swanlab", sdk)
     monkeypatch.setenv("SWANLAB_MODE", "offline")
     cfg = TrainConfig()

@@ -18,11 +18,11 @@ data:
   limits:
     max_context_tokens: 1536
     max_input_tokens: 40960
-    max_question_tokens: 64
-    max_answer_tokens: 32
+    max_question_tokens: 96
+    max_answer_tokens: 64
     max_conversation_tokens: 768
   loader:
-    num_workers: 2
+    num_workers: 4
     pin_memory: true
     persistent_workers: true
   task:
@@ -52,10 +52,10 @@ loss:
   distill_entropy_weight: true  # 是否按教师分布熵加权蒸馏位置
   max_logits_rows: 256  # 每次词表投影的行数上限（显存/核数量权衡）
 evaluation:
-  autoregressive_every: 5000  # 自回归验证与 checkpoint 的训练步间隔
+  autoregressive_every: 2500  # 自回归验证与 checkpoint 的训练步间隔
   max_eval_contexts_per_dataset: 1024  # 每个数据集的自回归评估 context 数上限
   max_new_tokens: 64  # 自回归验证生成 token 上限
-  qa_batch_size: 8  # QA 验证批大小
+  qa_batch_size: 16  # QA 验证批大小
   recon_teacherforce: true  # teacher-forced recon 指标（无需生成）
   recon_autoregressive: false  # 自回归 recon 评估（昂贵，默认关闭）
 optimizer:
@@ -64,7 +64,7 @@ optimizer:
   weight_decay: 0.01  # 权重衰减系数
 scheduler:
   name: cosine  # 调度器名称
-  warmup_steps: 5000  # 学习率预热步数
+  warmup_steps: 2500  # 学习率预热步数
 checkpoint:
   output_dir: outputs  # 输出根目录，运行时追加 {model-name}/{model-name}_{time}
 logging:

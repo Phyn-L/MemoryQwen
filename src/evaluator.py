@@ -18,8 +18,12 @@ from rich.progress import (
 from utils.ddp import is_main_process
 from utils.progress import StepSpeedColumn
 
-from .icl_baseline import parse_race_prediction
-from .metrics import METRIC_KEYS, answer_line, best_reference_metrics, normalize_answer
+from .metrics import (
+    METRIC_KEYS,
+    answer_line,
+    best_reference_metrics,
+    normalize_answer,
+)
 from .model import TASK_QA, TASK_RECON
 
 
@@ -34,7 +38,8 @@ def _make_eval_progress(total, description, rank, enabled, metric_name):
         TimeRemainingColumn(),
         TextColumn(f"[green]{{task.fields[{metric_name}]}}"),
         console=Console(stderr=True),
-        disable=not enabled,
+        # All ranks evaluate, but only rank zero may redraw the shared terminal.
+        disable=not (enabled and rank == 0),
         transient=False,
         refresh_per_second=5,
     )
@@ -186,12 +191,9 @@ class Evaluator:
         sums = {key: 0.0 for key in METRIC_KEYS}
         dataset_sums = {}
         dataset_counts = {}
-        race_correct = 0
-        race_count = 0
         samples = 0
-        first_token_hit = 0
         world, rank = _distributed_world_size(), _distributed_rank()
-        enabled = is_main_process() or world > 1
+        enabled = is_main_process()
         if max_contexts_per_dataset is not None and not pre_windowed:
             from .pipeline import evaluation_window_loader
 
@@ -301,9 +303,6 @@ class Evaluator:
             )
             for i, record in enumerate(records):
                 row = generated[i].tolist()
-                first_token_hit += int(
-                    bool(row) and self._first_token_hit(row[0], record)
-                )
                 prediction = answer_line(
                     self.tokenizer.decode(row, skip_special_tokens=True)
                 )
@@ -316,19 +315,13 @@ class Evaluator:
                 dataset_counts[record.dataset] = (
                     dataset_counts.get(record.dataset, 0) + 1
                 )
-                if record.dataset == "race":
-                    _, predicted_letter = parse_race_prediction(prediction)
-                    race_correct += int(predicted_letter == record.answer_letter)
-                    race_count += 1
                 samples += 1
             progress.update(progress_task, advance=1, qa_rows=f"QA rows {samples:,}")
             if window[1] is not None and cursor >= window[1]:
                 break
         progress.stop()
         model.train(was_training)
-        first_token_hit, race_correct, race_count, samples = _distributed_sum(
-            [first_token_hit, race_correct, race_count, samples], device
-        )
+        (samples,) = _distributed_sum([samples], device)
         sums = dict(
             zip(
                 METRIC_KEYS,
@@ -355,9 +348,6 @@ class Evaluator:
                 for index, key in enumerate(METRIC_KEYS):
                     result[f"dataset/{name}/{key}"] = reduced[offset + index] / count
                 offset += len(METRIC_KEYS) + 1
-        if race_count:
-            result["accuracy"] = race_correct / race_count
-        result["first_token_em"] = first_token_hit / max(1, samples)
         return result
 
     def _evaluation_window(self, captioned, total, row_loader, loader, world, rank):
@@ -395,7 +385,7 @@ class Evaluator:
         was_training = model.training
         model.eval()
         world, rank = _distributed_world_size(), _distributed_rank()
-        enabled = is_main_process() or world > 1
+        enabled = is_main_process()
         window = (0, None)
         row_source = loader if row_loader is None else row_loader
         max_logits_rows = getattr(

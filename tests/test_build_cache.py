@@ -52,6 +52,7 @@ class _Tokenizer:
 
 
 def _row(context: str, questions, dataset: str = "squad", index: int = 0) -> dict:
+    is_race = dataset == "race"
     return {
         "id": f"{dataset}:train:{index}",
         "dataset": dataset,
@@ -61,9 +62,12 @@ def _row(context: str, questions, dataset: str = "squad", index: int = 0) -> dic
             {
                 "id": f"{dataset}:train:{index}:{position}",
                 "question": question,
-                "answers": ["a"],
-                "answer": "a",
-                "metadata": {},
+                "answers": ["A" if is_race else "a"],
+                "answer": "A" if is_race else "a",
+                "metadata": (
+                    {"options": ["a", "b", "c", "d"], "answer_letter": "A"}
+                    if is_race else {}
+                ),
             }
             for position, question in enumerate(questions)
         ],

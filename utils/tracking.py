@@ -35,4 +35,6 @@ def init_tracking(cfg: TrainConfig):
         resume="must" if logging.swanlab_run_id else "never",
     )
     logging.swanlab_run_id = run.id
+    run.define_metric("eval_qa/*", section_name="eval_qa")
+    run.define_metric("eval_recon/*", section_name="eval_recon")
     return run

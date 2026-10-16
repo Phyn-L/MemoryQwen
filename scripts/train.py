@@ -32,7 +32,6 @@ from src.model import load_model
 from src.pipeline import (
     data_cache_dir,
     evaluation_window_loader,
-    format_evaluation_sample_counts,
     make_collate,
     make_context_dataset,
     model_run_label,
@@ -45,10 +44,28 @@ from utils.machines import machine_names
 from utils.progress import StepSpeedColumn
 from utils.tracking import init_tracking
 
-AUTOREGRESSIVE_SECTION = "val_autoregressive"
+EVAL_SECTIONS = {
+    "qa_task": "eval_qa",
+    "recon_task": "eval_recon",
+    "recon_autoregressive": "eval_recon",
+}
 # SwanLab key spelling for the answer metrics; the reconstruction metrics keep their own names.
 METRIC_LABELS = {"em": "EM", "f1": "F1", "rouge_l": "ROUGE-L"}
 CONSOLE = Console()
+THREE_LINE = box.Box(
+    " ━━ \n" "    \n" " ━━ \n" "    \n" "    \n" "    \n" "    \n" " ━━ \n"
+)
+
+
+def table_panel(table):
+    """Fit the panel to the table; wrap captions within that width."""
+    caption = table.caption
+    title = table.title
+    table.caption = None
+    table.title = None
+    width = min(120, Console(width=120).measure(table).maximum + 4)
+    table.caption = caption
+    return Panel(table, title=title, width=width, expand=False, border_style="cyan")
 
 
 def render_rich(renderable) -> str:
@@ -150,19 +167,21 @@ def format_trainable_parameter_table(
     parameters: list[tuple[str, tuple[int, ...], int]],
 ) -> str:
     type_names = {
-            "lora": "LoRA adapters",
-            "context_resampler": "ContextResampler",
-            "question_resampler": "QuestionResampler",
-            "context_layer_logits": "LayerWeights",
-            "recon_task_embedding": "TaskEmbedding",
+        "lora": "LoRA adapters",
+        "context_resampler": "ContextResampler",
+        "question_resampler": "QuestionResampler",
+        "context_layer_logits": "LayerWeights",
+        "recon_task_embedding": "TaskEmbedding",
     }
-    table = Table(box=box.ROUNDED, header_style="bold cyan", title="Trainable Parameters")
-    table.add_column("#", justify="right", style="dim", width=3)
-    table.add_column("Name", style="white")
-    table.add_column("Type", style="cyan")
-    table.add_column("Params", justify="right", style="green")
-    table.add_column("Tensors", justify="right", style="dim")
-    table.add_column("Mode", style="yellow")
+    table = Table(
+        box=THREE_LINE, header_style="bold cyan", title="Trainable Parameters"
+    )
+    table.add_column("#", justify="right", style="cyan")
+    table.add_column("Name", style="cyan")
+    table.add_column("Type", style="white")
+    table.add_column("Params", justify="right", style="white")
+    table.add_column("Tensors", justify="right", style="white")
+    table.add_column("Mode", style="white")
     groups = trainable_parameter_groups(parameters)
     for index, (name, tensor_count, count) in enumerate(groups):
         table.add_row(
@@ -173,17 +192,15 @@ def format_trainable_parameter_table(
             str(tensor_count),
             "train",
         )
-    total = sum(count for _, _, count in parameters)
-    table.add_section()
     table.add_row(
         "",
         "Trainable params",
         "",
-        compact_parameter_count(total),
+        compact_parameter_count(sum(count for _, _, count in parameters)),
         str(sum(tensor_count for _, tensor_count, _ in groups)),
         "",
     )
-    return render_rich(table)
+    return render_rich(table_panel(table))
 
 
 def should_evaluate(step: int, every: int, total_steps: int) -> bool:
@@ -253,144 +270,179 @@ def _gradient_norm(parameters) -> torch.Tensor:
 
 
 def eval_log_payloads(task_metrics=None):
-    """Log every scalar an evaluation returns, one SwanLab group per task.
+    """Log evaluation scalars in the QA and reconstruction SwanLab groups.
 
-    Generic on purpose: the QA pass reports answer metrics and the teacher-forced
-    reconstruction pass reports reconstruction metrics, and a new metric must not need a
-    second list of names here before it becomes visible in SwanLab.
+    Dataset counts are omitted because they are sampling metadata, not evaluation scores.
     """
     if task_metrics is None:
         return []
-    payload = {}
+    payloads = []
     for task_name, metrics in task_metrics.items():
-        section = f"{AUTOREGRESSIVE_SECTION}_{task_name}"
+        section = EVAL_SECTIONS[task_name]
+        payload = {}
         for key, value in metrics.items():
             if key.startswith("dataset/"):
                 dataset, metric = key.removeprefix("dataset/").rsplit("/", 1)
+                if metric == "count":
+                    continue
                 dataset = dataset.replace("/", "_").replace("(", "_").replace(")", "")
-                payload[f"{section}/{dataset}_{METRIC_LABELS.get(metric, metric)}"] = (
+                payload[f"{dataset}_{METRIC_LABELS.get(metric, metric)}"] = (
                     value
                 )
+            elif key == "count":
+                continue
             elif isinstance(value, (int, float)) and not isinstance(value, bool):
-                # Overall keys keep their snake_case spelling: the answer metrics have been
-                # logged as ``f1``/``em``/``rouge_l`` since the first run and renaming them
-                # would break comparisons with historical curves. Only the per-dataset keys are
-                # prettified, exactly as before.
-                payload[f"{section}/{key}"] = value
-    return [payload] if payload else []
+                payload[key] = value
+        if payload:
+            payloads.append((section, payload))
+    return payloads
 
 
-def _render_table(headers, rows) -> list[str]:
-    """Render an evaluation report table with Rich."""
-    table = Table(box=box.SIMPLE_HEAVY, header_style="bold cyan")
+def _render_table(title, headers, rows, *, caption=None) -> str:
+    """Use the same panel, title and header style as the training schedule."""
+    table = Table(
+        title=title, caption=caption, box=THREE_LINE, header_style="bold cyan"
+    )
     for index, header in enumerate(headers):
         table.add_column(
             header,
             justify="left" if index == 0 else "right",
-            style="white" if index == 0 else "green",
+            style="cyan" if index == 0 else "white",
         )
     for row in rows:
         table.add_row(*row)
-    return [render_rich(table)]
+    return render_rich(table_panel(table))
 
 
-def _format_recon_table(task_name, metrics) -> list[str]:
-    """Teacher-forced reconstruction report: neither column decodes anything."""
-    dataset_names = sorted(
-        {
-            key.removeprefix("dataset/").rsplit("/", 1)[0]
-            for key in metrics
-            if key.startswith("dataset/") and key.endswith("/contexts")
-        }
+def format_evaluation_report(
+    task_metrics,
+    *,
+    selection=None,
+    seed=None,
+    step=None,
+    max_contexts=None,
+    max_new_tokens=None,
+    recon_enabled=True,
+) -> str:
+    """Shared schedule-styled report formatter for training and standalone evaluation."""
+    return format_eval_metrics_table(
+        task_metrics,
+        selection=selection,
+        seed=seed,
+        step=step,
+        max_contexts=max_contexts,
+        max_new_tokens=max_new_tokens,
+        recon_enabled=recon_enabled,
     )
-    rows = []
-    for dataset in dataset_names:
-        ce = float(metrics.get(f"dataset/{dataset}/recon_ce", 0.0))
-        rows.append(
-            [
-                dataset,
-                f"{ce:.4f}",
-                f"{math.exp(min(ce, 20.0)):.2f}",
-                f"{metrics.get(f'dataset/{dataset}/recon_token_accuracy', 0.0):.4f}",
-                f"{metrics.get(f'dataset/{dataset}/contexts', 0.0):.0f}",
-            ]
-        )
-    rows.append(
-        [
-            "overall",
-            f"{metrics.get('recon_ce', 0.0):.4f}",
-            f"{metrics.get('recon_ppl', 0.0):.2f}",
-            f"{metrics.get('recon_token_accuracy', 0.0):.4f}",
-            f"{metrics.get('contexts', 0.0):.0f}",
-        ]
-    )
-    table = _render_table(
-            ["dataset", "recon_ce", "recon_ppl", "token_acc", "contexts"], rows
-        )[0]
-    return [render_rich(Panel(table, title=f"{task_name} · teacher-forced", border_style="blue"))]
 
 
-def format_eval_metrics_table(task_metrics) -> str:
-    """Render autoregressive evaluation metrics as a compact terminal table."""
+def format_eval_metrics_table(
+    task_metrics,
+    *,
+    selection=None,
+    seed=None,
+    step=None,
+    max_contexts=None,
+    max_new_tokens=None,
+    recon_enabled=True,
+) -> str:
+    """Show evaluation scores and global sampled counts in schedule-style panels."""
     if not task_metrics:
         return ""
+    details = []
+    for label, value in (
+        ("Step", step),
+        ("max contexts/dataset", max_contexts),
+        ("max new tokens", max_new_tokens),
+        ("global sample seed", seed),
+    ):
+        if value is not None:
+            details.append(f"{label} {value:,}")
+    caption = " · ".join(details) or None
+    qa_counts = {} if selection is None else dict(selection.qa_counts)
+    context_counts = {} if selection is None else dict(selection.context_counts)
     lines = []
     for task_name, metrics in task_metrics.items():
-        if "recon_ce" in metrics:
-            lines.extend(_format_recon_table(task_name, metrics))
-            continue
+        reconstruction = "recon_ce" in metrics
+        count_key = "contexts" if reconstruction else "count"
         dataset_names = sorted(
             {
                 key.removeprefix("dataset/").rsplit("/", 1)[0]
                 for key in metrics
-                if key.startswith("dataset/") and key.endswith("/count")
+                if key.startswith("dataset/") and key.endswith(f"/{count_key}")
             }
+            | qa_counts.keys()
+            | context_counts.keys()
         )
         rows = []
-        for dataset in dataset_names:
+        if reconstruction:
+            for dataset in [*dataset_names, "overall"]:
+                prefix = "" if dataset == "overall" else f"dataset/{dataset}/"
+                ce = float(metrics.get(f"{prefix}recon_ce", 0.0))
+                rows.append(
+                    [
+                        dataset,
+                        f"{ce:.4f}",
+                        f"{metrics.get('recon_ppl', math.exp(min(ce, 20.0))) if not prefix else math.exp(min(ce, 20.0)):.2f}",
+                        f"{metrics.get(f'{prefix}recon_token_accuracy', 0.0):.4f}",
+                        f"{metrics.get(f'{prefix}contexts', 0):,.0f}",
+                    ]
+                )
+            lines.append(
+                _render_table(
+                    f"Evaluation · {task_name} · teacher-forced",
+                    ["dataset", "recon_ce", "recon_ppl", "token_acc", "contexts"],
+                    rows,
+                )
+            )
+            continue
+        for dataset in [*dataset_names, "overall"]:
+            overall = dataset == "overall"
+            prefix = "" if overall else f"dataset/{dataset}/"
+            qa = (
+                sum(metrics.get(f"dataset/{name}/count", 0) for name in dataset_names)
+                if overall
+                else metrics.get(f"{prefix}count", 0)
+            )
+            contexts = (
+                len(selection.contexts)
+                if overall and selection is not None
+                else context_counts.get(dataset)
+            )
+            sampled_qa = (
+                selection.qa_rows
+                if overall and selection is not None
+                else qa_counts.get(dataset, qa)
+            )
             rows.append(
                 [
                     dataset,
-                    *(
-                        f"{metrics.get(f'dataset/{dataset}/{key}', 0.0):.4f}"
-                        for key in ("em", "f1", "rouge_l")
+                    f"{metrics.get(f'{prefix}em', 0.0):.4f}",
+                    f"{metrics.get(f'{prefix}f1', 0.0):.4f}",
+                    f"{metrics.get(f'{prefix}rouge_l', 0.0):.4f}",
+                    "-" if contexts is None else f"{contexts:,}",
+                    f"{sampled_qa:,.0f}",
+                    (
+                        "0"
+                        if not recon_enabled
+                        else ("-" if contexts is None else f"{contexts:,}")
                     ),
-                    "-",
-                    "-",
-                    f"{metrics.get(f'dataset/{dataset}/count', 0.0):.0f}",
                 ]
             )
-        rows.append(
-            [
-                "overall",
-                *(f"{metrics.get(key, 0.0):.4f}" for key in ("em", "f1", "rouge_l")),
-                (
-                    f"{metrics['first_token_em']:.4f}"
-                    if "first_token_em" in metrics
-                    else "-"
-                ),
-                f"{metrics['accuracy']:.4f}" if "accuracy" in metrics else "-",
-                f"{sum(float(row[-1]) for row in rows):.0f}",
-            ]
-        )
         lines.append(
-            render_rich(
-                Panel(
-                    _render_table(
+            _render_table(
+                f"Evaluation · {task_name}",
                 [
                     "dataset",
                     "EM",
                     "F1",
                     "ROUGE-L",
-                    "first_token_em",
-                    "accuracy",
-                    "count",
+                    "contexts",
+                    "QA",
+                    "Recon contexts",
                 ],
                 rows,
-                    )[0],
-                    title=task_name,
-                    border_style="green",
-                )
+                caption=caption,
             )
         )
     return "\n".join(lines)
@@ -508,7 +560,9 @@ def main() -> None:
         if accelerator is not None:
             accelerator.wait_for_everyone()
         if built and accelerator is not None and accelerator.is_main_process:
-            CONSOLE.print(f"[bold yellow]Cache rebuilt[/bold yellow]  {', '.join(built)}")
+            CONSOLE.print(
+                f"[bold yellow]Cache rebuilt[/bold yellow]  {', '.join(built)}"
+            )
 
     train_file = Path(cfg.data.split_file("train"))
     validation_source = Path(cfg.data.validation_source())
@@ -633,16 +687,23 @@ def main() -> None:
         ranks = 1 if accelerator is None else accelerator.num_processes
         schedule = Table(
             title="Training Schedule",
-            box=box.SIMPLE_HEAVY,
+            box=THREE_LINE,
             header_style="bold cyan",
         )
         schedule.add_column("Setting", style="cyan")
         schedule.add_column("Value", style="white")
         schedule.add_column("Setting", style="cyan")
         schedule.add_column("Value", style="white")
-        schedule.add_row("Machine", cfg.machine or "config-defaults", "Steps", f"{total_steps:,}")
+        schedule.add_row(
+            "Machine", cfg.machine or "config-defaults", "Steps", f"{total_steps:,}"
+        )
         schedule.add_row("Epochs", str(cfg.training.epochs), "Ranks", str(ranks))
-        schedule.add_row("Batch / Rank", str(cfg.training.batch_size), "Accumulation", str(accumulation))
+        schedule.add_row(
+            "Batch / Rank",
+            str(cfg.training.batch_size),
+            "Accumulation",
+            str(accumulation),
+        )
         schedule.add_row(
             "Effective Batch",
             f"{cfg.training.batch_size * ranks * accumulation:,}",
@@ -655,7 +716,7 @@ def main() -> None:
             "Log Every",
             f"{cfg.logging.log_every:,}",
         )
-        CONSOLE.print(Panel.fit(schedule, border_style="cyan"))
+        CONSOLE.print(table_panel(schedule))
     manager = CheckpointManager(cfg.checkpoint.output_dir)
     if cfg.checkpoint.init_from and not args.resume:
         # Use a separate manager so phase-one selection metadata and RNG do not leak.
@@ -864,8 +925,10 @@ def main() -> None:
                 progress.update(
                     progress_task,
                     status=" · ".join(
-                        [*(f"{name} {value}" for name, value in postfix.items()),
-                         f"lr {learning_rate:.2e}"]
+                        [
+                            *(f"{name} {value}" for name, value in postfix.items()),
+                            f"lr {learning_rate:.2e}",
+                        ]
                     ),
                 )
                 if not boundary:
@@ -905,8 +968,10 @@ def main() -> None:
                     progress_task,
                     advance=1,
                     status=" · ".join(
-                        [*(f"{name} {value}" for name, value in postfix.items()),
-                         f"lr {scheduler.get_last_lr()[0]:.2e}"]
+                        [
+                            *(f"{name} {value}" for name, value in postfix.items()),
+                            f"lr {scheduler.get_last_lr()[0]:.2e}",
+                        ]
                     ),
                 )
                 # Every logged scalar is the mean over the micro-batches of this step, which
@@ -958,6 +1023,8 @@ def main() -> None:
             if len(validation_loader) and should_evaluate(
                 step, cfg.evaluation.autoregressive_every, total_steps
             ):
+                # Eval uses its own Rich live display; leave only one display active.
+                progress.stop()
                 checkpoint_model = (
                     accelerator.unwrap_model(model)
                     if accelerator is not None
@@ -982,24 +1049,6 @@ def main() -> None:
                     )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-                if is_main:
-                    CONSOLE.print(
-                        Panel(
-                            f"Step [bold]{step:,}[/bold] · "
-                            f"max contexts/dataset [bold]{cfg.evaluation.max_eval_contexts_per_dataset:,}[/bold] · "
-                            f"max new tokens [bold]{cfg.evaluation.max_new_tokens}[/bold]",
-                            title="QA validation",
-                            border_style="blue",
-                        )
-                    )
-                    CONSOLE.print(
-                        format_evaluation_sample_counts(
-                            validation_row_loader.evaluation_selection,
-                            seed=cfg.training.seed,
-                            recon_enabled=cfg.evaluation.recon_teacherforce
-                            or cfg.evaluation.recon_autoregressive,
-                        )
-                    )
                 metrics = evaluator.compare_reader_tasks(
                     base_model,
                     validation_loader,
@@ -1016,14 +1065,24 @@ def main() -> None:
                 )
                 if is_main:
                     CONSOLE.print(
-                        Panel(
-                            format_eval_metrics_table(metrics),
-                            title=f"Evaluation complete · step {step:,}",
-                            border_style="green",
+                        f"[bold green]Evaluation complete · step {step:,}[/bold green]"
+                    )
+                    CONSOLE.print(
+                        format_eval_metrics_table(
+                            metrics,
+                            selection=validation_row_loader.evaluation_selection,
+                            seed=cfg.training.seed,
+                            step=step,
+                            max_contexts=cfg.evaluation.max_eval_contexts_per_dataset,
+                            max_new_tokens=cfg.evaluation.max_new_tokens,
+                            recon_enabled=cfg.evaluation.recon_teacherforce
+                            or cfg.evaluation.recon_autoregressive,
                         )
                     )
             if run and is_main:
-                for payload in eval_log_payloads(metrics):
+                for section, payload in eval_log_payloads(metrics):
+                    for key in payload:
+                        run.define_metric(key, section_name=section)
                     run.log(payload, step=step)
             if accelerator is not None:
                 # Resynchronise explicitly so a rank whose shard finished early cannot
@@ -1061,6 +1120,8 @@ def main() -> None:
                             f"F1={metrics['qa_task']['f1']:.4f} · "
                             f"best F1={manager.best_f1:.4f} at step {manager.best_step:,}"
                         )
+            if metrics is not None:
+                progress.start()
         if finished:
             break
 

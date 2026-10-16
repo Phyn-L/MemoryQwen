@@ -16,20 +16,21 @@
 
 ## 代码导航
 
-| 路径 | 职责 |
-|---|---|
-| `configs/` | 共享 harness、模型定义、实验预设和消融 |
-| `src/model.py` | Qwen memory 模型、context 编码、QA/Recon、生成与 checkpointing |
-| `src/resampler.py` | Context memory 压缩与 question readout |
-| `src/data.py`、`src/cache_build.py` | 数据加载、单一过滤实现、缓存指纹与长度 sidecar |
-| `src/eval_data.py` | 评测数据集名称与划分路径的唯一解析入口 |
-| `src/pipeline.py`、`src/evaluator.py` | loader、评测抽样、多卡评测与指标汇总 |
-| `src/losses.py` | QA、Recon、蒸馏等训练目标 |
-| `utils/config.py`、`utils/machines.py` | YAML 继承、环境变量展开、配置校验、机器路径 |
-| `utils/checkpoint.py` | checkpoint 保存、加载与 best 更新 |
-| `scripts/train.py`、`scripts/test.py` | 训练与单 checkpoint 评测入口 |
-| `scripts/data/`、`scripts/evaluation/`、`scripts/experiments/` | 数据构建、评测编排、实验运行脚本 |
-| `tests/` | 以 CPU 单元/集成测试为主 |
+
+| 路径                                                           | 职责                                                           |
+| -------------------------------------------------------------- | -------------------------------------------------------------- |
+| `configs/`                                                     | 共享 harness、模型定义、实验预设和消融                         |
+| `src/model.py`                                                 | Qwen memory 模型、context 编码、QA/Recon、生成与 checkpointing |
+| `src/resampler.py`                                             | Context memory 压缩与 question readout                         |
+| `src/data.py`、`src/cache_build.py`                            | 数据加载、单一过滤实现、缓存指纹与长度 sidecar                 |
+| `src/eval_data.py`                                             | 评测数据集名称与划分路径的唯一解析入口                         |
+| `src/pipeline.py`、`src/evaluator.py`                          | loader、评测抽样、多卡评测与指标汇总                           |
+| `src/losses.py`                                                | QA、Recon、蒸馏等训练目标                                      |
+| `utils/config.py`、`utils/machines.py`                         | YAML 继承、环境变量展开、配置校验、机器路径                    |
+| `utils/checkpoint.py`                                          | checkpoint 保存、加载与 best 更新                              |
+| `scripts/train.py`、`scripts/test.py`                          | 训练与单 checkpoint 评测入口                                   |
+| `scripts/data/`、`scripts/evaluation/`、`scripts/experiments/` | 数据构建、评测编排、实验运行脚本                               |
+| `tests/`                                                       | 以 CPU 单元/集成测试为主                                       |
 
 ## 配置与数据链路
 
@@ -37,15 +38,16 @@
 
 数据位于 `<data.root>/1qa/`：
 
-| 路径 | 内容 |
-|---|---|
-| `meta/meta_<split>.json` | 原始合并划分；内容为 JSONL，一行一个 context 及全部 `qa_pairs` |
-| `meta/<split>/<slug>.json` | 按数据集拆分的原始数据，供评测套件使用 |
-| `meta/build.manifest.json` | 构建计数与实际来源划分 |
-| `cache/train.jsonl`、`cache/validation.jsonl` | 按训练配置过滤后的数据 |
-| `cache/build.json` | 过滤缓存指纹 |
-| `cache/<split>.jsonl.lengths.json` | context token 长度 sidecar |
-| `cache/loader/` | loader 派生缓存；可由 `data.preprocess_cache_dir` 覆盖 |
+
+| 路径                                          | 内容                                                          |
+| --------------------------------------------- | ------------------------------------------------------------- |
+| `meta/meta_<split>.json`                      | 原始合并划分；内容为 JSONL，一行一个 context 及全部`qa_pairs` |
+| `meta/<split>/<slug>.json`                    | 按数据集拆分的原始数据，供评测套件使用                        |
+| `meta/build.manifest.json`                    | 构建计数与实际来源划分                                        |
+| `cache/train.jsonl`、`cache/validation.jsonl` | 按训练配置过滤后的数据                                        |
+| `cache/build.json`                            | 过滤缓存指纹                                                  |
+| `cache/<split>.jsonl.lengths.json`            | context token 长度 sidecar                                    |
+| `cache/loader/`                               | loader 派生缓存；可由`data.preprocess_cache_dir` 覆盖         |
 
 `build_1qa.py` 不做训练长度过滤和条数截断，只丢弃结构上无效的 context/QA；MS MARCO 只使用 `is_selected=1` 的 passage。context 不借用其他行文本。数据缺失划分或该划分无可用行时按 `test → validation → train` 回退，并记录实际来源。
 
@@ -78,16 +80,17 @@ training:
 
 2026-10-16 实测记录：RTX 4090、Qwen3-1.7B（28 层）、BF16 backbone / FP32 trainable，batch=2、context=1536、memory=64、question/answer 各 32 token、无 padding、联合 QA+Recon loss。峰值为 `torch.cuda.max_memory_allocated`；耗时为 5 次前后向中位数，不含 optimizer、数据和分布式同步。结果只适用于该工作负载。
 
-| 实现 | N | 峰值 allocated | 秒/前后向 |
-|---|---:|---:|---:|
-| Transformers native sparse layer | 1 | 12.00 GiB | 0.960 |
-| Transformers native sparse layer | 2 | 17.97 GiB | 0.900 |
-| Transformers native sparse layer | 4 | 20.93 GiB | 0.873 |
-| Transformers native sparse layer | 6 | 21.78 GiB | 0.864 |
-| PyTorch contiguous segments | 1 | 11.99 GiB | 0.962 |
-| PyTorch contiguous segments | 2 | 11.83 GiB | 0.965 |
-| PyTorch contiguous segments | 4 | 11.74 GiB | 0.965 |
-| PyTorch contiguous segments | 6 | 11.71 GiB | 0.968 |
+
+| 实现                             | N | 峰值 allocated | 秒/前后向 |
+| -------------------------------- | -: | -------------: | --------: |
+| Transformers native sparse layer | 1 |      12.00 GiB |     0.960 |
+| Transformers native sparse layer | 2 |      17.97 GiB |     0.900 |
+| Transformers native sparse layer | 4 |      20.93 GiB |     0.873 |
+| Transformers native sparse layer | 6 |      21.78 GiB |     0.864 |
+| PyTorch contiguous segments      | 1 |      11.99 GiB |     0.962 |
+| PyTorch contiguous segments      | 2 |      11.83 GiB |     0.965 |
+| PyTorch contiguous segments      | 4 |      11.74 GiB |     0.965 |
+| PyTorch contiguous segments      | 6 |      11.71 GiB |     0.968 |
 
 该实验中，稀疏单层 N 越大显存越高；连续分段相对原生 N=1 最多省约 2.4%，没有速度收益，因此训练保留原生实现。
 

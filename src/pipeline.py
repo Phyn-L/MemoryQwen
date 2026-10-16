@@ -5,6 +5,7 @@ construction and the eleven-kwarg collate call. A change to the target format la
 only one of them would silently make validation disagree with training, so there is one
 copy here.
 """
+
 from __future__ import annotations
 
 import bisect
@@ -20,7 +21,9 @@ from torch.utils.data import DataLoader
 from .cache_build import cache_is_fresh
 from .data import ConversationDataset, collate_fn, progress_enabled
 
-MODEL_LABEL_PATTERN = re.compile(r"Qwen(?:3)?[-_]?([0-9]+(?:\.[0-9]+)?)[Bb]", re.IGNORECASE)
+MODEL_LABEL_PATTERN = re.compile(
+    r"Qwen(?:3)?[-_]?([0-9]+(?:\.[0-9]+)?)[Bb]", re.IGNORECASE
+)
 
 
 def model_run_label(model_path: str) -> str:
@@ -78,7 +81,12 @@ def uses_filtered_cache(cfg, split: str, tokenizer) -> bool:
 
 
 def make_context_dataset(
-    cfg, split: str, tokenizer, limit=None, allow_empty: bool = False, num_workers: int = 0
+    cfg,
+    split: str,
+    tokenizer,
+    limit=None,
+    allow_empty: bool = False,
+    num_workers: int = 0,
 ):
     """Build one split. ``limit`` is the resolved sample cap (see :func:`resolve_split_limit`).
 
@@ -139,7 +147,8 @@ class Collate:
     def __call__(self, rows):
         cfg, tokenizer = self.cfg, self.tokenizer
         return collate_fn(
-            rows, tokenizer,
+            rows,
+            tokenizer,
             max_context_tokens=cfg.data.max_context_tokens,
             max_question_tokens=cfg.data.max_question_tokens,
             max_answer_tokens=cfg.data.max_answer_tokens,
@@ -169,7 +178,9 @@ def evaluation_row_index(dataset) -> list[int]:
     return offsets
 
 
-def window_slice(index: Sequence[int], window: tuple[int, int | None]) -> tuple[int, int]:
+def window_slice(
+    index: Sequence[int], window: tuple[int, int | None]
+) -> tuple[int, int]:
     """Dataset index range whose rows (or contexts) cover ``window``.
 
     ``index[i]`` is the first row of dataset element ``i`` and ``index[-1]`` the total row
@@ -220,7 +231,10 @@ class _EvaluationSelection:
 
 
 def select_evaluation_samples(
-    dataset, max_contexts_per_dataset: int, max_qa_sample_per_context: int, seed: int,
+    dataset,
+    max_contexts_per_dataset: int,
+    max_qa_sample_per_context: int,
+    seed: int,
 ) -> _EvaluationSelection:
     """Sample contexts per dataset, then cap selected QA turns within each context."""
     candidates = {}
@@ -238,7 +252,8 @@ def select_evaluation_samples(
         contexts = candidates[name]
         rng = random.Random(f"{int(seed)}:{name}:contexts")
         sampled = rng.sample(
-            contexts, min(int(max_contexts_per_dataset), len(contexts)),
+            contexts,
+            min(int(max_contexts_per_dataset), len(contexts)),
         )
         for context, turn_indices in sampled:
             turn_rng = random.Random(f"{int(seed)}:{name}:{context}:turns")
@@ -273,9 +288,13 @@ def select_evaluation_samples(
     )
 
 
-def format_evaluation_sample_counts(selection, *, seed: int, recon_enabled: bool) -> str:
+def format_evaluation_sample_counts(
+    selection, *, seed: int, recon_enabled: bool
+) -> str:
     """Report global selected counts, independently of rank partitioning."""
-    qa_counts, context_counts = dict(selection.qa_counts), dict(selection.context_counts)
+    qa_counts, context_counts = dict(selection.qa_counts), dict(
+        selection.context_counts
+    )
     lines = [f"[eval] sampled counts (global, seed={seed}):"]
     for name in sorted(qa_counts.keys() | context_counts.keys()):
         lines.append(
@@ -306,7 +325,9 @@ def _balanced_context_shards(dataset, selection, world: int, max_new_tokens: int
             len(turn_indices) * max(1, int(max_new_tokens)) * 256
         )
         entries.append((cost, context, turn_indices))
-    for cost, context, turn_indices in sorted(entries, key=lambda item: (-item[0], item[1])):
+    for cost, context, turn_indices in sorted(
+        entries, key=lambda item: (-item[0], item[1])
+    ):
         rank = min(range(len(shards)), key=lambda index: (loads[index], index))
         shards[rank].append((context, turn_indices))
         loads[rank] += cost
@@ -316,9 +337,21 @@ def _balanced_context_shards(dataset, selection, world: int, max_new_tokens: int
 
 
 def evaluation_window_loader(
-    dataset, collate, *, budget, unit, rank, world, batch_size,
-    seed=0, selection=None, max_qa_sample_per_context=8, max_new_tokens=64,
-    num_workers=0, pin_memory=False, persistent_workers=False,
+    dataset,
+    collate,
+    *,
+    budget,
+    unit,
+    rank,
+    world,
+    batch_size,
+    seed=0,
+    selection=None,
+    max_qa_sample_per_context=8,
+    max_new_tokens=64,
+    num_workers=0,
+    pin_memory=False,
+    persistent_workers=False,
 ):
     """Load the sampled QA rows or their unique contexts for one rank.
 
@@ -327,10 +360,16 @@ def evaluation_window_loader(
     """
     if unit == "rows":
         selection = selection or select_evaluation_samples(
-            dataset, budget, max_qa_sample_per_context, seed,
+            dataset,
+            budget,
+            max_qa_sample_per_context,
+            seed,
         )
         shards = _balanced_context_shards(
-            dataset, selection, world, max_new_tokens,
+            dataset,
+            selection,
+            world,
+            max_new_tokens,
         )
         grouped = shards[min(max(0, int(rank)), len(shards) - 1)]
         selected = _EvaluationRows(
@@ -343,7 +382,10 @@ def evaluation_window_loader(
         if selection is None:
             raise ValueError("selected_contexts requires the QA evaluation selection")
         shards = _balanced_context_shards(
-            dataset, selection, world, max_new_tokens,
+            dataset,
+            selection,
+            world,
+            max_new_tokens,
         )
         local_selection = shards[min(max(0, int(rank)), len(shards) - 1)]
         selected = _EvaluationRows(dataset, local_selection)

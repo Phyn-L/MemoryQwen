@@ -20,7 +20,7 @@ spec = importlib.util.spec_from_file_location(
 train = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(train)
 
-ANSWER_METRIC_KEYS = ("em", "f1", "rouge_l", "first_token_em", "accuracy")
+ANSWER_METRIC_KEYS = ("em", "f1", "rouge_l")
 
 
 def test_generated_answer_metrics_and_dataset_metrics_are_logged():
@@ -34,17 +34,23 @@ def test_generated_answer_metrics_and_dataset_metrics_are_logged():
             "dataset/hotpotqa(distractor)/f1": 0.5,
         }
     )
-    (payload,) = train.eval_log_payloads({"qa_task": metrics, "recon_task": metrics})
-    for task_name in ("qa_task", "recon_task"):
-        prefix = f"val_autoregressive_{task_name}/"
-        assert payload[prefix + "squad_EM"] == 0.8
-        assert payload[prefix + "squad_F1"] == 0.7
-        assert payload[prefix + "squad_ROUGE-L"] == 0.6
-        assert payload[prefix + "squad_count"] == 256
-        assert payload[prefix + "hotpotqa_distractor_F1"] == 0.5
+    payloads = dict(train.eval_log_payloads({"qa_task": metrics, "recon_task": metrics}))
+    for section in ("eval_qa", "eval_recon"):
+        payload = payloads[section]
+        assert payload["squad_EM"] == 0.8
+        assert payload["squad_F1"] == 0.7
+        assert payload["squad_ROUGE-L"] == 0.6
+        assert "squad_count" not in payload
+        assert payload["hotpotqa_distractor_F1"] == 0.5
         for key in ANSWER_METRIC_KEYS:
-            assert payload[prefix + key] == 0.7
-    assert all(key.startswith("val_autoregressive_") for key in payload)
+            assert payload[key] == 0.7
+        assert "first_token_em" not in payload
+    assert set(payloads) == {"eval_qa", "eval_recon"}
+    assert all(
+        not key.startswith(("eval_qa/", "eval_recon/"))
+        for payload in payloads.values()
+        for key in payload
+    )
 
 
 def test_teacher_forced_reconstruction_metrics_are_logged():
@@ -58,29 +64,31 @@ def test_teacher_forced_reconstruction_metrics_are_logged():
         "dataset/squad/contexts": 256,
         "dataset/hotpotqa(distractor)/recon_ce": 1.4,
     }
-    (payload,) = train.eval_log_payloads({"recon_task": metrics})
-    prefix = "val_autoregressive_recon_task/"
-    assert payload[prefix + "recon_ce"] == 1.25
-    assert payload[prefix + "recon_ppl"] == 3.49
-    assert payload[prefix + "recon_token_accuracy"] == 0.42
-    assert payload[prefix + "contexts"] == 512
-    assert payload[prefix + "squad_recon_ce"] == 1.1
-    assert payload[prefix + "squad_contexts"] == 256
-    assert payload[prefix + "hotpotqa_distractor_recon_ce"] == 1.4
+    (section, payload), = train.eval_log_payloads({"recon_task": metrics})
+    assert section == "eval_recon"
+    assert payload["recon_ce"] == 1.25
+    assert payload["recon_ppl"] == 3.49
+    assert payload["recon_token_accuracy"] == 0.42
+    assert payload["contexts"] == 512
+    assert payload["squad_recon_ce"] == 1.1
+    assert payload["squad_contexts"] == 256
+    assert payload["hotpotqa_distractor_recon_ce"] == 1.4
 
 
 def test_evaluation_payloads_cover_exactly_what_was_returned():
     assert train.eval_log_payloads() == []
     values = {"f1": 0.5, "recon_token_accuracy": 0.9, "dataset/squad/count": 3}
     assert train.eval_log_payloads({"qa_task": values}) == [
-        {
-            "val_autoregressive_qa_task/f1": 0.5,
-            "val_autoregressive_qa_task/recon_token_accuracy": 0.9,
-            "val_autoregressive_qa_task/squad_count": 3,
-        }
+        ("eval_qa", {"f1": 0.5, "recon_token_accuracy": 0.9})
     ]
     # Non-scalars and tasks that returned nothing produce no payload.
     assert train.eval_log_payloads({"qa_task": {"records": [1, 2]}}) == []
+
+
+def test_autoregressive_reconstruction_uses_the_reconstruction_section():
+    assert train.eval_log_payloads(
+        {"recon_autoregressive": {"recon_token_accuracy": 0.75}}
+    ) == [("eval_recon", {"recon_token_accuracy": 0.75})]
 
 
 def test_eval_metrics_table_groups_datasets_and_metrics():
@@ -90,8 +98,6 @@ def test_eval_metrics_table_groups_datasets_and_metrics():
                 "em": 0.25,
                 "f1": 0.5,
                 "rouge_l": 0.75,
-                "first_token_em": 0.9,
-                "accuracy": 0.8,
                 "dataset/squad/em": 0.2,
                 "dataset/squad/f1": 0.4,
                 "dataset/squad/rouge_l": 0.6,
@@ -110,16 +116,16 @@ def test_eval_metrics_table_groups_datasets_and_metrics():
             "EM",
             "F1",
             "ROUGE-L",
-            "first_token_em",
-            "accuracy",
-            "count",
+            "contexts",
+            "QA",
+            "Recon contexts",
         )
     )
     assert "foo/bar" in table
     assert "squad" in table
     assert "overall" in table
-    assert "0.9000" in table
-    assert "0.8000" in table
+    assert "accuracy" not in table
+    assert "first_token_em" not in table
 
 
 def test_eval_metrics_table_renders_the_reconstruction_pass():
@@ -138,12 +144,38 @@ def test_eval_metrics_table_renders_the_reconstruction_pass():
     )
     assert "teacher-forced" in table
     assert all(
-        label in table for label in ("recon_ce", "recon_ppl", "token_acc", "contexts")
+        label in table
+        for label in ("recon_ce", "recon_ppl", "token_acc", "contexts")
     )
     assert "squad" in table
     assert "overall" in table
     assert "1.2500" in table
     assert "0.4200" in table
+
+
+def test_eval_report_keeps_global_counts_and_wraps_metadata_to_table_width():
+    from types import SimpleNamespace
+
+    selection = SimpleNamespace(
+        contexts=tuple(range(5120)),
+        qa_rows=11635,
+        qa_counts=(("squad", 4933),),
+        context_counts=(("squad", 1024),),
+    )
+    table = train.format_eval_metrics_table(
+        {"qa_task": {"dataset/squad/count": 4933}},
+        selection=selection,
+        seed=42,
+        step=2500,
+        max_contexts=1024,
+        max_new_tokens=64,
+    )
+    assert all(value in table for value in ("1,024", "4,933", "5,120", "11,635"))
+    assert "Step 2,500" in table
+    assert "global sample" in table and "seed 42" in table
+    assert "sampled counts" not in table
+    assert sum("━━━" in line for line in table.splitlines()) == 3
+    assert len(table.splitlines()[0]) < 120
 
 
 def test_window_progress_total_counts_only_batches_intersecting_rank_rows():
@@ -153,6 +185,30 @@ def test_window_progress_total_counts_only_batches_intersecting_rank_rows():
     assert _window_batch_count(row_window(1280, 1, 8), 24) == 8
     assert _window_batch_count(row_window(1280, 7, 8), 24) == 8
     assert _window_batch_count((0, 160), None) is None
+
+
+def test_eval_progress_only_main_rank_writes_to_terminal(monkeypatch):
+    import io
+
+    from rich.console import Console
+
+    from src import evaluator
+
+    for rank, enabled in ((0, True), (1, True), (1, False), (0, False)):
+        output = io.StringIO()
+        monkeypatch.setattr(
+            evaluator,
+            "Console",
+            lambda **kwargs: Console(file=output, force_terminal=True, width=120),
+        )
+        progress, task = evaluator._make_eval_progress(
+            2, "Validation", rank, enabled, "qa_rows"
+        )
+        try:
+            progress.update(task, advance=1, refresh=True)
+        finally:
+            progress.stop()
+        assert bool(output.getvalue()) == (rank == 0 and enabled)
 
 
 def test_the_evaluator_has_the_teacher_forced_reconstruction_path():

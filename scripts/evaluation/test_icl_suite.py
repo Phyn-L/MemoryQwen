@@ -280,7 +280,7 @@ def evaluate_dataset(
             for index, example, raw_prediction in zip(
                 indices, examples, raw_predictions, strict=True
             ):
-                prediction, predicted_letter = parse_prediction(example, raw_prediction)
+                prediction, _ = parse_prediction(example, raw_prediction)
                 metrics = example_metrics(prediction, example.references)
                 row = {
                     "index": index,
@@ -291,13 +291,6 @@ def evaluate_dataset(
                     "references": list(example.references),
                     **metrics,
                 }
-                if dataset == "race":
-                    row.update(
-                        {
-                            "predicted_letter": predicted_letter,
-                            "answer_letter": example.answer_letter,
-                        }
-                    )
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
             handle.flush()
     barrier()

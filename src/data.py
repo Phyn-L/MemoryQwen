@@ -269,7 +269,6 @@ class ConversationMessage:
     role: str
     content: str
     answers: tuple[str, ...] = ()
-    answer_letter: str = ""
 
 
 @dataclass(frozen=True)
@@ -279,7 +278,6 @@ class ConversationTurn:
     messages: tuple[ConversationMessage, ...]
     answer: str
     answers: tuple[str, ...] = ()
-    answer_letter: str = ""
     dataset: str = ""
     context_id: str = ""
 
@@ -316,7 +314,6 @@ class ContextRecord:
                         str(item["role"]),
                         str(item["content"]),
                         tuple(str(value) for value in item.get("answers", ()) or ()),
-                        str(item.get("answer_letter", "")).strip().upper(),
                     )
                 )
             else:
@@ -340,7 +337,6 @@ class ContextRecord:
                         tuple(history),
                         message.content,
                         message.answers,
-                        message.answer_letter,
                         self.dataset,
                         self.context_id,
                     )
@@ -412,7 +408,7 @@ def _messages_from_row(row: dict[str, Any]) -> tuple[ConversationMessage, ...]:
                     ConversationMessage("assistant", answer, answers),
                 )
             )
-        if messages:
+        if messages or isinstance(qa_pairs, list):
             return tuple(messages)
     raw = row.get("conversations")
     if not isinstance(raw, list):
@@ -437,22 +433,18 @@ def _messages_from_row(row: dict[str, Any]) -> tuple[ConversationMessage, ...]:
                 role,
                 content,
                 tuple(str(value).strip() for value in answers if str(value).strip()),
-                str(item.get("answer_letter", "")).strip().upper(),
             )
         )
-    # The new 1QA corpus keeps alternative references and RACE's answer letter
-    # at row level. Preserve message-level metadata when it is already present.
+    # Preserve row-level answer references for a single-turn conversation.
     if len([message for message in messages if message.role == "assistant"]) == 1:
         references = row.get("answers") or ()
         if isinstance(references, str):
             references = (references,)
         references = tuple(str(value).strip() for value in references if str(value).strip())
-        letter = str((row.get("metadata") or {}).get("answer_letter", "")).strip().upper()
         for index, message in enumerate(messages):
             if message.role == "assistant":
                 messages[index] = ConversationMessage(
-                    message.role, message.content, message.answers or references,
-                    message.answer_letter or letter,
+                    message.role, message.content, message.answers or references
                 )
                 break
     return tuple(messages)

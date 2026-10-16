@@ -93,7 +93,7 @@ def test_all_questions_of_one_context_are_aggregated_in_file_order():
     assert first["id"].startswith("squad:train:")
 
 
-def test_race_keeps_the_options_and_the_answer_letter():
+def test_race_resolves_the_answer_letter_to_the_correct_option_text():
     row = {
         "article": "A short passage.", "question": "Which?",
         "options": ["one", "two", "three", "four"], "answer": "C",
@@ -101,7 +101,9 @@ def test_race_keeps_the_options_and_the_answer_letter():
     converted, = convert_rows("race", "test", [row])
     pair, = converted["qa_pairs"]
     assert pair["answers"] == ["three"]
-    assert pair["metadata"] == {"options": ["one", "two", "three", "four"], "answer_letter": "C"}
+    assert pair["answer"] == "three"
+    assert pair["question"] == "Which?"
+    assert pair["metadata"] == {"options": ["one", "two", "three", "four"]}
 
 
 def test_a_race_row_whose_letter_does_not_match_the_options_is_dropped():

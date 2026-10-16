@@ -167,7 +167,7 @@ def convert_msmarco(dataset, split, row, index):
 
 
 def convert_race(dataset, split, row, index):
-    """RACE: multiple choice; the answer letter must point at one of the four options."""
+    """RACE: resolve the answer letter while retaining the original options as metadata."""
     options = [_clean(option) for option in (row.get("options") or [])]
     letter = _clean(row.get("answer")).upper()
     position = {"A": 0, "B": 1, "C": 2, "D": 3}.get(letter, -1)
@@ -175,7 +175,7 @@ def convert_race(dataset, split, row, index):
         return row.get("article", ""), None
     return row.get("article", ""), _pair(
         index, dataset, split, row.get("question", ""), [options[position]],
-        options=options, answer_letter=letter,
+        options=options,
     )
 
 

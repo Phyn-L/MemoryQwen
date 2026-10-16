@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 import random
-import re
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -37,10 +36,6 @@ SYSTEM_PROMPTS = {
         "Combine evidence when needed and return only a concise answer, with no explanation "
         "or extra formatting."
     ),
-    "race": (
-        "Use only the provided passage to solve the multiple-choice question. Choose the "
-        "single best option and return only its uppercase letter: A, B, C, or D."
-    ),
 }
 
 
@@ -51,8 +46,6 @@ class ICLExample:
     context: str
     question: str
     references: tuple[str, ...]
-    options: tuple[str, ...] = ()
-    answer_letter: str = ""
 
 
 def iter_examples(path: str | Path, dataset: str | None = None):
@@ -106,10 +99,7 @@ def iter_examples(path: str | Path, dataset: str | None = None):
                         "dataset": row_dataset or dataset or "",
                         "context_id": row.get("context_id", row.get("id", "")),
                     }
-                    metadata = dict(message.get("metadata") or {})
-                    if message.get("answer_letter"):
-                        metadata["answer_letter"] = message["answer_letter"]
-                    flat["metadata"] = metadata
+                    flat["metadata"] = dict(message.get("metadata") or {})
                     yield flat, line_number, index
                     index += 1
                     pending = None
@@ -245,7 +235,7 @@ def sample_jsonl_many(
         if dataset not in reservoirs:
             continue
         example = _from_row(row, dataset, line_number, index)
-        if not example.references or (dataset == "race" and not example.answer_letter):
+        if not example.references:
             continue
         seen[dataset] += 1
         reservoir = reservoirs[dataset]
@@ -272,9 +262,6 @@ def _from_row(row: dict, dataset: str, line_number: int, index: int = 0) -> ICLE
         for value in references
         if value is not None and str(value).strip()
     )
-    metadata = row.get("metadata") or {}
-    options = tuple(str(value).strip() for value in metadata.get("options", []))
-    letter = str(metadata.get("answer_letter", "")).strip().upper()
     # ``index`` disambiguates the several questions that share one context line.
     identifier = str(row.get("id") or f"{dataset}-{line_number}-{index}")
     # The MS MARCO context is constructed upstream from passages with is_selected=1. Keeping
@@ -287,22 +274,14 @@ def _from_row(row: dict, dataset: str, line_number: int, index: int = 0) -> ICLE
         context=context,
         question=str(row["question"]).strip(),
         references=references,
-        options=options,
-        answer_letter=letter,
     )
 
 
 def format_prompt(example: ICLExample, demonstrations: Sequence[ICLExample]) -> str:
-    if example.dataset == "race":
-        instruction = (
-            "Read each passage and answer its multiple-choice question. "
-            "Return only the option letter (A, B, C, or D)."
-        )
-    else:
-        instruction = (
-            "Answer each question using only the given passage. Return only a short answer, "
-            "without explanation."
-        )
+    instruction = (
+        "Answer each question using only the given passage. Return only a short answer, "
+        "without explanation."
+    )
     blocks = [instruction]
     for index, demo in enumerate(demonstrations, 1):
         blocks.append(
@@ -347,48 +326,15 @@ def render_prompt(
 
 
 def _question_block(example: ICLExample) -> str:
-    block = f"Passage:\n{example.context}\n\nQuestion: {example.question}"
-    if example.dataset == "race":
-        if len(example.options) != 4:
-            raise ValueError(
-                f"RACE example {example.id} has {len(example.options)} options, expected 4"
-            )
-        choices = "\n".join(
-            f"{letter}. {option}"
-            for letter, option in zip("ABCD", example.options, strict=True)
-        )
-        block += f"\nOptions:\n{choices}"
-    return block
+    return f"Passage:\n{example.context}\n\nQuestion: {example.question}"
 
 
 def _demo_answer(example: ICLExample) -> str:
-    if example.dataset == "race":
-        return example.answer_letter
     return example.references[0] if example.references else ""
 
 
 def parse_prediction(example: ICLExample, raw_prediction: str) -> tuple[str, str]:
-    raw = raw_prediction.strip()
-    if example.dataset != "race":
-        # The very same helper the memory evaluator uses, so the two harnesses cannot drift
-        # apart on what "the prediction" is.
-        return answer_line(raw), ""
-    return parse_race_prediction(raw, example.options)
-
-
-def parse_race_prediction(raw_prediction: str, options: Sequence[str] = ()) -> tuple[str, str]:
-    """Return the answer text and option letter from a RACE generation."""
-    raw = raw_prediction.strip()
-    match = re.search(r"(?:^|[\s(\[])\s*([A-D])(?:[\s).:\]]|$)", raw.upper())
-    if not match:
-        normalized = normalize_answer(raw)
-        for index, option in enumerate(options):
-            if normalized == normalize_answer(option):
-                return option, "ABCD"[index]
-        return raw, ""
-    letter = match.group(1)
-    option = options["ABCD".index(letter)] if len(options) == 4 else ""
-    return option or letter, letter
+    return answer_line(raw_prediction.strip()), ""
 
 
 def example_metrics(prediction: str, references: Sequence[str]) -> dict[str, float]:
@@ -463,8 +409,4 @@ def aggregate_metrics(rows: Iterable[dict]) -> dict[str, float | int]:
         [str(row["prediction"]) for row in rows],
         [list(row["references"]) for row in rows],
     )
-    if rows[0].get("dataset") == "race":
-        result["accuracy"] = sum(
-            row.get("predicted_letter") == row.get("answer_letter") for row in rows
-        ) / len(rows)
     return result

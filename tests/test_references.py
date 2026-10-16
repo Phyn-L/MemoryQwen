@@ -35,6 +35,32 @@ def test_messages_keep_every_non_empty_gold_answer():
     assert messages[0].answers == ("cat", "the cat", "a cat")
 
 
+def test_race_row_uses_the_prebuilt_text_question_and_answer():
+    row = {
+        "dataset": "race",
+        "qa_pairs": [{
+            "question": "Which option?",
+            "answers": ["option text"],
+            "answer": "option text",
+            "metadata": {},
+        }],
+    }
+    user, assistant = _messages_from_row(row)
+    assert user.content == "Which option?"
+    assert assistant.content == "option text"
+    assert assistant.answers == ("option text",)
+    assert best_reference_metrics("option text", assistant.answers) == {
+        "em": 1.0,
+        "f1": 1.0,
+        "rouge_l": 1.0,
+    }
+    assert best_reference_metrics("unrelated", assistant.answers) == {
+        "em": 0.0,
+        "f1": 0.0,
+        "rouge_l": 0.0,
+    }
+
+
 def test_message_references_fall_back_to_the_single_answer():
     messages = _messages_from_row({
         "conversations": [{"role": "assistant", "content": "only"}],
