@@ -138,7 +138,6 @@ def test_old_eval_budget_name_is_not_accepted():
     with pytest.raises(TypeError, match="max_eval_sample_per_dataset"):
         TrainConfig.from_dict(
             {"evaluation": {"max_eval_sample_per_dataset": 37}},
-            tolerate_removed_data_fields=True,
         )
 
 
@@ -146,7 +145,6 @@ def test_old_qa_per_context_name_is_not_accepted():
     with pytest.raises(ValueError, match="qa_per_context"):
         TrainConfig.from_dict(
             {"data": {"qa_per_context": 4}},
-            tolerate_removed_data_fields=True,
         )
 
 
@@ -154,9 +152,6 @@ def test_removed_recon_context_budget_only_migrates_from_saved_configs(capsys):
     raw = {"evaluation": {"recon_max_contexts": 19}}
     with pytest.raises(ValueError, match="recon_max_contexts was removed"):
         TrainConfig.from_dict(raw)
-    cfg = TrainConfig.from_dict(raw, tolerate_removed_data_fields=True)
-    assert not hasattr(cfg.evaluation, "recon_max_contexts")
-    assert "Recon now uses contexts from the sampled QA rows" in capsys.readouterr().err
 
 
 def test_cloud_defaults_resolve_without_any_environment():
@@ -169,7 +164,7 @@ def test_cloud_defaults_resolve_without_any_environment():
             # conversation configs name their own SHINE-derived training file.
             assert cfg.data.root == "contexts", config
             train_file = cfg.data.split_file("train")
-            if cfg.data.train_conversation_file or cfg.data.conversation_file:
+            if cfg.data.train_conversation_file:
                 # The two conversation configs name their own SHINE-derived training file;
                 # the 1QA tree is still what the validation split resolves against.
                 assert train_file.endswith(("ift_c1qa.jsonl", "ift_pwc.jsonl")), config
@@ -282,15 +277,10 @@ def test_the_harness_and_model_layers_are_bases_not_presets():
     assert four_b.logging.log_every == baseline.logging.log_every == harness["logging"]["log_every"]
 
 
-def test_a_saved_config_may_still_carry_removed_fields():
-    """A checkpoint's embedded config is history: dropped with a warning, not an error."""
+def test_saved_config_with_removed_fields_fails():
     full = TrainConfig.from_file(REPO / "configs/train_baseline.yaml").to_dict()
     full["data"]["validation_source_file"] = "/old/val.jsonl"
     full["data"]["validation_max_samples_per_dataset"] = {"squad": 4}
 
-    with pytest.raises(ValueError, match="validation_source_file was removed"):
+    with pytest.raises(ValueError, match="unknown data field"):
         TrainConfig.from_dict(full)
-
-    tolerant = TrainConfig.from_dict(full, tolerate_removed_data_fields=True)
-    assert tolerant.data.split_file("validation").endswith("cache/validation.jsonl")
-    assert not hasattr(tolerant.data, "validation_source_file")

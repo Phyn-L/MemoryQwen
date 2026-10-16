@@ -219,16 +219,7 @@ def test_a_short_demo_pool_is_an_error_not_a_silent_smaller_shot_count(tmp_path)
         sample_jsonl_many(path, ["squad"], 4)
 
 
-def test_an_older_data_tree_still_resolves(tmp_path):
-    """A tree built by the previous layout keeps working until it is rebuilt."""
-    from src.eval_data import FALLBACK_SPLIT_DIRS, split_locations
+def test_only_canonical_data_tree_resolves(tmp_path):
+    from src.eval_data import split_locations
 
-    assert FALLBACK_SPLIT_DIRS["test"] == (("1qa-test", ".jsonl"),)
-    assert FALLBACK_SPLIT_DIRS["validation"] == (
-        ("1qa-validation", ".jsonl"), ("1qa-val", ".jsonl"),
-    )
-    assert split_locations("test")[0] == ("meta/test", ".json")
-    sampled = tmp_path / "1qa" / "1qa-val" / "squad.jsonl"
-    _write(sampled, [_conversation_row()])
-    path, split = resolve(tmp_path, "squad", "validation")
-    assert (Path(path), split) == (sampled, "validation")
+    assert split_locations("test") == (("meta/test", ".json"),)

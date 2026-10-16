@@ -40,7 +40,7 @@ def configure(
     machine: str,
 ) -> TrainConfig:
     cfg = TrainConfig.from_file(config_path, machine=machine)
-    for name in ("conversation_file", "train_conversation_file",
+    for name in ("train_conversation_file",
                  "validation_conversation_file", "test_conversation_file"):
         setattr(cfg.data, name, str(source))
     cfg.data.max_samples = rows

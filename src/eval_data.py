@@ -21,14 +21,6 @@ from pathlib import Path
 #: Evaluation splits, and the directory ``scripts/data/build_1qa.py`` writes each one into.
 SPLIT_DIRS = {"test": "test", "validation": "validation"}
 
-#: Older per-dataset locations, checked after the build output, as ``(directory, suffix)``:
-#: ``1qa-test``/``1qa-validation`` came from the previous build, and ``1qa-val`` holds the small
-#: subset an older training run sampled at startup.
-FALLBACK_SPLIT_DIRS = {
-    "test": (("1qa-test", ".jsonl"),),
-    "validation": (("1qa-validation", ".jsonl"), ("1qa-val", ".jsonl")),
-}
-
 #: Datasets the reader knows, mapped to the file slug used on disk and in report names.
 DATASETS: dict[str, str] = {
     "squad": "squad",
@@ -92,15 +84,11 @@ def _nonempty(path: Path) -> bool:
 
 
 def split_locations(split: str) -> tuple[tuple[str, str], ...]:
-    """``(directory, suffix)`` pairs that may hold one split of a dataset, best first.
-
-    The first entry is the ``meta/<split>/`` raw file the builder writes; the rest are the
-    locations earlier builds used, so an evaluation keeps working on an existing data tree.
-    """
+    """The canonical ``(directory, suffix)`` location for one evaluation split."""
     if split not in SPLIT_DIRS:
         raise ValueError(f"unknown evaluation split {split!r}; use test or validation")
     primary = ("meta/" + SPLIT_DIRS[split], ".json")
-    return (primary, *FALLBACK_SPLIT_DIRS.get(split, ()))
+    return (primary,)
 
 
 def resolve(root, dataset: str, split: str | None = None) -> tuple[Path, str]:

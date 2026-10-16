@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import sys
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -51,60 +50,15 @@ def _load_yaml_with_base(path: Path, stack: tuple[Path, ...] = ()) -> dict[str, 
     return _deep_merge(merged, raw)
 
 
-#: Data settings that no longer exist, with what to use instead: a config from an older tree
-#: must say *which* field moved rather than unfold it into unrelated keywords.
-REMOVED_DATA_FIELDS = {
-    "validation_max_samples_per_dataset": (
-        "bound validation data with validation_max_samples and "
-        "evaluation.max_eval_contexts_per_dataset"
-    ),
-    "validation_source_file": "validation always reads <data.files.root>/1qa/cache/validation.jsonl",
-    "validation_output_dir": "there is no sampled validation subset any more",
-    "validation_sampling_workers": "there is no validation sampling any more",
-}
-
-
-def drop_removed_data_fields(
-    data: Mapping[str, Any],
-) -> tuple[dict[str, Any], list[str]]:
-    """Remove fields that no longer exist from a *saved* config; returns the names dropped.
-
-    Only for configs written by an older version of this project (a checkpoint's embedded
-    config). A live YAML still fails loudly -- see :func:`_flatten_data_groups`.
-    """
-    dropped: list[str] = []
-
-    def collect(mapping: Mapping[str, Any]) -> None:
-        for key, value in mapping.items():
-            if key in REMOVED_DATA_FIELDS:
-                dropped.append(str(key))
-            elif isinstance(value, Mapping):
-                collect(value)
-
-    def clean(mapping: Mapping[str, Any]) -> dict[str, Any]:
-        out: dict[str, Any] = {}
-        for key, value in mapping.items():
-            if key in REMOVED_DATA_FIELDS:
-                continue
-            out[key] = clean(value) if isinstance(value, Mapping) else value
-        return out
-
-    collect(data)
-    return clean(data), dropped
-
-
 def _flatten_data_groups(data: Mapping[str, Any]) -> dict[str, Any]:
     """Accept grouped YAML data settings while keeping the flat DataConfig API.
 
     A key that is a ``DataConfig`` field keeps its value (even a mapping); any other mapping is
     a group (``files``/``limits``/``loader``/``task``) and is unfolded. Field-aware unfolding is
-    what makes the removed-field check below possible: a stale mapping cannot silently scatter
-    its entries into the data namespace.
+    what makes unknown fields fail rather than silently scattering into the data namespace.
     """
     flattened: dict[str, Any] = {}
     for key, value in data.items():
-        if key in REMOVED_DATA_FIELDS:
-            raise ValueError(f"data.{key} was removed: {REMOVED_DATA_FIELDS[key]}")
         if isinstance(value, Mapping) and key not in DataConfig.__dataclass_fields__:
             nested = _flatten_data_groups(value)
             duplicate = set(flattened).intersection(nested)
@@ -121,15 +75,7 @@ def _flatten_data_groups(data: Mapping[str, Any]) -> dict[str, Any]:
         return flattened
     unknown = sorted(set(flattened) - set(DataConfig.__dataclass_fields__))
     if unknown:
-        hints = [
-            (
-                f"{name} ({REMOVED_DATA_FIELDS[name]})"
-                if name in REMOVED_DATA_FIELDS
-                else name
-            )
-            for name in unknown
-        ]
-        raise ValueError(f"unknown data field(s): {', '.join(hints)}")
+        raise ValueError(f"unknown data field(s): {', '.join(unknown)}")
     return flattened
 
 
@@ -269,7 +215,6 @@ class DataConfig:
 
     root: str = "contexts"
     # Explicit per-split sources; None means "use <root>/1qa/1qa-<split>.jsonl".
-    conversation_file: str | None = None
     train_conversation_file: str | None = None
     validation_conversation_file: str | None = None
     test_conversation_file: str | None = None
@@ -316,9 +261,14 @@ class DataConfig:
     # padding inserts pad positions between them, so the first answer token would be
     # supervised from a padding hidden state.  Set to "right" only to reproduce old runs.
     question_padding_side: str = "left"
-    num_workers: int = 16
-    pin_memory: bool = True
-    persistent_workers: bool = True
+    train_num_workers: int = 4
+    train_pin_memory: bool = True
+    train_prefetch_factor: int = 2
+    train_persistent_workers: bool = True
+    eval_num_workers: int = 2
+    eval_pin_memory: bool = True
+    eval_prefetch_factor: int = 2
+    eval_persistent_workers: bool = True
     # "append" writes EOS after the last answer token; the legacy "overwrite" mode
     # overwrites that token whenever the answer is the longest in the batch.
 
@@ -347,13 +297,12 @@ class DataConfig:
 
         ``train`` and ``validation`` resolve to the filtered cache (built from the meta file
         with this config's filters); ``test`` resolves to the raw meta file because there is no
-        filtered test product. An explicit ``<split>_conversation_file`` always wins
-        (``conversation_file`` is the legacy alias for the train split).
+        filtered test product. An explicit ``<split>_conversation_file`` always wins.
         """
         if split not in {"train", "validation", "test"}:
             raise ValueError(f"unknown data split: {split!r}")
         explicit = {
-            "train": self.train_conversation_file or self.conversation_file,
+            "train": self.train_conversation_file,
             "validation": self.validation_conversation_file,
             "test": self.test_conversation_file,
         }[split]
@@ -477,7 +426,6 @@ class TrainConfig:
         cls,
         raw: Mapping[str, Any],
         machine: str | None = None,
-        tolerate_removed_data_fields: bool = False,
     ) -> TrainConfig:
         unknown = set(raw) - set(cls.__dataclass_fields__)
         if unknown:
@@ -488,16 +436,6 @@ class TrainConfig:
             overrides = fill_missing(overrides, os.environ)
         values = expand_env_values(raw, overrides)
         values = dict(values)
-        if tolerate_removed_data_fields:
-            values = dict(values)
-            cleaned, dropped = drop_removed_data_fields(values.get("data", {}))
-            if dropped:
-                print(
-                    "warning: ignoring removed data field(s) in the saved config: "
-                    + ", ".join(sorted(set(dropped))),
-                    file=sys.stderr,
-                )
-            values["data"] = cleaned
         data_values = _flatten_data_groups(values.get("data", {}))
         for key in ("train_datasets", "validation_datasets", "test_datasets"):
             if isinstance(data_values.get(key), list):
@@ -527,21 +465,13 @@ class TrainConfig:
                 f"move {'these fields' if len(moved) > 1 else 'this field'} under `loss:`"
             )
         checkpoint_values = dict(values.get("checkpoint", {}))
-        logging_values = dict(values.get("logging", {}))
-        # Legacy checkpoints embed this removed scheduling field.
         checkpoint_values.pop("save_every_steps", None)
+        logging_values = dict(values.get("logging", {}))
         evaluation_values = dict(values.get("evaluation", {}))
         if "recon_max_contexts" in evaluation_values:
-            if not tolerate_removed_data_fields:
-                raise ValueError(
-                    "evaluation.recon_max_contexts was removed; Recon now uses contexts "
-                    "from the sampled QA rows"
-                )
-            evaluation_values.pop("recon_max_contexts")
-            print(
-                "warning: ignoring saved evaluation.recon_max_contexts; Recon now uses "
-                "contexts from the sampled QA rows",
-                file=sys.stderr,
+            raise ValueError(
+                "evaluation.recon_max_contexts was removed; Recon now uses contexts "
+                "from the sampled QA rows"
             )
         return cls(
             model=ModelConfig(**model_values),
@@ -574,8 +504,12 @@ class TrainConfig:
             raise ValueError("data.max_input_tokens must be >= data.max_context_tokens")
         if d.tokenizer_filter_batch_size <= 0:
             raise ValueError("data.tokenizer_filter_batch_size must be positive")
-        if d.num_workers < 0:
-            raise ValueError("data.num_workers must be non-negative")
+        for name in ("train_num_workers", "eval_num_workers"):
+            if getattr(d, name) < 0:
+                raise ValueError(f"data.{name} must be non-negative")
+        for name in ("train_prefetch_factor", "eval_prefetch_factor"):
+            if getattr(d, name) <= 0:
+                raise ValueError(f"data.{name} must be positive")
         if d.train_tasks not in {"mix", "qa", "recon"}:
             raise ValueError("data.train_tasks must be mix, qa or recon")
         if not 0 <= d.recon_ratio <= 1:

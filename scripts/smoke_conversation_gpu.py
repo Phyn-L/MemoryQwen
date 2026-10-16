@@ -34,7 +34,6 @@ def _configure(path: str, source: Path, samples: int) -> TrainConfig:
     cfg = TrainConfig.from_file(path)
     # Keep the smoke test comfortably within a single 4090 while exercising the
     # same conversation-only collator used by training.
-    cfg.data.conversation_file = str(source)
     cfg.data.train_conversation_file = str(source)
     cfg.data.validation_conversation_file = str(source)
     cfg.data.test_conversation_file = str(source)

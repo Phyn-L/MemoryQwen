@@ -204,9 +204,7 @@ def test_the_fingerprint_ignores_unrelated_fields(tmp_path):
     source = _meta(tmp_path, "train", [_row("short context", ["q"])])
     tokenizer = _Tokenizer()
     config = _config(tmp_path)
-    same = _config(
-        tmp_path, num_workers=4, pin_memory=False, max_qa_sample_per_context=16,
-    )
+    same = _config(tmp_path, max_qa_sample_per_context=16)
     assert cache_fingerprint(config, "train", source, tokenizer) == cache_fingerprint(
         same, "train", source, tokenizer
     )

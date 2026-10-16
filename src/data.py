@@ -363,17 +363,12 @@ def render_conversation(
     payload = [
         {"role": message.role, "content": message.content} for message in messages
     ]
-    try:
-        return tokenizer.apply_chat_template(
-            payload,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=enable_thinking,
-        )
-    except (TypeError, ValueError):
-        return tokenizer.apply_chat_template(
-            payload, tokenize=False, add_generation_prompt=True
-        )
+    return tokenizer.apply_chat_template(
+        payload,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=enable_thinking,
+    )
 
 
 def _iter_jsonl(path: Path):
@@ -708,38 +703,6 @@ class ConversationDataset(Dataset):
         )
 
 
-class TrainingTaskDataset(Dataset):
-    """Context-level training view; task expansion is performed by the collator."""
-
-    def __init__(self, dataset, mode="mix", recon_ratio=0.5):
-        if mode not in {"mix", "qa", "recon"} or not 0 <= recon_ratio <= 1:
-            raise ValueError("invalid training task mixture")
-        self.source, self.mode, self.recon_ratio = dataset, mode, recon_ratio
-        self.cache_metadata = {
-            "source": dataset.cache_metadata,
-            "mode": mode,
-            "recon_ratio": recon_ratio,
-        }
-
-    def __len__(self):
-        return len(self.source)
-
-    def __getitem__(self, index):
-        if self.mode == "mix":
-            context_index, task = divmod(index, 2)
-            row = self.source[context_index]
-            return ContextRecord(
-                row.context,
-                row.conversations,
-                row.dataset,
-                row.context_id,
-                row.context_token_length,
-                "recon" if task else "qa",
-                row.independent_qa,
-            )
-        return self.source[index]
-
-
 class SortishSampler(Sampler[int]):
     CACHE_VERSION = 5
 
@@ -997,17 +960,12 @@ def collate_context_records(
             continue
         messages = turn.messages
         payload = [{"role": item.role, "content": item.content} for item in messages]
-        try:
-            text = tokenizer.apply_chat_template(
-                payload,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=chat_template_enable_thinking,
-            )
-        except (TypeError, ValueError):
-            text = tokenizer.apply_chat_template(
-                payload, tokenize=False, add_generation_prompt=True
-            )
+        text = tokenizer.apply_chat_template(
+            payload,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=chat_template_enable_thinking,
+        )
         rendered.append(text)
     # The template already contains role markers and the assistant generation marker.
     qa_rendered = [text for text, task in zip(rendered, task_ids, strict=True) if task == 1]

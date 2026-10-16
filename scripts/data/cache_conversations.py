@@ -66,7 +66,7 @@ def main() -> None:
         cfg.data.train_max_samples = args.train_max_samples
     if args.validation_max_samples is not None:
         cfg.data.validation_max_samples = args.validation_max_samples
-    num_workers = cfg.data.num_workers if args.num_workers is None else args.num_workers
+    num_workers = cfg.data.train_num_workers if args.num_workers is None else args.num_workers
     if num_workers < 0:
         raise SystemExit("--num-workers must be non-negative")
     cfg.validate()

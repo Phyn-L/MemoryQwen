@@ -33,9 +33,6 @@ def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('mode', choices=SCRIPTS)
     mode, args = parser.parse_known_args()
-    # Preserve CONFIG for old commands; an explicit CLI config always wins.
-    if os.environ.get('CONFIG') and not any(a == '--config' or a.startswith('--config=') for a in args):
-        args = ['--config', os.environ['CONFIG'], *args]
     if mode.mode == 'train':
         os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
     if mode.mode == 'icl' and not any(a == '--config' or a.startswith('--config=') for a in args):

@@ -80,7 +80,7 @@ def test_checkpoint_stem_names_output_directory_without_manifest(tmp_path, monke
         assert unsupported not in command
 
 
-def test_plans_prefer_the_meta_file_then_an_older_layout(tmp_path):
+def test_plans_prefer_the_meta_file(tmp_path):
     data_root = tmp_path / "data"
     (data_root / "1qa" / "meta" / "validation").mkdir(parents=True)
     (data_root / "1qa" / "meta" / "validation" / "squad.json").write_text("{}\n")
@@ -88,13 +88,6 @@ def test_plans_prefer_the_meta_file_then_an_older_layout(tmp_path):
     assert plan["split"] == "validation"
     assert Path(plan["path"]).name == "squad.json"
 
-    # A tree from the previous layout (1qa-validation/<slug>.jsonl) still resolves.
-    other = tmp_path / "old"
-    (other / "1qa" / "1qa-validation").mkdir(parents=True)
-    (other / "1qa" / "1qa-validation" / "squad.jsonl").write_text("{}\n")
-    plan, = list(test_all_suite.plans(other, ["squad"]))
-    assert plan["split"] == "validation"
-    assert Path(plan["path"]).name == "squad.jsonl"
 
 
 def test_plans_report_the_missing_file_instead_of_a_random_one(tmp_path):

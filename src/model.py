@@ -70,10 +70,6 @@ def compact_positions(
 TASK_RECON = 0
 TASK_QA = 1
 
-#: Qwen3's ``<|im_start|>assistant\n`` ids; the fallback for :func:`assistant_header_token_ids`.
-DEFAULT_TASK_INIT_TOKEN_IDS = (151644, 77091, 198)
-
-
 def is_trainable_parameter_name(name: str) -> bool:
     """Single source of truth for which parameters are trained.
 
@@ -277,23 +273,14 @@ class ContextMemoryModel(nn.Module):
         # Recon has one continuous task marker. It is initialised from the mean of the
         # pretrained input embeddings of the assistant generation header, which gives it the
         # same role and scale as the chat-template prefix while keeping it a trainable vector.
-        # ``load_model`` resolves those ids with the run's own tokenizer
-        # (:func:`assistant_header_token_ids`); the Qwen3 ids are the fallback for a caller that
-        # does not know them, and tiny synthetic backbones keep the old random initialisation
-        # because their vocabulary has no such rows.
+        # ``load_model`` resolves those ids with the run's own tokenizer.
         embedding = self.qwen.get_input_embeddings().weight.detach()
         self.task_init_token_ids: tuple[int, ...] = ()
         task_init = None
-        candidates = (
-            tuple(int(value) for value in task_init_token_ids) if task_init_token_ids else (),
-            DEFAULT_TASK_INIT_TOKEN_IDS,
-        )
-        for ids in candidates:
-            if not ids or min(ids) < 0 or max(ids) >= embedding.size(0):
-                continue
+        ids = tuple(int(value) for value in (task_init_token_ids or ()))
+        if ids and min(ids) >= 0 and max(ids) < embedding.size(0):
             task_init = embedding[list(ids)].mean(dim=0)
-            self.task_init_token_ids = tuple(ids)
-            break
+            self.task_init_token_ids = ids
         if task_init is None:
             task_init = torch.empty(
                 self.qwen_hidden_size, device=embedding.device, dtype=embedding.dtype
@@ -1079,7 +1066,7 @@ def assistant_header_token_ids(tokenizer) -> tuple[int, ...]:
     its pretrained input embeddings initialises the Recon marker. Resolving the ids here instead
     of hardcoding them keeps a different Qwen family or a re-cut vocabulary from silently
     initialising that marker from unrelated rows; an empty result (the header is not in the
-    vocabulary) lets ``ContextMemoryModel`` fall back to :data:`DEFAULT_TASK_INIT_TOKEN_IDS`.
+    vocabulary) leaves the task marker randomly initialized.
     """
     try:
         ids = tokenizer.encode("<|im_start|>assistant\n", add_special_tokens=False)

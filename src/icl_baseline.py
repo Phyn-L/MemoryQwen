@@ -312,17 +312,12 @@ def render_prompt(
         },
         {"role": "user", "content": prompt},
     ]
-    try:
-        return tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-    except (TypeError, ValueError):
-        return tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+    return tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
 
 
 def _question_block(example: ICLExample) -> str:

@@ -403,7 +403,7 @@ QWEN3_ASSISTANT_HEADER_IDS = (151644, 77091, 198)
 
 
 def test_recon_task_embedding_is_initialised_from_assistant_header_mean():
-    model = tiny_model(vocab_size=151936)
+    model = tiny_model(vocab_size=151936, task_init_token_ids=QWEN3_ASSISTANT_HEADER_IDS)
     embedding = model.qwen.get_input_embeddings().weight.detach()
     expected = embedding[list(QWEN3_ASSISTANT_HEADER_IDS)].mean(dim=0)
     assert model.recon_task_embedding.shape == (model.qwen_hidden_size,)
@@ -425,15 +425,9 @@ def test_the_recon_marker_uses_the_ids_the_caller_resolves():
     )
 
 
-def test_an_unusable_header_id_falls_back_to_the_qwen3_ids():
-    # 10_000_000 is outside the vocabulary, so that pair cannot come from the embeddings.
+def test_an_unusable_header_id_uses_random_initialization():
     model = tiny_model(vocab_size=151936, task_init_token_ids=(5, 10_000_000))
-    embedding = model.qwen.get_input_embeddings().weight.detach()
-    assert model.task_init_token_ids == (151644, 77091, 198)
-    torch.testing.assert_close(
-        model.recon_task_embedding.detach(),
-        embedding[[151644, 77091, 198]].mean(dim=0).to(torch.float32),
-    )
+    assert model.task_init_token_ids == ()
 
 
 def test_the_header_ids_are_resolved_from_the_tokenizer():
@@ -453,7 +447,7 @@ def test_the_header_ids_are_resolved_from_the_tokenizer():
     assert assistant_header_token_ids(object()) == ()
 
 
-def test_recon_task_embedding_falls_back_for_backbones_without_the_header_ids():
+def test_recon_task_embedding_is_random_for_backbones_without_the_header_ids():
     """The guard is `max(id) < vocab`: one row short of the header must stay random."""
     header_max = max(QWEN3_ASSISTANT_HEADER_IDS)
     model = tiny_model(vocab_size=header_max)
@@ -462,7 +456,7 @@ def test_recon_task_embedding_falls_back_for_backbones_without_the_header_ids():
     assert model.recon_task_embedding.dtype == torch.float32
     assert 0.005 < model.recon_task_embedding.std().item() < 0.05
 
-    covered = tiny_model(vocab_size=header_max + 1)
+    covered = tiny_model(vocab_size=header_max + 1, task_init_token_ids=QWEN3_ASSISTANT_HEADER_IDS)
     embedding = covered.qwen.get_input_embeddings().weight.detach()
     torch.testing.assert_close(
         covered.recon_task_embedding.detach(),
