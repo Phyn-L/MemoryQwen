@@ -3,8 +3,8 @@ _base_:
 - train_baseline.yaml
 data:
   loader:
-    num_workers: 4
-    persistent_workers: false
+    train_num_workers: 4
+    train_persistent_workers: false
 evaluation:
   autoregressive_every: 250  # 自回归验证与 checkpoint 的训练步间隔
   qa_batch_size: 24  # QA 验证批大小

@@ -19,6 +19,7 @@ spec = importlib.util.spec_from_file_location(
 )
 train = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(train)
+from utils.reporting import format_evaluation_report
 
 ANSWER_METRIC_KEYS = ("em", "f1", "rouge_l")
 
@@ -92,7 +93,7 @@ def test_autoregressive_reconstruction_uses_the_reconstruction_section():
 
 
 def test_eval_metrics_table_groups_datasets_and_metrics():
-    table = train.format_eval_metrics_table(
+    table = format_evaluation_report(
         {
             "qa_task": {
                 "em": 0.25,
@@ -129,7 +130,7 @@ def test_eval_metrics_table_groups_datasets_and_metrics():
 
 
 def test_eval_metrics_table_renders_the_reconstruction_pass():
-    table = train.format_eval_metrics_table(
+    table = format_evaluation_report(
         {
             "recon_task": {
                 "recon_ce": 1.25,
@@ -162,7 +163,7 @@ def test_eval_report_keeps_global_counts_and_wraps_metadata_to_table_width():
         qa_counts=(("squad", 4933),),
         context_counts=(("squad", 1024),),
     )
-    table = train.format_eval_metrics_table(
+    table = format_evaluation_report(
         {"qa_task": {"dataset/squad/count": 4933}},
         selection=selection,
         seed=42,
@@ -199,7 +200,7 @@ def test_eval_progress_only_main_rank_writes_to_terminal(monkeypatch):
         monkeypatch.setattr(
             evaluator,
             "Console",
-            lambda **kwargs: Console(file=output, force_terminal=True, width=120),
+            lambda output=output, **kwargs: Console(file=output, force_terminal=True, width=120),
         )
         progress, task = evaluator._make_eval_progress(
             2, "Validation", rank, enabled, "qa_rows"

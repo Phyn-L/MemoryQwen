@@ -1,23 +1,14 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
 import os
-import sys
 from pathlib import Path
 
 import torch
 import yaml
 from torch.utils.data import DataLoader
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-_train_spec = importlib.util.spec_from_file_location(
-    "_memoryqwen_train_reporting", Path(__file__).with_name("train.py")
-)
-_train_module = importlib.util.module_from_spec(_train_spec)
-_train_spec.loader.exec_module(_train_module)
-format_evaluation_report = _train_module.format_evaluation_report
 from src.evaluator import Evaluator
 from src.model import load_model
 from src.pipeline import (
@@ -29,6 +20,7 @@ from utils.checkpoint import CheckpointManager
 from utils.config import TrainConfig
 from utils.machines import machine_names
 from utils.model_paths import relocate_saved_paths
+from utils.reporting import format_evaluation_report
 
 
 def evaluation_config(checkpoint, config=None, machine=None):
@@ -43,12 +35,9 @@ def evaluation_config(checkpoint, config=None, machine=None):
     # The machine that wrote the checkpoint is provenance, not the current execution host.
     raw = dict(raw)
     raw.pop("machine", None)
-    # A checkpoint's config was written by whatever version trained it, so removed fields are
-    # dropped with a warning instead of making the checkpoint unevaluable.
     return TrainConfig.from_dict(
         relocate_saved_paths(raw, machine),
         machine=machine,
-        tolerate_removed_data_fields=True,
     )
 
 
@@ -201,18 +190,20 @@ def main():
         batch_size=cfg.training.batch_size,
         shuffle=False,
         collate_fn=make_collate(cfg, tokenizer, sample_qa=False),
-        num_workers=cfg.data.num_workers,
-        pin_memory=cfg.data.pin_memory,
-        persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
+        num_workers=cfg.data.eval_num_workers,
+        pin_memory=cfg.data.eval_pin_memory,
+        prefetch_factor=cfg.data.eval_prefetch_factor if cfg.data.eval_num_workers else None,
+        persistent_workers=cfg.data.eval_persistent_workers and cfg.data.eval_num_workers > 0,
     )
     # Match training: sample QA turns once from the global seed, then reuse their unique
     # contexts for Recon. Each selected loader is partitioned across ranks.
     world = 1 if accelerator is None else int(accelerator.num_processes)
     rank = 0 if accelerator is None else int(accelerator.process_index)
     loader_options = dict(
-        num_workers=cfg.data.num_workers,
-        pin_memory=cfg.data.pin_memory,
-        persistent_workers=cfg.data.persistent_workers and cfg.data.num_workers > 0,
+        num_workers=cfg.data.eval_num_workers,
+        pin_memory=cfg.data.eval_pin_memory,
+        prefetch_factor=cfg.data.eval_prefetch_factor if cfg.data.eval_num_workers else None,
+        persistent_workers=cfg.data.eval_persistent_workers and cfg.data.eval_num_workers > 0,
     )
     row_loader, row_base = evaluation_window_loader(
         ds,

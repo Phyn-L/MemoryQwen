@@ -22,9 +22,14 @@ data:
     max_answer_tokens: 64
     max_conversation_tokens: 768
   loader:
-    num_workers: 4
-    pin_memory: true
-    persistent_workers: true
+    train_num_workers: 4
+    train_pin_memory: true
+    train_prefetch_factor: 2
+    train_persistent_workers: true
+    eval_num_workers: 2
+    eval_pin_memory: true
+    eval_prefetch_factor: 2
+    eval_persistent_workers: true
   task:
     # 训练任务类型：mix、qa 或 recon
     train_tasks: mix

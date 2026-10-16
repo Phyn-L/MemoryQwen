@@ -288,29 +288,6 @@ def select_evaluation_samples(
     )
 
 
-def format_evaluation_sample_counts(
-    selection, *, seed: int, recon_enabled: bool
-) -> str:
-    """Report global selected counts, independently of rank partitioning."""
-    qa_counts, context_counts = dict(selection.qa_counts), dict(
-        selection.context_counts
-    )
-    lines = [f"[eval] sampled counts (global, seed={seed}):"]
-    for name in sorted(qa_counts.keys() | context_counts.keys()):
-        lines.append(
-            f"[eval] dataset={name or 'unknown'} contexts={context_counts.get(name, 0)} "
-            f"QA={qa_counts.get(name, 0)} "
-            f"Recon_contexts={context_counts.get(name, 0) if recon_enabled else 0}"
-        )
-    lines.append(
-        f"[eval] total contexts={len(selection.contexts)} QA={selection.qa_rows} "
-        f"Recon_contexts={len(selection.contexts) if recon_enabled else 0}"
-    )
-    if not recon_enabled:
-        lines.append("[eval] Recon disabled")
-    return "\n".join(lines)
-
-
 def _balanced_context_shards(dataset, selection, world: int, max_new_tokens: int):
     """Assign whole contexts to the least-loaded rank using a deterministic cost estimate."""
     shards = [[] for _ in range(max(1, int(world)))]
@@ -351,6 +328,7 @@ def evaluation_window_loader(
     max_new_tokens=64,
     num_workers=0,
     pin_memory=False,
+    prefetch_factor=2,
     persistent_workers=False,
 ):
     """Load the sampled QA rows or their unique contexts for one rank.
@@ -401,6 +379,7 @@ def evaluation_window_loader(
         collate_fn=collate,
         num_workers=num_workers,
         pin_memory=pin_memory,
+        prefetch_factor=prefetch_factor if num_workers else None,
         persistent_workers=persistent_workers and num_workers > 0,
     )
     loader.evaluation_total = total

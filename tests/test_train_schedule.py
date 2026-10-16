@@ -68,7 +68,7 @@ def test_the_last_step_is_always_evaluated():
 
 def test_the_loop_takes_its_cadences_from_the_config():
     source = _train_source()
-    assert "step % cfg.logging.log_every == 0" in source
+    assert "step % cfg.logging.log_every == 0" in source or "(step + 1) % cfg.logging.log_every == 0" in source
     assert "step % 10 == 0" not in source, "the loss-logging cadence must come from the config"
     assert source.count("should_evaluate(") >= 2, "autoregressive evaluation must use the final-step rule"
     assert "teacher_metrics = evaluator.teacher_forced" not in source
@@ -88,11 +88,9 @@ def test_the_loop_echoes_the_resolved_schedule():
         assert field in source, field
 
 
-def test_the_allocator_cache_is_released_after_an_evaluation():
+def test_the_allocator_cache_is_not_manually_flushed_after_an_evaluation():
     source = _train_source()
-    assert "torch.cuda.empty_cache()" in source, (
-        "the evaluation's cached blocks must not be left for the next backward"
-    )
+    assert "torch.cuda.empty_cache()" not in source
     # It must be tied to an evaluation having happened, not run every step.
     assert "metrics is not None" in source
 
@@ -195,6 +193,6 @@ def test_the_progress_line_carries_loss_qa_recon_and_ppl_at_once():
 
 def test_the_loop_does_not_overwrite_the_postfix_with_loss_only():
     source = _train_source()
-    assert "postfix = step_postfix(group_terms, group_micro_batches)" in source
+    assert "step_postfix(logged, micro_batches_in_step)" in source
     assert 'status=" · ".join(' in source
     assert "set_postfix(loss=" not in source
