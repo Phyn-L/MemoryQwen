@@ -119,9 +119,9 @@ def test_eval_metrics_table_groups_datasets_and_metrics():
             "ROUGE-L",
             "contexts",
             "QA",
-            "Recon contexts",
         )
     )
+    assert "Recon contexts" not in table
     assert "foo/bar" in table
     assert "squad" in table
     assert "overall" in table

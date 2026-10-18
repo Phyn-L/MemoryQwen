@@ -277,8 +277,6 @@ def main():
                 seed=cfg.training.seed,
                 max_contexts=cfg.evaluation.max_eval_contexts_per_dataset,
                 max_new_tokens=cfg.evaluation.max_new_tokens,
-                recon_enabled=cfg.evaluation.recon_teacherforce
-                or cfg.evaluation.recon_autoregressive,
             )
         )
     if is_main:

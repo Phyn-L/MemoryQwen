@@ -58,7 +58,7 @@ loss:
   max_logits_rows: 256  # 每次词表投影的行数上限（显存/核数量权衡）
 evaluation:
   autoregressive_every: 2500  # 自回归验证与 checkpoint 的训练步间隔
-  max_eval_contexts_per_dataset: 1024  # 每个数据集的自回归评估 context 数上限
+  max_eval_contexts_per_dataset: 512  # 每个数据集的自回归评估 context 数上限
   max_new_tokens: 64  # 自回归验证生成 token 上限
   qa_batch_size: 16  # QA 验证批大小
   recon_teacherforce: true  # teacher-forced recon 指标（无需生成）

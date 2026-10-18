@@ -4,12 +4,12 @@ _base_:
 - models/qwen3-1.7b.yaml
 memory:
   # Fixed-length context writer
-  memory_length: 128  # 写入固定 memory 的 slot 数
+  memory_length: 64  # 写入固定 memory 的 slot 数
   context_layer_indices: [-1]  # 用于构造 context 表示的 Transformer 层索引
   memory_resampler_layers: 4  # memory resampler 层数
   memory_resampler_heads: 4  # memory resampler 注意力头数
   memory_resampler_hidden_size: 512  # memory resampler 隐藏维度
-  memory_resampler_ffn_ratio: 2  # memory resampler 前馈层扩展倍数
+  memory_resampler_ffn_ratio: 4  # memory resampler 前馈层扩展倍数
   memory_resampler_output_mode: layer0  # memory resampler 输出模式
   reader_memory_source: memory_hidden  # reader 使用的 memory 表示来源
 

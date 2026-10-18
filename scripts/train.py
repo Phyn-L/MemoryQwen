@@ -340,7 +340,6 @@ def main() -> None:
             f"[bold cyan]Context checkpointing[/bold cyan]  {checkpoint_state}"
         )
         trainable, trainable_total = trainable_parameter_report(model)
-        CONSOLE.print(format_trainable_parameter_table(trainable))
 
     # The filtered cache (`cache/train.jsonl` + `cache/validation.jsonl`) is built from the
     # raw meta splits with this config's filters. Building it here keeps "which rows does this
@@ -480,44 +479,6 @@ def main() -> None:
     total_steps = max(1, steps_per_epoch * cfg.training.epochs)
     optimizer = build_optimizer(model, cfg.optimizer)
     scheduler = build_scheduler(optimizer, cfg.scheduler, total_steps)
-    # Echo the resolved schedule once. On a single-epoch run every cadence and the warm-up
-    # are read against the step budget, and a batch/process mismatch changes that budget
-    # silently: this line is the number the progress bar will show, printed before any
-    # compute is spent.
-    if accelerator is None or accelerator.is_main_process:
-        ranks = 1 if accelerator is None else accelerator.num_processes
-        schedule = Table(
-            title="Training Schedule",
-            box=THREE_LINE,
-            header_style="bold cyan",
-        )
-        schedule.add_column("Setting", style="cyan")
-        schedule.add_column("Value", style="white")
-        schedule.add_column("Setting", style="cyan")
-        schedule.add_column("Value", style="white")
-        schedule.add_row(
-            "Machine", cfg.machine or "config-defaults", "Steps", f"{total_steps:,}"
-        )
-        schedule.add_row("Epochs", str(cfg.training.epochs), "Ranks", str(ranks))
-        schedule.add_row(
-            "Batch / Rank",
-            str(cfg.training.batch_size),
-            "Accumulation",
-            str(accumulation),
-        )
-        schedule.add_row(
-            "Effective Batch",
-            f"{cfg.training.batch_size * ranks * accumulation:,}",
-            "Warmup",
-            f"{cfg.scheduler.warmup_steps:,}",
-        )
-        schedule.add_row(
-            "Eval Every",
-            f"{cfg.evaluation.autoregressive_every:,}",
-            "Log Every",
-            f"{cfg.logging.log_every:,}",
-        )
-        CONSOLE.print(table_panel(schedule))
     manager = CheckpointManager(cfg.checkpoint.output_dir)
     if cfg.checkpoint.init_from and not args.resume:
         # Use a separate manager so phase-one selection metadata and RNG do not leak.
@@ -577,6 +538,44 @@ def main() -> None:
     run = None
     if accelerator is None or accelerator.is_main_process:
         run = init_tracking(cfg)
+        CONSOLE.print(format_trainable_parameter_table(trainable))
+        # Echo the resolved schedule once. On a single-epoch run every cadence and the warm-up
+        # are read against the step budget, and a batch/process mismatch changes that budget
+        # silently: this line is the number the progress bar will show, printed before any
+        # compute is spent.
+        ranks = 1 if accelerator is None else accelerator.num_processes
+        schedule = Table(
+            title="Training Schedule",
+            box=THREE_LINE,
+            header_style="bold cyan",
+        )
+        schedule.add_column("Setting", style="cyan")
+        schedule.add_column("Value", style="white")
+        schedule.add_column("Setting", style="cyan")
+        schedule.add_column("Value", style="white")
+        schedule.add_row(
+            "Machine", cfg.machine or "config-defaults", "Steps", f"{total_steps:,}"
+        )
+        schedule.add_row("Epochs", str(cfg.training.epochs), "Ranks", str(ranks))
+        schedule.add_row(
+            "Batch / Rank",
+            str(cfg.training.batch_size),
+            "Accumulation",
+            str(accumulation),
+        )
+        schedule.add_row(
+            "Effective Batch",
+            f"{cfg.training.batch_size * ranks * accumulation:,}",
+            "Warmup",
+            f"{cfg.scheduler.warmup_steps:,}",
+        )
+        schedule.add_row(
+            "Eval Every",
+            f"{cfg.evaluation.autoregressive_every:,}",
+            "Log Every",
+            f"{cfg.logging.log_every:,}",
+        )
+        CONSOLE.print(table_panel(schedule))
 
     model.train()
     # Deterministic objective sampling: the distillation position subset is drawn from a
@@ -872,8 +871,6 @@ def main() -> None:
                             step=step,
                             max_contexts=cfg.evaluation.max_eval_contexts_per_dataset,
                             max_new_tokens=cfg.evaluation.max_new_tokens,
-                            recon_enabled=cfg.evaluation.recon_teacherforce
-                            or cfg.evaluation.recon_autoregressive,
                         )
                     )
             if run and is_main:

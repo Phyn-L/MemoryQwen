@@ -22,7 +22,10 @@ def table_panel(table):
     table.caption = None
     table.title = None
     width = min(120, Console(width=120).measure(table).maximum + 4)
-    table.caption, table.title = caption, title
+    # The table is rendered inside a titled panel. Restoring ``table.title`` here
+    # makes Rich render the same title twice: once on the panel and once above the
+    # table itself.
+    table.caption = caption
     return Panel(table, title=title, width=width, expand=False, border_style="cyan")
 
 
@@ -43,7 +46,7 @@ def _render_table(title, headers, rows, *, caption=None) -> str:
 
 def format_evaluation_report(
     task_metrics, *, selection=None, seed=None, step=None, max_contexts=None,
-    max_new_tokens=None, recon_enabled=True,
+    max_new_tokens=None,
 ) -> str:
     if not task_metrics:
         return ""
@@ -108,11 +111,10 @@ def format_evaluation_report(
                 f"{metrics.get(f'{prefix}rouge_l', 0.0):.4f}",
                 "-" if contexts is None else f"{contexts:,}",
                 f"{sampled_qa:,.0f}",
-                "0" if not recon_enabled else ("-" if contexts is None else f"{contexts:,}"),
             ])
         lines.append(_render_table(
             f"Evaluation · {task_name}",
-            ["dataset", "EM", "F1", "ROUGE-L", "contexts", "QA", "Recon contexts"],
+            ["dataset", "EM", "F1", "ROUGE-L", "contexts", "QA"],
             rows,
             caption=caption,
         ))
