@@ -266,19 +266,36 @@ def test_context_checkpointing_restores_state_after_forward_failure(monkeypatch)
     assert set(model.qwen.get_input_embeddings()._forward_hooks) == embedding_hooks
 
 
-@pytest.mark.parametrize("interval", [0, -1, True, 1.5])
-def test_context_checkpoint_interval_requires_a_positive_integer(interval):
+@pytest.mark.parametrize("interval", [-1, True, 1.5])
+def test_context_checkpoint_interval_requires_a_non_negative_integer(interval):
     config = Qwen3Config(
         vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=3,
         num_attention_heads=4, num_key_value_heads=2, head_dim=8,
         max_position_embeddings=64, tie_word_embeddings=True,
     )
-    with pytest.raises(ValueError, match="must be a positive integer"):
+    with pytest.raises(ValueError, match="must be a non-negative integer"):
         ContextMemoryModel(
             Qwen3ForCausalLM(config), memory_length=4,
             memory_resampler_hidden_size=16, memory_resampler_heads=2,
             gradient_checkpoint_every_n_layers=interval,
         )
+
+
+def test_zero_context_checkpoint_interval_disables_checkpointing(monkeypatch):
+    model = tiny_model(
+        context_gradient_checkpointing=True,
+        gradient_checkpoint_every_n_layers=0,
+    ).train()
+    body = model._transformer_body
+    enable = body.gradient_checkpointing_enable
+
+    def fail_if_enabled(**kwargs):
+        raise AssertionError("checkpointing must remain disabled")
+
+    monkeypatch.setattr(body, "gradient_checkpointing_enable", fail_if_enabled)
+    encode(model).memory.square().mean().backward()
+    assert not any(layer.gradient_checkpointing for layer in body.layers)
+    monkeypatch.setattr(body, "gradient_checkpointing_enable", enable)
 
 
 def test_manual_lora_writer_forward_backward():

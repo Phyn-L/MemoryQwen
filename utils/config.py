@@ -646,8 +646,8 @@ class TrainConfig:
             raise ValueError("batch_size and epochs must be positive")
         if t.gradient_accumulation_steps <= 0:
             raise ValueError("training.gradient_accumulation_steps must be positive")
-        if type(t.gradient_checkpoint_every_n_layers) is not int or t.gradient_checkpoint_every_n_layers <= 0:
-            raise ValueError("training.gradient_checkpoint_every_n_layers must be a positive integer")
+        if type(t.gradient_checkpoint_every_n_layers) is not int or t.gradient_checkpoint_every_n_layers < 0:
+            raise ValueError("training.gradient_checkpoint_every_n_layers must be a non-negative integer")
         if t.max_grad_norm <= 0:
             raise ValueError("training.max_grad_norm must be positive")
         if self.evaluation.autoregressive_every <= 0:

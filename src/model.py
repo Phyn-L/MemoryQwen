@@ -249,9 +249,9 @@ class ContextMemoryModel(nn.Module):
         if not 0 < memory_length <= self.window_limit:
             raise ValueError("memory_length must be within the backbone window")
         self.context_gradient_checkpointing = bool(context_gradient_checkpointing)
-        if type(gradient_checkpoint_every_n_layers) is not int or gradient_checkpoint_every_n_layers <= 0:
+        if type(gradient_checkpoint_every_n_layers) is not int or gradient_checkpoint_every_n_layers < 0:
             raise ValueError(
-                "gradient_checkpoint_every_n_layers must be a positive integer"
+                "gradient_checkpoint_every_n_layers must be a non-negative integer"
             )
         self.gradient_checkpoint_every_n_layers = gradient_checkpoint_every_n_layers
         self.context_layer_indices = tuple(context_layer_indices)
@@ -447,7 +447,10 @@ class ContextMemoryModel(nn.Module):
         captured: dict[int, torch.Tensor] = {}
         hooks = []
         checkpointing = (
-            self.context_gradient_checkpointing and self.training and torch.is_grad_enabled()
+            self.context_gradient_checkpointing
+            and self.gradient_checkpoint_every_n_layers > 0
+            and self.training
+            and torch.is_grad_enabled()
         )
         for index in sorted(set(resolved)):
             if index == depth - 1:

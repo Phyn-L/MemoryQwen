@@ -333,7 +333,7 @@ def main() -> None:
             "Transformers enabled "
             f"every_n_layers={checkpoint_interval} "
             f"layers={len(range(0, checkpoint_depth, checkpoint_interval))}/{checkpoint_depth}"
-            if cfg.model.context_gradient_checkpointing
+            if cfg.model.context_gradient_checkpointing and checkpoint_interval > 0
             else "disabled"
         )
         CONSOLE.print(

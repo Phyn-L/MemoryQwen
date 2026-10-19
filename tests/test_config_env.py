@@ -21,12 +21,18 @@ sys.path.insert(0, str(REPO))
 from utils.config import TrainConfig, expand_env, expand_env_values  # noqa: E402
 
 
-@pytest.mark.parametrize("interval", [0, -1, True, 1.5])
-def test_context_checkpoint_interval_must_be_a_positive_integer(interval):
+@pytest.mark.parametrize("interval", [-1, True, 1.5])
+def test_context_checkpoint_interval_must_be_a_non_negative_integer(interval):
     cfg = TrainConfig()
     cfg.training.gradient_checkpoint_every_n_layers = interval
     with pytest.raises(ValueError, match="training.gradient_checkpoint_every_n_layers"):
         cfg.validate()
+
+
+def test_zero_context_checkpoint_interval_disables_checkpointing_in_config():
+    cfg = TrainConfig()
+    cfg.training.gradient_checkpoint_every_n_layers = 0
+    cfg.validate()
 
 
 def test_default_is_used_when_the_variable_is_unset():
