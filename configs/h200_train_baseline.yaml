@@ -17,10 +17,10 @@ data:
     train_num_workers: 4
     train_persistent_workers: false
 evaluation:
-  autoregressive_every: 1000  # 自回归验证与 checkpoint 的训练步间隔
+  autoregressive_every: 2500  # 自回归验证与 checkpoint 的训练步间隔
   qa_batch_size: 24  # QA 验证批大小
 logging:
   log_every: 25  # 训练日志记录间隔（步）
   swanlab_mode: offline
 scheduler:
-  warmup_steps: 1000  # 学习率预热步数
+  warmup_steps: 2500  # 学习率预热步数
