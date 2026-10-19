@@ -10,7 +10,7 @@ memory:
   memory_resampler_ffn_ratio: 4
   memory_resampler_output_mode: layer0
 training:
-  batch_size: 4
+  batch_size: 2
 data:
   loader:
     train_num_workers: 4
