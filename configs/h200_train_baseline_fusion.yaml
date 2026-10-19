@@ -1,8 +1,9 @@
+# 实验层：h200（8xH200）上的 baseline。只写与 harness/train_baseline 不同的部分。
 _base_:
 - train_baseline.yaml
 memory:
   memory_length: 64
-  context_layer_indices: [-1]
+  context_layer_indices: [-1,-2,-3,-4]
   memory_resampler_layers: 4
   memory_resampler_heads: 4
   memory_resampler_hidden_size: 512
