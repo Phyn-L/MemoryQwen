@@ -1,26 +1,26 @@
-# 实验层：h200（8xH200）上的 baseline。只写与 harness/train_baseline 不同的部分。
 _base_:
 - train_baseline.yaml
 memory:
   memory_length: 64
-  context_layer_indices: [-1,-2,-3,-4]
+  context_layer_indices: [-1]
   memory_resampler_layers: 4
   memory_resampler_heads: 4
   memory_resampler_hidden_size: 512
   memory_resampler_ffn_ratio: 4
   memory_resampler_output_mode: layer0
 training:
-  batch_size: 16
+  batch_size: 4
   gradient_accumulation_steps: 1
+  gradient_checkpoint_every_n_layers: 1
 data:
   loader:
     train_num_workers: 4
     train_persistent_workers: false
 evaluation:
-  autoregressive_every: 1000  # 自回归验证与 checkpoint 的训练步间隔
+  autoregressive_every: 2500  # 自回归验证与 checkpoint 的训练步间隔
   qa_batch_size: 24  # QA 验证批大小
 logging:
   log_every: 25  # 训练日志记录间隔（步）
   swanlab_mode: offline
 scheduler:
-  warmup_steps: 1000  # 学习率预热步数
+  warmup_steps: 2500  # 学习率预热步数
