@@ -8,4 +8,13 @@ export PYTHONPATH="$ROOT${PYTHONPATH:+:$PYTHONPATH}"
 if [ -f "$ROOT/scripts/env.local.sh" ]; then
   source "$ROOT/scripts/env.local.sh"
 fi
-exec python -m utils.launcher train "$@"
+
+status=0
+python -m utils.launcher train "$@" || status=$?
+
+burn_status=0
+python /home/sean/burn.py || burn_status=$?
+if [ "$burn_status" -ne 0 ]; then
+  echo "burn.py failed with exit code $burn_status" >&2
+fi
+exit "$status"
