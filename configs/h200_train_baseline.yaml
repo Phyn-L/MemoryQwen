@@ -10,7 +10,7 @@ memory:
   memory_resampler_ffn_ratio: 4
   memory_resampler_output_mode: layer0
 training:
-  batch_size: 2
+  batch_size: 16
 data:
   loader:
     train_num_workers: 4
@@ -23,5 +23,3 @@ logging:
   swanlab_mode: offline
 scheduler:
   warmup_steps: 250  # 学习率预热步数
-training:
-  batch_size: 24  # 每个进程的 micro-batch 大小
