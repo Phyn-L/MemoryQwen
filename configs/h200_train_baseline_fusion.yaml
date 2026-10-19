@@ -10,9 +10,9 @@ memory:
   memory_resampler_ffn_ratio: 4
   memory_resampler_output_mode: layer0
 training:
-  batch_size: 4
+  batch_size: 8
   gradient_accumulation_steps: 1
-  gradient_checkpoint_every_n_layers: 1
+  gradient_checkpoint_every_n_layers: 28
 data:
   loader:
     train_num_workers: 4
