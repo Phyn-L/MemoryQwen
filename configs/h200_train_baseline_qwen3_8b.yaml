@@ -5,8 +5,8 @@ _base_:
 memory:
   memory_length: 128
   context_layer_indices: [-1]
-  memory_resampler_layers: 4
-  memory_resampler_heads: 4
+  memory_resampler_layers: 8
+  memory_resampler_heads: 8
   memory_resampler_hidden_size: 512
   memory_resampler_ffn_ratio: 4
   memory_resampler_output_mode: layer0
