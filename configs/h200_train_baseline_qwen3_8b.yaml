@@ -5,9 +5,9 @@ _base_:
 memory:
   memory_length: 128
   context_layer_indices: [-1]
-  memory_resampler_layers: 8
-  memory_resampler_heads: 8
-  memory_resampler_hidden_size: 512
+  memory_resampler_layers: 4
+  memory_resampler_heads: 4
+  memory_resampler_hidden_size: 1024
   memory_resampler_ffn_ratio: 4
   memory_resampler_output_mode: layer0
 training:
@@ -24,5 +24,7 @@ evaluation:
 logging:
   log_every: 25  # 训练日志记录间隔（步）
   swanlab_mode: offline
+optimizer:
+  lr: 2.0e-5
 scheduler:
   warmup_steps: 2500  # 学习率预热步数
