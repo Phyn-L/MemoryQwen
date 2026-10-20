@@ -84,8 +84,13 @@ def test_the_loop_echoes_the_resolved_schedule():
         '"Warmup"',
         '"Eval Every"',
         '"Log Every"',
+        '"Gradient Checkpointing"',
+        '"disabled"',
     ):
         assert field in source, field
+    assert '"Context checkpointing"' not in source
+    assert '"Transformers enabled"' not in source
+    assert "accelerator.unwrap_model(model) if accelerator is not None else model" in source
 
 
 def test_the_allocator_cache_is_not_manually_flushed_after_an_evaluation():

@@ -327,18 +327,6 @@ def main() -> None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     if accelerator is None or accelerator.is_main_process:
-        checkpoint_interval = cfg.training.gradient_checkpoint_every_n_layers
-        checkpoint_depth = int(model.qwen.config.num_hidden_layers)
-        checkpoint_state = (
-            "Transformers enabled "
-            f"every_n_layers={checkpoint_interval} "
-            f"layers={len(range(0, checkpoint_depth, checkpoint_interval))}/{checkpoint_depth}"
-            if cfg.model.context_gradient_checkpointing and checkpoint_interval > 0
-            else "disabled"
-        )
-        CONSOLE.print(
-            f"[bold cyan]Context checkpointing[/bold cyan]  {checkpoint_state}"
-        )
         trainable, trainable_total = trainable_parameter_report(model)
 
     # The filtered cache (`cache/train.jsonl` + `cache/validation.jsonl`) is built from the
@@ -575,6 +563,16 @@ def main() -> None:
             "Log Every",
             f"{cfg.logging.log_every:,}",
         )
+        checkpoint_interval = cfg.training.gradient_checkpoint_every_n_layers
+        checkpoint_model = accelerator.unwrap_model(model) if accelerator is not None else model
+        checkpoint_depth = int(checkpoint_model.qwen.config.num_hidden_layers)
+        checkpoint_state = (
+            f"every {checkpoint_interval} layers "
+            f"({len(range(0, checkpoint_depth, checkpoint_interval))}/{checkpoint_depth})"
+            if cfg.model.context_gradient_checkpointing and checkpoint_interval > 0
+            else "disabled"
+        )
+        schedule.add_row("Gradient Checkpointing", checkpoint_state, "", "")
         CONSOLE.print(table_panel(schedule))
 
     model.train()
