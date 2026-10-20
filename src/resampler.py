@@ -94,80 +94,71 @@ class _ResamplerBlock(nn.Module):
 class QuestionResampler(nn.Module):
     """Resample the memory (and the question) into a few question-conditioned positions.
 
-    Both the question and the memory are projected down to ``width`` first (256 by default,
-    the same bottleneck the per-layer decoders use), so the cross-attention blocks cost
+    The frozen LLM encodes the concatenated memory and question; learnable latents
+    cross-attend to those final-layer states. They are projected down to the configured
+    bottleneck (256 by default), so the cross-attention blocks cost
     ~1M parameters instead of the ~34M a full-width block would need. The output projection
     is initialised at the *token-embedding* scale, because its result is inserted into the
     backbone's input stream: at step 0 the read-out is a small perturbation of the
     no-read-out path rather than a large out-of-distribution input.
     """
 
-    def __init__(self, hidden_size: int, num_readout: int = 8, num_layers: int = 2,
-                 num_heads: int = 4, width: int = 256, ffn_ratio: int = 2,
+    def __init__(self, hidden_size: int, question_resampler_length: int = 8,
+                 question_resampler_layers: int = 2, question_resampler_heads: int = 4,
+                 question_resampler_hidden_size: int = 256,
+                 question_resampler_ffn_ratio: int = 2,
                  dtype: torch.dtype | None = None, mode: str = "memory_question"):
         super().__init__()
         if mode not in {"memory_question", "memory_only"}:
             raise ValueError(f"invalid resampler mode: {mode}")
         self.mode = mode
-        if num_readout <= 0:
-            raise ValueError("num_readout must be positive")
-        if width <= 0:
-            raise ValueError("width must be positive")
-        if width % num_heads:
-            raise ValueError("width must be divisible by num_heads")
+        if question_resampler_length <= 0:
+            raise ValueError("question_resampler_length must be positive")
+        if question_resampler_hidden_size <= 0:
+            raise ValueError("question_resampler_hidden_size must be positive")
+        if question_resampler_layers <= 0 or question_resampler_heads <= 0:
+            raise ValueError("question_resampler_layers and question_resampler_heads must be positive")
+        if question_resampler_ffn_ratio <= 0:
+            raise ValueError("question_resampler_ffn_ratio must be positive")
+        if question_resampler_hidden_size % question_resampler_heads:
+            raise ValueError("question_resampler_hidden_size must be divisible by question_resampler_heads")
         self.hidden_size = int(hidden_size)
-        self.num_readout = int(num_readout)
-        self.width = int(width)
-        self.query_projection = nn.Linear(hidden_size, width) if mode == "memory_question" else None
-        self.memory_projection = nn.Linear(hidden_size, width)
-        self.latents = nn.Parameter(torch.randn(num_readout, width) * 0.02)
-        self.input_norm = nn.LayerNorm(width)
+        self.question_resampler_length = int(question_resampler_length)
+        self.question_resampler_hidden_size = int(question_resampler_hidden_size)
+        self.memory_projection = nn.Linear(hidden_size, question_resampler_hidden_size)
+        self.latents = nn.Parameter(torch.randn(question_resampler_length, question_resampler_hidden_size) * 0.02)
+        self.input_norm = nn.LayerNorm(question_resampler_hidden_size)
         self.blocks = nn.ModuleList(
-            [_ResamplerBlock(width, num_heads, ffn_ratio) for _ in range(max(1, int(num_layers)))]
+            [_ResamplerBlock(question_resampler_hidden_size, question_resampler_heads,
+                             question_resampler_ffn_ratio)
+             for _ in range(question_resampler_layers)]
         )
-        self.output_norm = nn.LayerNorm(width)
-        self.output_projection = nn.Linear(width, hidden_size)
-        nn.init.normal_(self.output_projection.weight, std=0.02 / math.sqrt(width))
+        self.output_norm = nn.LayerNorm(question_resampler_hidden_size)
+        self.output_projection = nn.Linear(question_resampler_hidden_size, hidden_size)
+        nn.init.normal_(self.output_projection.weight, std=0.02 / math.sqrt(question_resampler_hidden_size))
         nn.init.zeros_(self.output_projection.bias)
         if dtype is not None:
             self.to(dtype=dtype)
 
-    def forward(self, question_embeds: torch.Tensor, question_mask: torch.Tensor, memory: torch.Tensor) -> torch.Tensor:
+    def forward(self, context_hidden: torch.Tensor, context_mask: torch.Tensor) -> torch.Tensor:
         """Return ``[B, R, H]`` read-out embeddings in the module's dtype.
 
-        ``memory`` is the question-agnostic memory representation ``[B, M, H]``; padded
-        question positions are masked out of the attention. The memory is always present, so
-        no row can end up with an all-masked key set.
+        ``context_hidden`` contains final-layer LLM states for memory and question tokens,
+        with shape ``[B, M + Q, H]``. Padded question positions are masked out.
         """
-        if memory.ndim != 3:
-            raise ValueError("memory must have shape [B, M, H]")
-        if question_embeds.size(0) != memory.size(0):
-            raise ValueError("question and memory must share the batch dimension")
-        if self.mode == "memory_only":
-            question_embeds = question_embeds[:, :0]
-            question_mask = question_mask[:, :0]
+        if context_hidden.ndim != 3:
+            raise ValueError("context_hidden must have shape [B, M + Q, H]")
+        if context_mask.shape != context_hidden.shape[:2]:
+            raise ValueError("context_mask must have shape [B, M + Q]")
         dtype = self.latents.dtype
-        padding = torch.cat(
-            [
-                ~question_mask.bool(),
-                torch.zeros(memory.size(0), memory.size(1), dtype=torch.bool, device=memory.device),
-            ],
-            dim=1,
-        )
-        latents = self.latents.unsqueeze(0).expand(memory.size(0), -1, -1)
+        padding = ~context_mask.bool()
+        latents = self.latents.unsqueeze(0).expand(context_hidden.size(0), -1, -1)
         # Everything runs with autocast disabled -- including the input projections. Under
         # accelerate's bf16 autocast a Linear whose *weights* are float32 still returns
         # bfloat16, which then meets the float32 LayerNorms below and raises
         # "expected scalar type BFloat16 but found Float". The module owns its dtype.
-        with no_autocast(memory.device):
-            context = torch.cat(
-                [
-                    self.query_projection(question_embeds.to(dtype)) if self.query_projection is not None
-                    else memory.new_empty((memory.size(0), 0, self.width), dtype=dtype),
-                    self.memory_projection(memory.to(dtype)),
-                ],
-                dim=1,
-            )
+        with no_autocast(context_hidden.device):
+            context = self.memory_projection(context_hidden.to(dtype))
             latents = self.input_norm(latents)
             for block in self.blocks:
                 latents = block(latents, context, padding)

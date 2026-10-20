@@ -68,7 +68,7 @@ if reader_length <= 0:
 runs = {
     "04_multilayer": {"model": {"target_modules": targets}, "memory": {"context_layer_indices": [-1, -8, -16]}},
     "05_reader_len_16": {"model": {"target_modules": targets}, "memory": {"readout_length": 16}},
-    "06_reader_len16_layer4": {"model": {"target_modules": targets}, "memory": {"readout_length": 16, "readout_layers": 4}},
+    "06_reader_len16_layer4": {"model": {"target_modules": targets}, "memory": {"readout_length": 16, "question_resampler_layers": 4}},
 }
 for name, overrides in runs.items():
     config = copy.deepcopy(base)

@@ -20,7 +20,8 @@ def tiny_model(vocab_size=64, num_hidden_layers=3, **kwargs):
     options = dict(
         memory_length=4, target_modules=["q_proj", "v_proj"], rank=2,
         memory_resampler_hidden_size=16,
-        memory_resampler_heads=2, readout_hidden_size=16, readout_heads=2,
+        memory_resampler_heads=2, question_resampler_hidden_size=16,
+        question_resampler_heads=2,
     )
     options.update(kwargs)
     return ContextMemoryModel(Qwen3ForCausalLM(config), **options)

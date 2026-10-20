@@ -52,7 +52,7 @@ def main():
         model = ContextMemoryModel(
             Qwen3ForCausalLM(qcfg), rank=2, memory_length=8,
             context_layer_indices=(-1, -2), memory_resampler_hidden_size=32,
-            readout_length=2, readout_hidden_size=32,
+            readout_length=2, question_resampler_hidden_size=32,
             context_gradient_checkpointing=True,
         )
     else:

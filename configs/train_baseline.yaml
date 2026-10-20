@@ -17,6 +17,8 @@ memory:
   # readout 工作模式：memory_question、memory_only、learned_prefix 或 off
   readout_mode: memory_question
   readout_length: 0  # 问题条件化 readout token 数，0 表示关闭
-  readout_hidden_size: 256  # readout 隐藏维度
-  readout_layers: 2  # readout 层数
-  readout_heads: 4  # readout 注意力头数
+  readout_keep_question_tokens: true  # readout 开启时，answer 是否继续保留原始 question token
+  question_resampler_hidden_size: 256  # question resampler 隐藏维度
+  question_resampler_layers: 2  # question resampler 层数
+  question_resampler_heads: 4  # question resampler 注意力头数
+  question_resampler_ffn_ratio: 2  # question resampler FFN 扩展倍数

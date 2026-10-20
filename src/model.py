@@ -211,7 +211,9 @@ class ContextMemoryModel(nn.Module):
         target_modules=None, dropout=0.0, max_context_tokens=None,
         trainable_dtype=torch.float32, distillation=False,
         task_init_token_ids: tuple[int, ...] | None = None,
-        readout_length=0, readout_layers=2, readout_heads=4, readout_hidden_size=256,
+        readout_length=0, question_resampler_layers=2, question_resampler_heads=4,
+        question_resampler_hidden_size=256, question_resampler_ffn_ratio=2,
+        readout_keep_question_tokens=True,
         readout_mode="memory_question", context_layer_indices=(-1,),
         memory_resampler_layers=2, memory_resampler_heads=4,
         memory_resampler_hidden_size=256, memory_resampler_ffn_ratio=2,
@@ -305,6 +307,7 @@ class ContextMemoryModel(nn.Module):
         if readout_length < 0:
             raise ValueError("readout_length must be non-negative")
         self.readout_mode = readout_mode
+        self.readout_keep_question_tokens = bool(readout_keep_question_tokens)
         if reader_memory_source not in {"memory_hidden", "memory_embedding", "layer_mean"}:
             raise ValueError("reader_memory_source must be memory_hidden, memory_embedding or layer_mean")
         self.reader_memory_source = reader_memory_source
@@ -315,8 +318,13 @@ class ContextMemoryModel(nn.Module):
                 self.resampler = LearnedPrefix(self.qwen_hidden_size, self.readout_length, dtype=trainable_dtype)
             else:
                 self.resampler = QuestionResampler(
-                    self.qwen_hidden_size, self.readout_length, readout_layers, readout_heads,
-                    width=readout_hidden_size, dtype=trainable_dtype, mode=readout_mode,
+                    self.qwen_hidden_size,
+                    question_resampler_length=self.readout_length,
+                    question_resampler_layers=question_resampler_layers,
+                    question_resampler_heads=question_resampler_heads,
+                    question_resampler_hidden_size=question_resampler_hidden_size,
+                    question_resampler_ffn_ratio=question_resampler_ffn_ratio,
+                    dtype=trainable_dtype, mode=readout_mode,
                 )
         self.to(dtype=qwen_dtype)
         self.set_trainable_dtype(trainable_dtype)
@@ -607,7 +615,7 @@ class ContextMemoryModel(nn.Module):
             ) from error
 
     def _readout_embeddings(self, prefix, question_embeds, question_mask, indices=None):
-        """``[B, R, H]`` question-conditioned positions, or None when the read-out is off.
+        """Encode memory and question, then resample their frozen LLM hidden states.
 
         ``indices`` selects which memory rows the questions belong to (the training collate
         flattens several QA rows per context, and generation groups rows by context), so the
@@ -619,14 +627,27 @@ class ContextMemoryModel(nn.Module):
             return self.resampler(question_embeds, question_mask, None).to(dtype=self.dtype)
         if prefix.memory is None:
             raise RuntimeError("the question read-out needs the memory representation")
-        if self.reader_memory_source == "memory_embedding":
-            source = prefix.memory_embedding
-        elif self.reader_memory_source == "layer_mean":
-            source = prefix.layer_memory.mean(dim=1)
-        else:
-            source = prefix.memory
-        memory = source if indices is None else source.index_select(0, indices)
-        readout = self.resampler(question_embeds, question_mask, memory)
+        memory = prefix.memory_embedding
+        memory = memory if indices is None else memory.index_select(0, indices)
+        memory_mask = torch.ones(memory.shape[:2], dtype=torch.bool, device=memory.device)
+        question_mask = question_mask.bool()
+        if self.readout_mode == "memory_only":
+            question_embeds = question_embeds[:, :0]
+            question_mask = question_mask[:, :0]
+        inputs = torch.cat([memory, question_embeds.to(dtype=self.dtype)], dim=1)
+        attention_mask = torch.cat([memory_mask, question_mask], dim=1)
+        positions = compact_positions(attention_mask, 0)
+        with self.lora_enabled(False):
+            encoded = self._transformer_body(
+                inputs_embeds=inputs,
+                attention_mask=attention_mask,
+                position_ids=positions,
+                output_hidden_states=False,
+                use_cache=False,
+                return_dict=True,
+            ).last_hidden_state
+        readout_mask = torch.cat([memory_mask, question_mask], dim=1)
+        readout = self.resampler(encoded, readout_mask)
         return readout.to(dtype=self.dtype)
 
     def _qa_positions(self, prefix, question_mask, answer_length, readout_length, device):
@@ -669,15 +690,22 @@ class ContextMemoryModel(nn.Module):
         cache = self._select_cache(prefix.memory_cache, indices, self.qwen.config)
         readout = self._readout_embeddings(prefix, question_embeds, question_mask, indices)
         extra = 0 if readout is None else readout.size(1)
-        if readout is None:
-            sequence = torch.cat([question_embeds, answer_embeds], dim=1)
-        else:
-            sequence = torch.cat([question_embeds, readout, answer_embeds], dim=1)
+        keep_question = readout is None or self.readout_keep_question_tokens
+        continuation_question_mask = question_mask if keep_question else question_mask[:, :0]
+        sequence = (
+            torch.cat([question_embeds, answer_embeds], dim=1) if readout is None
+            else torch.cat(
+                ([question_embeds, readout, answer_embeds] if keep_question else [readout, answer_embeds]),
+                dim=1,
+            )
+        )
         mask = build_continuation_mask(
-            question_mask, answer_mask, prefix.memory_length, sequence.dtype,
+            continuation_question_mask, answer_mask, prefix.memory_length, sequence.dtype,
             readout_length=extra,
         )
-        positions = self._qa_positions(prefix, question_mask, answer_embeds.size(1), extra, sequence.device)
+        positions = self._qa_positions(
+            prefix, continuation_question_mask, answer_embeds.size(1), extra, sequence.device
+        )
         if int(positions.max()) >= self.window_limit:
             raise ValueError("memory + prompt + readout + target exceeds the backbone window")
         body = self._transformer_body if loss_only else self.qwen
@@ -687,7 +715,7 @@ class ContextMemoryModel(nn.Module):
                 past_key_values=cache, use_cache=not loss_only, return_dict=True,
             )
         ignored = torch.full(
-            (labels.size(0), question_embeds.size(1) + extra), -100,
+            (labels.size(0), (question_embeds.size(1) if keep_question else 0) + extra), -100,
             dtype=labels.dtype, device=labels.device,
         )
         full_labels = torch.cat([ignored, labels], dim=1)
@@ -966,13 +994,20 @@ class ContextMemoryModel(nn.Module):
                 # One helper numbers the whole prefill block: the read-out slots land right
                 # after each row's real question tokens, exactly where a row-by-row decode
                 # would put them, and the first generated token is then at ``start + real``.
+                keep_question = readout is None or self.readout_keep_question_tokens
+                continuation_mask = q_mask if keep_question else q_mask[:, :0]
                 prefill_mask = (
                     torch.cat([q_mask, q_mask.new_ones(count, extra)], dim=1)
-                    if extra
-                    else q_mask
+                    if readout is not None and keep_question else
+                    torch.ones((count, extra), dtype=torch.bool, device=device)
+                    if readout is not None else q_mask
                 )
                 prefill_counts = prefill_mask.sum(dim=1)
-                sequence = question if readout is None else torch.cat([question, readout], dim=1)
+                sequence = (
+                    torch.cat([question, readout], dim=1)
+                    if readout is not None and keep_question else
+                    readout if readout is not None else question
+                )
                 sequence_positions = compact_positions(prefill_mask, start)
                 # Evaluation may run outside Accelerate's autocast context.  Keep the
                 # complete embedding sequence in the frozen backbone dtype before it
@@ -981,7 +1016,8 @@ class ContextMemoryModel(nn.Module):
                 sequence = sequence.to(dtype=self.dtype)
                 empty = q_mask.new_zeros(count, 0)
                 mask = build_continuation_mask(
-                    q_mask, empty, prefix.memory_length, question.dtype,
+                    continuation_mask,
+                    empty, prefix.memory_length, question.dtype,
                     readout_length=extra,
                 )
                 output = self.qwen(inputs_embeds=sequence, attention_mask=mask, position_ids=sequence_positions,
@@ -1112,9 +1148,10 @@ def load_model(cfg):
         distillation=cfg.loss.distill_weight > 0,
         readout_length=cfg.memory.readout_length,
         readout_mode=cfg.memory.readout_mode,
-        readout_layers=cfg.memory.readout_layers,
-        readout_heads=cfg.memory.readout_heads,
-        readout_hidden_size=cfg.memory.readout_hidden_size,
+        question_resampler_layers=cfg.memory.question_resampler_layers,
+        question_resampler_heads=cfg.memory.question_resampler_heads,
+        question_resampler_hidden_size=cfg.memory.question_resampler_hidden_size,
+        question_resampler_ffn_ratio=cfg.memory.question_resampler_ffn_ratio,
         context_layer_indices=cfg.memory.context_layer_indices,
         memory_resampler_layers=cfg.memory.memory_resampler_layers,
         memory_resampler_heads=cfg.memory.memory_resampler_heads,
@@ -1122,6 +1159,7 @@ def load_model(cfg):
         memory_resampler_ffn_ratio=cfg.memory.memory_resampler_ffn_ratio,
         memory_resampler_output_mode=cfg.memory.memory_resampler_output_mode,
         reader_memory_source=cfg.memory.reader_memory_source,
+        readout_keep_question_tokens=cfg.memory.readout_keep_question_tokens,
         task_init_token_ids=assistant_header_token_ids(tok),
     )
     for name,p in model.named_parameters():

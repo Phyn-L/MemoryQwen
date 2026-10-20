@@ -161,10 +161,12 @@ class MemoryConfig:
     # positions between the question and the answer. 0 = off (the historical behaviour).
     readout_mode: str = "memory_question"
     readout_length: int = 0
-    readout_layers: int = 2
-    readout_heads: int = 4
+    readout_keep_question_tokens: bool = True
+    question_resampler_layers: int = 2
+    question_resampler_heads: int = 4
     # Bottleneck width of the question-conditioned resampler.
-    readout_hidden_size: int = 256
+    question_resampler_hidden_size: int = 256
+    question_resampler_ffn_ratio: int = 2
     # Context encoder -> fixed memory writer.
     context_layer_indices: tuple[int, ...] = (-1,)
     memory_resampler_layers: int = 2
@@ -619,19 +621,21 @@ class TrainConfig:
             "memory_question",
             "memory_only",
         }:
-            if m.readout_layers <= 0:
+            if m.question_resampler_layers <= 0:
                 raise ValueError(
-                    "memory.readout_layers must be positive when the read-out is on"
+                    "memory.question_resampler_layers must be positive when the read-out is on"
                 )
-            if m.readout_heads <= 0:
+            if m.question_resampler_heads <= 0:
                 raise ValueError(
-                    "memory.readout_heads must be positive when the read-out is on"
+                    "memory.question_resampler_heads must be positive when the read-out is on"
                 )
-            if m.readout_hidden_size <= 0:
-                raise ValueError("memory.readout_hidden_size must be positive")
-            if m.readout_hidden_size % m.readout_heads:
+            if m.question_resampler_hidden_size <= 0:
+                raise ValueError("memory.question_resampler_hidden_size must be positive")
+            if m.question_resampler_ffn_ratio <= 0:
+                raise ValueError("memory.question_resampler_ffn_ratio must be positive")
+            if m.question_resampler_hidden_size % m.question_resampler_heads:
                 raise ValueError(
-                    "memory.readout_hidden_size must be divisible by readout_heads"
+                    "memory.question_resampler_hidden_size must be divisible by question_resampler_heads"
                 )
         if loss.qa_weight < 0 or loss.recon_weight < 0:
             raise ValueError("loss weights must be non-negative")

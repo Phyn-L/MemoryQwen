@@ -1,0 +1,35 @@
+# 实验层：h200（8xH200）上的 baseline。只写与 harness/train_baseline 不同的部分。
+_base_:
+- train_baseline.yaml
+memory:
+  memory_length: 128
+  context_layer_indices: [-1,-2,-3,-4]
+  memory_resampler_layers: 4
+  memory_resampler_heads: 4
+  memory_resampler_hidden_size: 512
+  memory_resampler_ffn_ratio: 4
+  memory_resampler_output_mode: layer0
+
+  readout_mode: memory_question
+  readout_length: 16  # 问题条件化 readout token 数，0 表示关闭
+  readout_keep_question_tokens: false  # readout 开启时保留 question token
+  question_resampler_hidden_size: 512  # question resampler 隐藏维度
+  question_resampler_layers: 4  # question resampler 层数
+  question_resampler_heads: 4  # question resampler 注意力头数
+  question_resampler_ffn_ratio: 2  # question resampler FFN 扩展倍数
+training:
+  batch_size: 8
+  gradient_accumulation_steps: 1
+  gradient_checkpoint_every_n_layers: 0
+data:
+  loader:
+    train_num_workers: 4
+    train_persistent_workers: false
+evaluation:
+  autoregressive_every: 2500  # 自回归验证与 checkpoint 的训练步间隔
+  qa_batch_size: 24  # QA 验证批大小
+logging:
+  log_every: 25  # 训练日志记录间隔（步）
+  swanlab_mode: offline
+scheduler:
+  warmup_steps: 2500  # 学习率预热步数

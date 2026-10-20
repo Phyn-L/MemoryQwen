@@ -34,16 +34,17 @@ except ImportError:  # pragma: no cover - transformers is optional for the unit 
 
 def _resampler(B=2, Q=5, M=4, H=16, R=3, **kwargs):
     torch.manual_seed(0)
-    module = QuestionResampler(H, R, num_layers=2, num_heads=4, **kwargs)
-    question = torch.randn(B, Q, H)
-    mask = torch.ones(B, Q, dtype=torch.bool)
-    memory = torch.randn(B, M, H)
-    return module, question, mask, memory
+    module = QuestionResampler(H, question_resampler_length=R,
+                               question_resampler_layers=2,
+                               question_resampler_heads=4, **kwargs)
+    hidden = torch.randn(B, M + Q, H)
+    mask = torch.ones(B, M + Q, dtype=torch.bool)
+    return module, hidden, mask
 
 
 def test_readout_shape_dtype_and_parameters():
-    module, question, mask, memory = _resampler()
-    out = module(question, mask, memory)
+    module, hidden, mask = _resampler()
+    out = module(hidden, mask)
     assert out.shape == (2, 3, 16)
     assert out.dtype == module.latents.dtype
     assert sum(p.numel() for p in module.parameters()) > 0
@@ -53,13 +54,16 @@ def test_readout_shape_dtype_and_parameters():
     assert 0.0 < float(out.std()) < 0.05, f"read-out scale is {float(out.std()):.3f}"
     with torch.no_grad():
         fp32 = module.to(torch.float32)
-        assert fp32(question, mask, memory).dtype == torch.float32
+        assert fp32(hidden, mask).dtype == torch.float32
 
 
 def test_readout_bottleneck_keeps_the_parameter_count_small():
     """A full-width cross-attention block would cost ~34M per layer at H=2048."""
     torch.manual_seed(0)
-    module = QuestionResampler(2048, 8, num_layers=2, num_heads=4, width=256)
+    module = QuestionResampler(
+        2048, question_resampler_length=8, question_resampler_layers=2,
+        question_resampler_heads=4, question_resampler_hidden_size=256,
+    )
     total = sum(p.numel() for p in module.parameters())
     assert total < 4_000_000, f"resampler is {total:,} parameters"
     assert total > 500_000
@@ -72,63 +76,64 @@ def test_readout_keeps_its_own_dtype_under_bf16_autocast():
     outside ``no_autocast`` met the float32 LayerNorms and raised "expected scalar type
     BFloat16 but found Float". The module owns its dtype: everything inside stays float32.
     """
-    module, question, mask, memory = _resampler()
+    module, hidden, mask = _resampler()
     with torch.autocast("cpu", dtype=torch.bfloat16):
-        out = module(question, mask, memory)
+        out = module(hidden, mask)
     assert out.dtype == torch.float32, f"read-out came back {out.dtype} under autocast"
     assert torch.isfinite(out).all()
     # and the value is the same as with autocast off, because nothing was downcast
     with torch.no_grad():
-        plain = module(question, mask, memory)
+        plain = module(hidden, mask)
     assert torch.allclose(out.detach(), plain, atol=1e-5)
 
 
 def test_readout_is_conditioned_on_the_question_and_the_memory():
-    module, question, mask, memory = _resampler()
-    base = module(question, mask, memory).detach()
+    module, hidden, mask = _resampler()
+    base = module(hidden, mask).detach()
     # Perturbation must not be a constant added to every feature: the resampler normalises
     # its inputs with LayerNorm, which removes exactly that component.
-    other_question = question.clone()
-    other_question[:, 0] += 4.0 * torch.randn_like(other_question[:, 0])
-    moved_question = module(other_question, mask, memory).detach()
-    assert not torch.allclose(moved_question, base), "the read-out ignores the question"
-    other_memory = memory.clone()
-    other_memory[:, 0] += 4.0 * torch.randn_like(other_memory[:, 0])
-    moved_memory = module(question, mask, other_memory).detach()
-    assert not torch.allclose(moved_memory, base), "the read-out ignores the memory"
+    changed_question = hidden.clone()
+    changed_question[:, -1] += 4.0 * torch.randn_like(changed_question[:, -1])
+    assert not torch.allclose(module(changed_question, mask), base), "the read-out ignores question hidden"
+    changed_memory = hidden.clone()
+    changed_memory[:, 0] += 4.0 * torch.randn_like(changed_memory[:, 0])
+    assert not torch.allclose(module(changed_memory, mask), base), "the read-out ignores memory hidden"
 
 
 def test_readout_survives_an_all_padding_question():
-    module, question, _, memory = _resampler()
-    mask = torch.zeros(2, question.size(1), dtype=torch.bool)
-    out = module(question, mask, memory)
+    module, hidden, _ = _resampler()
+    mask = torch.ones_like(hidden[:, :, 0], dtype=torch.bool)
+    mask[:, -5:] = False
+    out = module(hidden, mask)
     assert torch.isfinite(out).all(), "an all-padding question must not produce NaN"
 
 
 def test_readout_receives_gradient_and_ignores_masked_question_positions():
-    module, question, mask, memory = _resampler(B=1)
+    module, hidden, mask = _resampler(B=1)
     mask[0, -2:] = False
-    out = module(question, mask, memory)
+    out = module(hidden, mask)
     out.sum().backward()
     assert module.latents.grad is not None and module.latents.grad.abs().sum() > 0
     # The masked positions must not influence the output (use a per-feature perturbation:
     # a constant added to every feature would also be invisible to LayerNorm).
-    first = module(question, mask, memory).detach()
-    question2 = question.clone()
-    question2[0, -1] += 100.0 * torch.randn_like(question2[0, -1])
-    second = module(question2, mask, memory).detach()
-    assert torch.allclose(first, second, atol=1e-5), "a masked question position was attended"
+    first = module(hidden, mask).detach()
+    hidden2 = hidden.clone()
+    hidden2[0, -1] += 100.0 * torch.randn_like(hidden2[0, -1])
+    second = module(hidden2, mask).detach()
+    assert torch.allclose(first, second, atol=1e-5), "a masked hidden position was attended"
 
 
 def test_readout_rejects_bad_arguments():
     try:
-        QuestionResampler(16, num_readout=0)
+        QuestionResampler(16, question_resampler_length=0)
     except ValueError:
         pass
     else:  # pragma: no cover
         raise AssertionError("num_readout=0 must raise")
     try:
-        QuestionResampler(16, num_readout=3, width=15, num_heads=4)
+        QuestionResampler(16, question_resampler_length=3,
+                          question_resampler_hidden_size=15,
+                          question_resampler_heads=4)
     except ValueError:
         pass
     else:  # pragma: no cover
@@ -153,7 +158,8 @@ def _model(readout_length=0, readout_mode="memory_question"):
         _tiny_qwen3(), rank=2, alpha=4.0, memory_length=4,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], dropout=0.0,
         max_context_tokens=16, trainable_dtype=torch.float32,
-        readout_length=readout_length, readout_layers=2, readout_heads=4,
+        readout_length=readout_length, question_resampler_layers=2,
+        question_resampler_heads=4, question_resampler_ffn_ratio=2,
         readout_mode=readout_mode,
     )
     for name, parameter in model.named_parameters():
@@ -206,12 +212,9 @@ def test_readout_is_conditioned_and_trains_the_resampler():
     assert model.resampler is not None
     batch = _batch()
     output = _forward(model, batch)
-    # The forward runs [question, read-out, answer], so the logits gain R positions -- but
-    # the read-out rows are not supervised (-100), exactly like the question rows, and the
-    # answer labels keep their alignment.
     assert output.logits.shape[:2] == (2, 4 + 3 + 5)
     assert output.labels.shape == (2, 12)
-    assert bool((output.labels[:, 4:7] == -100).all()), "the read-out rows must not be supervised"
+    assert bool((output.labels[:, :7] == -100).all())
     assert torch.equal(output.labels[:, 7:], batch["answer_ids"])
     loss = output.logits.float().logsumexp(-1).mean()      # any differentiable scalar
     loss.backward()
@@ -278,14 +281,12 @@ def test_generation_without_readout_still_works():
 
 
 def test_memory_only_input_dependency():
-    module, question, mask, memory = _resampler(mode="memory_only")
-    memory.requires_grad_()
-    out = module(question, mask, memory)
-    assert torch.equal(out, module(torch.randn_like(question), ~mask, memory))
-    assert not torch.allclose(out, module(question, mask, torch.randn_like(memory)))
+    module, hidden, mask = _resampler(mode="memory_only")
+    hidden.requires_grad_()
+    out = module(hidden, mask)
+    assert not torch.allclose(out, module(hidden + torch.randn_like(hidden), mask))
     out.square().sum().backward()
-    assert memory.grad is not None and memory.grad.abs().sum() > 0
-    assert module.query_projection is None
+    assert hidden.grad is not None and hidden.grad.abs().sum() > 0
 
 
 def test_new_modes_forward_gradient_and_generation():
@@ -297,7 +298,7 @@ def test_new_modes_forward_gradient_and_generation():
         assert output.logits.shape[1] == 9 + extra
         assert torch.equal(output.labels[:, 4 + extra:], batch["answer_ids"])
         if extra:
-                assert (output.labels[:, 4:7] == -100).all()
+            assert (output.labels[:, 4:7] == -100).all()
         # The training path is the only loss path now: per-row means over the memory-prefixed
         # forward, with no [rows, tokens, vocab] logits materialised.
         graded = _forward(model, batch, loss_only=True)
@@ -319,13 +320,13 @@ def test_new_modes_forward_gradient_and_generation():
         with torch.no_grad():
             prefix = model.encode_context_prefix(embed(batch["context_ids"]), batch["context_mask"])
             if mode == "learned_prefix":
-                a = model.resampler(embed(batch["question_ids"]), batch["question_mask"], prefix.memory)
-                b = model.resampler(
-                    torch.randn_like(embed(batch["question_ids"])),
-                    ~batch["question_mask"],
-                    torch.randn_like(prefix.memory),
+                a = model._readout_embeddings(
+                    prefix, embed(batch["question_ids"]), batch["question_mask"]
                 )
-                assert torch.equal(a, b)
+                b = model._readout_embeddings(
+                    prefix, torch.randn_like(embed(batch["question_ids"])), batch["question_mask"]
+                )
+                assert torch.allclose(a, b)
             class Tokenizer:
                 pad_token_id = 0
                 eos_token_id = None
@@ -334,6 +335,28 @@ def test_new_modes_forward_gradient_and_generation():
                 Tokenizer(), max_new_tokens=3,
             )
             assert tokens.shape == (2, 3)
+
+
+def test_readout_can_remove_question_from_answer_input():
+    model = _model(3)
+    model.readout_keep_question_tokens = False
+    batch = _batch()
+    output = _forward(model, batch)
+    assert output.logits.shape[1] == 3 + 5
+    assert torch.equal(output.labels[:, 3:], batch["answer_ids"])
+    assert (output.labels[:, :3] == -100).all()
+    model.eval()
+    embedding = model.qwen.get_input_embeddings()
+    with torch.no_grad():
+        prefix = model.encode_context_prefix(embedding(batch["context_ids"]), batch["context_mask"])
+        class Tokenizer:
+            pad_token_id = 0
+            eos_token_id = None
+        generated = model.generate_answers_with_prefix(
+            prefix, torch.arange(2), batch["question_ids"], batch["question_mask"],
+            Tokenizer(), max_new_tokens=3,
+        )
+    assert generated.shape == (2, 3)
 
 
 def test_readout_mode_config_validation():
