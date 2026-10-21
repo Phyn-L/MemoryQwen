@@ -19,8 +19,6 @@ with autocast disabled so a bf16 training forward cannot silently downcast it.
 """
 from __future__ import annotations
 
-import math
-
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -45,7 +43,9 @@ class SharedMemoryOutputProjection(nn.Module):
         self.fc1 = nn.Linear(latent_size, ffn_size)
         self.fc2 = nn.Linear(ffn_size, hidden_size)
         self.output_norm = nn.LayerNorm(hidden_size)
-        nn.init.normal_(self.fc2.weight, std=0.02 / math.sqrt(ffn_size))
+        nn.init.xavier_uniform_(self.fc1.weight)
+        nn.init.xavier_uniform_(self.fc2.weight)
+        nn.init.zeros_(self.fc1.bias)
         nn.init.zeros_(self.fc2.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -98,9 +98,7 @@ class QuestionResampler(nn.Module):
     cross-attend to those final-layer states. They are projected down to the configured
     bottleneck (256 by default), so the cross-attention blocks cost
     ~1M parameters instead of the ~34M a full-width block would need. The output projection
-    is initialised at the *token-embedding* scale, because its result is inserted into the
-    backbone's input stream: at step 0 the read-out is a small perturbation of the
-    no-read-out path rather than a large out-of-distribution input.
+    uses the same MLP head as the context resampler.
     """
 
     def __init__(self, hidden_size: int, question_resampler_length: int = 8,
@@ -130,13 +128,12 @@ class QuestionResampler(nn.Module):
         self.input_norm = nn.LayerNorm(question_resampler_hidden_size)
         self.blocks = nn.ModuleList(
             [_ResamplerBlock(question_resampler_hidden_size, question_resampler_heads,
-                             question_resampler_ffn_ratio)
+                             question_resampler_ffn_ratio, use_self_attention=True)
              for _ in range(question_resampler_layers)]
         )
-        self.output_norm = nn.LayerNorm(question_resampler_hidden_size)
-        self.output_projection = nn.Linear(question_resampler_hidden_size, hidden_size)
-        nn.init.normal_(self.output_projection.weight, std=0.02 / math.sqrt(question_resampler_hidden_size))
-        nn.init.zeros_(self.output_projection.bias)
+        self.output_projection = SharedMemoryOutputProjection(
+            question_resampler_hidden_size, hidden_size,
+        )
         if dtype is not None:
             self.to(dtype=dtype)
 
@@ -162,7 +159,7 @@ class QuestionResampler(nn.Module):
             latents = self.input_norm(latents)
             for block in self.blocks:
                 latents = block(latents, context, padding)
-            return self.output_projection(self.output_norm(latents))
+            return self.output_projection(latents)
 
 
 class ContextMemoryResampler(nn.Module):
