@@ -105,6 +105,7 @@ class QuestionResampler(nn.Module):
                  question_resampler_layers: int = 2, question_resampler_heads: int = 4,
                  question_resampler_hidden_size: int = 256,
                  question_resampler_ffn_ratio: int = 2,
+                 question_resampler_use_self_attention: bool = True,
                  dtype: torch.dtype | None = None, mode: str = "memory_question"):
         super().__init__()
         if mode not in {"memory_question", "memory_only"}:
@@ -128,7 +129,8 @@ class QuestionResampler(nn.Module):
         self.input_norm = nn.LayerNorm(question_resampler_hidden_size)
         self.blocks = nn.ModuleList(
             [_ResamplerBlock(question_resampler_hidden_size, question_resampler_heads,
-                             question_resampler_ffn_ratio, use_self_attention=True)
+                             question_resampler_ffn_ratio,
+                             use_self_attention=question_resampler_use_self_attention)
              for _ in range(question_resampler_layers)]
         )
         self.output_projection = SharedMemoryOutputProjection(
@@ -178,7 +180,8 @@ class ContextMemoryResampler(nn.Module):
                  num_heads: int = 4, width: int = 256,
                  ffn_ratio: int = 2, dtype: torch.dtype | None = None,
                  backbone_layers: int | None = None,
-                 output_mode: str = "layer0"):
+                 output_mode: str = "layer0",
+                 use_self_attention: bool = True):
         super().__init__()
         if output_mode not in {"layer0", "layerwise"}:
             raise ValueError("output_mode must be 'layer0' or 'layerwise'")
@@ -198,7 +201,8 @@ class ContextMemoryResampler(nn.Module):
         self.context_projection = nn.Linear(hidden_size, width)
         self.input_norm = nn.LayerNorm(width)
         self.blocks = nn.ModuleList(
-            [_ResamplerBlock(width, num_heads, ffn_ratio, use_self_attention=True)
+            [_ResamplerBlock(width, num_heads, ffn_ratio,
+                             use_self_attention=use_self_attention)
              for _ in range(num_layers)]
         )
         self.output_norm = nn.LayerNorm(width)

@@ -56,6 +56,15 @@ def test_readout_shape_dtype_and_parameters():
         assert fp32(hidden, mask).dtype == torch.float32
 
 
+def test_question_resampler_self_attention_can_be_disabled():
+    module = QuestionResampler(
+        16, question_resampler_length=3, question_resampler_layers=2,
+        question_resampler_heads=4, question_resampler_use_self_attention=False,
+    )
+    assert all(block.self_attention is None for block in module.blocks)
+    assert all(block.cross_attention is not None for block in module.blocks)
+
+
 def test_readout_bottleneck_keeps_the_parameter_count_small():
     """A full-width cross-attention block would cost ~34M per layer at H=2048."""
     torch.manual_seed(0)

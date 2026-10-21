@@ -492,6 +492,12 @@ def test_context_resampler_depth_and_block_order_are_configurable():
     assert all(block.ffn is not None for block in resampler.blocks)
 
 
+def test_context_resampler_self_attention_can_be_disabled():
+    model = tiny_model(memory_resampler_use_self_attention=False)
+    assert all(block.self_attention is None for block in model.context_resampler.blocks)
+    assert all(block.cross_attention is not None for block in model.context_resampler.blocks)
+
+
 def test_layerwise_memory_embeddings_and_gates_are_used():
     model = tiny_model(memory_resampler_output_mode="layerwise").eval()
     prefix = encode(model, length=9, batch=1)

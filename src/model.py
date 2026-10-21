@@ -213,10 +213,12 @@ class ContextMemoryModel(nn.Module):
         task_init_token_ids: tuple[int, ...] | None = None,
         readout_length=0, question_resampler_layers=2, question_resampler_heads=4,
         question_resampler_hidden_size=256, question_resampler_ffn_ratio=2,
+        question_resampler_use_self_attention=True,
         readout_keep_question_tokens=True,
         readout_mode="memory_question", context_layer_indices=(-1,),
         memory_resampler_layers=2, memory_resampler_heads=4,
         memory_resampler_hidden_size=256, memory_resampler_ffn_ratio=2,
+        memory_resampler_use_self_attention=True,
         memory_resampler_output_mode="layer0",
         reader_memory_source="memory_hidden", context_gradient_checkpointing=False,
         gradient_checkpoint_every_n_layers=1,
@@ -271,6 +273,7 @@ class ContextMemoryModel(nn.Module):
             memory_resampler_ffn_ratio, dtype=trainable_dtype,
             backbone_layers=depth,
             output_mode=memory_resampler_output_mode,
+            use_self_attention=memory_resampler_use_self_attention,
         )
         # Recon has one continuous task marker. It is initialised from the mean of the
         # pretrained input embeddings of the assistant generation header, which gives it the
@@ -324,6 +327,7 @@ class ContextMemoryModel(nn.Module):
                     question_resampler_heads=question_resampler_heads,
                     question_resampler_hidden_size=question_resampler_hidden_size,
                     question_resampler_ffn_ratio=question_resampler_ffn_ratio,
+                    question_resampler_use_self_attention=question_resampler_use_self_attention,
                     dtype=trainable_dtype, mode=readout_mode,
                 )
         self.to(dtype=qwen_dtype)
@@ -1152,11 +1156,13 @@ def load_model(cfg):
         question_resampler_heads=cfg.memory.question_resampler_heads,
         question_resampler_hidden_size=cfg.memory.question_resampler_hidden_size,
         question_resampler_ffn_ratio=cfg.memory.question_resampler_ffn_ratio,
+        question_resampler_use_self_attention=cfg.memory.question_resampler_use_self_attention,
         context_layer_indices=cfg.memory.context_layer_indices,
         memory_resampler_layers=cfg.memory.memory_resampler_layers,
         memory_resampler_heads=cfg.memory.memory_resampler_heads,
         memory_resampler_hidden_size=cfg.memory.memory_resampler_hidden_size,
         memory_resampler_ffn_ratio=cfg.memory.memory_resampler_ffn_ratio,
+        memory_resampler_use_self_attention=cfg.memory.memory_resampler_use_self_attention,
         memory_resampler_output_mode=cfg.memory.memory_resampler_output_mode,
         reader_memory_source=cfg.memory.reader_memory_source,
         readout_keep_question_tokens=cfg.memory.readout_keep_question_tokens,

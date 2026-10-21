@@ -167,12 +167,14 @@ class MemoryConfig:
     # Bottleneck width of the question-conditioned resampler.
     question_resampler_hidden_size: int = 256
     question_resampler_ffn_ratio: int = 2
+    question_resampler_use_self_attention: bool = True
     # Context encoder -> fixed memory writer.
     context_layer_indices: tuple[int, ...] = (-1,)
     memory_resampler_layers: int = 2
     memory_resampler_heads: int = 4
     memory_resampler_hidden_size: int = 256
     memory_resampler_ffn_ratio: int = 2
+    memory_resampler_use_self_attention: bool = True
     memory_resampler_output_mode: str = "layer0"
     # Source exposed to the optional question-conditioned reader.
     reader_memory_source: str = "memory_hidden"

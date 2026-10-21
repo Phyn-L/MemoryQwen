@@ -10,15 +10,16 @@ memory:
   memory_resampler_heads: 4  # memory resampler 注意力头数
   memory_resampler_hidden_size: 512  # memory resampler 隐藏维度
   memory_resampler_ffn_ratio: 4  # memory resampler 前馈层扩展倍数
+  memory_resampler_use_self_attention: true
   memory_resampler_output_mode: layer0  # memory resampler 输出模式
   reader_memory_source: memory_hidden  # reader 使用的 memory 表示来源
 
   # Question-conditioned readout
-  # readout 工作模式：memory_question、memory_only、learned_prefix 或 off
   readout_mode: memory_question
-  readout_length: 0  # 问题条件化 readout token 数，0 表示关闭
+  readout_length: 16
   readout_keep_question_tokens: true  # readout 开启时，answer 是否继续保留原始 question token
-  question_resampler_hidden_size: 256  # question resampler 隐藏维度
+  question_resampler_hidden_size: 512  # question resampler 隐藏维度
   question_resampler_layers: 2  # question resampler 层数
   question_resampler_heads: 4  # question resampler 注意力头数
-  question_resampler_ffn_ratio: 2  # question resampler FFN 扩展倍数
+  question_resampler_ffn_ratio: 4  # question resampler FFN 扩展倍数
+  question_resampler_use_self_attention: true
