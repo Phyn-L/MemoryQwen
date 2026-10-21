@@ -98,8 +98,46 @@ def test_the_objective_weights_are_scheduled_per_optimizer_step():
     from src.losses import scheduled_task_weights
 
     cfg = TrainConfig.from_dict(
-        {"data": {"train_tasks": "mix", "recon_schedule": "constant", "recon_ratio": 0.5}}
+        {
+            "data": {
+                "train_stage": "mix",
+                "recon_schedule": [0.5, 0.5],
+                "qa_schedule": [0.5, 0.5],
+            }
+        }
     )
-    # The loop passes its optimizer-step counter, so a group shares one schedule point.
-    assert scheduled_task_weights(0, 100, cfg.data) == scheduled_task_weights(0, 100, cfg.data)
+    assert scheduled_task_weights(0, 100, cfg.data) == (0.5, 0.5)
+
+    independent = TrainConfig.from_dict(
+        {
+            "data": {
+                "train_stage": "mix",
+                "recon_schedule": [0.2, 0.3],
+                "qa_schedule": [0.4, 0.5],
+            }
+        }
+    )
+    independent.validate()
+
+
+def test_independent_task_sampling_keeps_every_context_and_allows_both_tasks():
+    qa_contexts = torch.tensor([0, 0, 1, 1, 2, 2])
+    recon_contexts = torch.tensor([0, 1, 2])
+    qa_rows, recon_rows = train.sample_task_masks(
+        qa_contexts, recon_contexts, 0.4, 0.3, seed=7, num_contexts=3
+    )
+    assert torch.all(qa_rows | recon_rows[qa_contexts])
+    assert torch.equal(
+        qa_rows,
+        train.sample_task_masks(
+            qa_contexts, recon_contexts, 0.4, 0.3, seed=7, num_contexts=3
+        )[0],
+    )
+
+
+def test_task_sampling_falls_back_when_both_probabilities_are_zero():
+    qa_rows, recon_rows = train.sample_task_masks(
+        torch.arange(4), torch.arange(4), 0.0, 0.0, seed=1, num_contexts=4
+    )
+    assert torch.all(qa_rows | recon_rows)
     assert LossConfig().qa_weight == 1.0

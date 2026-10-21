@@ -323,25 +323,21 @@ def objective_total(qa, terms, cfg):
     )
 
 
-def scheduled_task_weights(step, total_steps, cfg):
-    """Return QA weight, Recon weight and effective Recon fraction for one step."""
-    if cfg.train_tasks == "qa":
-        return 1.0, 0.0, 0.0
-    if cfg.train_tasks == "recon":
-        return 0.0, 1.0, 1.0
-    start, end = cfg.recon_ratio_start, cfg.recon_ratio_end
-    minimum = cfg.recon_ratio_min
-    if cfg.recon_schedule == "constant":
-        ratio = cfg.recon_ratio
-    else:
-        progress = min(max(step, 0) / max(total_steps - 1, 1), 1.0)
-        if cfg.recon_schedule_curve == "cosine":
-            progress = (1.0 - math.cos(progress * math.pi)) / 2.0
-        ratio = start + (end - start) * progress
-    ratio = max(minimum, min(1.0, ratio))
-    if cfg.recon_schedule == "decay":
-        return 1.0, ratio, ratio / (1.0 + ratio)
-    return 1.0 - ratio, ratio, ratio
+def scheduled_task_weights(step, total_steps, cfg, stage=None):
+    """Return the QA and Recon sampling probabilities at one optimizer step."""
+    if cfg.train_stage == "only_qa" or stage == "qa":
+        return 1.0, 0.0
+    if cfg.train_stage == "only_recon" or stage == "recon":
+        return 0.0, 1.0
+    progress = min(max(step, 0) / max(total_steps - 1, 1), 1.0)
+    if cfg.recon_schedule_curve == "cosine":
+        progress = (1.0 - math.cos(progress * math.pi)) / 2.0
+
+    def interpolate(schedule):
+        start, end = schedule
+        return start + (end - start) * progress
+
+    return interpolate(cfg.qa_schedule), interpolate(cfg.recon_schedule)
 
 
 def supervision_objectives(

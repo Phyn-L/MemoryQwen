@@ -67,7 +67,11 @@ DataLoader 的运行参数按用途分开配置：`data.loader.train_num_workers
 
 评测按 `training.seed` 对每个数据集固定抽取最多 `evaluation.max_eval_contexts_per_dataset` 个 context，每个 context 最多取 `data.task.max_qa_sample_per_context` 条 QA（解析后为 `cfg.data.max_qa_sample_per_context`）。QA 自回归与 Recon 复用入选 context；Recon 开关位于 `evaluation`。各 rank 分配入选数据、共同执行评测与指标汇总，不能只让主 rank 调用评测器。
 
-每次评测前先保存步数 checkpoint 并刷新 `last.pt`；评测后按 QA F1 决定是否更新 `best.pt`。训练进度条按 optimizer step 更新，micro-batch 只在 GPU 上累积 Tensor；分组梯度范数只在 `logging.log_every` 的 step 计算。评估结束后不主动调用 `torch.cuda.empty_cache()`。修改多卡流程时留意集合通信顺序，避免 rank 提前进入训练同步。
+每次评测前先保存步数 checkpoint 并刷新 `last.pt`；评测后按当前阶段指标决定是否更新 `best.pt`。训练进度条按 optimizer step 更新，micro-batch 只在 GPU 上累积 Tensor；分组梯度范数只在 `logging.log_every` 的 step 计算。评估结束后不主动调用 `torch.cuda.empty_cache()`。修改多卡流程时留意集合通信顺序，避免 rank 提前进入训练同步。
+
+训练任务由 `data.task.train_stage` 选择：`only_qa`、`only_recon` 只训练对应任务；`two_stage` 先训练 Recon，再训练 QA，每阶段各运行 `training.epochs` 个完整 epoch，阶段顺序由 epoch 决定。阶段 checkpoint 分别位于 `<run>/recon/` 和 `<run>/qa/`，各自维护 `best.pt` 与 `last.pt`；Recon best 按 validation reconstruction token accuracy 选择，QA best 按 validation F1 选择。从任一阶段 checkpoint 恢复时，`step` 决定全局 epoch，因此从 Recon 阶段末尾恢复会继续进入 QA 阶段。
+
+`mix` 在每个优化 step 按 schedule 为每个 context 独立抽样 QA 与 Recon：`recon_schedule: [start, end]` 和 `qa_schedule: [start, end]` 分别是两种任务的 Bernoulli 概率，允许同一 context 同时执行两种任务。先独立采样；若某 context 两种任务都未抽中，则按条件概率补抽其中一种，保证每个 context 至少有一个任务。令 `p_q`、`p_r` 为当步概率，兜底抽 QA 的概率为 `p_q(1-p_r) / (p_q(1-p_r) + p_r(1-p_q))`；若分母为 0（两者都为 0），QA/Recon 各以 0.5 概率兜底。`recon_schedule_curve: cosine` 控制两个 schedule 在 start 与 end 之间的余弦插值；start 等于 end 时概率恒定。配置概率是兜底前的独立抽样概率，兜底会改变最终任务频率。
 
 训练和单 checkpoint 评估共同使用 `utils/reporting.py::format_evaluation_report`。项目只支持当前 canonical 数据布局和配置字段；旧路径、旧字段别名和旧 checkpoint 迁移分支不再保留。
 

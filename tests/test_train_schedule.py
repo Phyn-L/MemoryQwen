@@ -79,18 +79,25 @@ def test_the_loop_echoes_the_resolved_schedule():
     source = _train_source()
     assert 'title="Training Schedule"' in source
     for field in (
-        '"Machine"',
-        '"Effective Batch"',
-        '"Warmup"',
-        '"Eval Every"',
-        '"Log Every"',
-        '"Gradient Checkpointing"',
-        '"disabled"',
+        '"train"',
+        '"batchsize"',
+        '"grad_accumulation"',
+        '"grad_ckpt_every"',
+        '"warmup"',
+        '"eval_every"',
+        '"train_stage"',
+        '"recon_schedule"',
+        '"qa_schedule"',
+        '"recon_schedule_curve"',
+        '"context resampler"',
+        '"memory_length"',
+        '"context_layer_indices"',
+        '"replace_question_token"',
     ):
         assert field in source, field
-    assert '"Context checkpointing"' not in source
-    assert '"Transformers enabled"' not in source
-    assert "accelerator.unwrap_model(model) if accelerator is not None else model" in source
+    assert '"question resampler"' in source
+    assert 'if memory.readout_length > 0 and memory.readout_mode != "off"' in source
+    assert "str(not memory.readout_keep_question_tokens).lower()" in source
 
 
 def test_the_allocator_cache_is_not_manually_flushed_after_an_evaluation():

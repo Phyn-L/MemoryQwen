@@ -230,14 +230,10 @@ class DataConfig:
     max_context_tokens: int = 2048
     # Reject source contexts before truncation, independently of the encoder limit.
     max_input_tokens: int = 40960
-    train_tasks: str = "mix"
-    # Recon loss fraction for constant mixed supervision.
-    recon_ratio: float = 0.5
-    recon_schedule: str = "constant"
-    recon_schedule_curve: str = "linear"
-    recon_ratio_start: float = 0.5
-    recon_ratio_end: float = 0.5
-    recon_ratio_min: float = 0.1
+    train_stage: str = "mix"
+    recon_schedule: tuple[float, float] = (0.5, 0.5)
+    qa_schedule: tuple[float, float] = (0.5, 0.5)
+    recon_schedule_curve: str = "cosine"
     max_question_tokens: int = 96
     max_answer_tokens: int = 64
     max_conversation_tokens: int = 768
@@ -439,6 +435,9 @@ class TrainConfig:
         values = expand_env_values(raw, overrides)
         values = dict(values)
         data_values = _flatten_data_groups(values.get("data", {}))
+        for key in ("recon_schedule", "qa_schedule"):
+            if isinstance(data_values.get(key), list):
+                data_values[key] = tuple(data_values[key])
         for key in ("train_datasets", "validation_datasets", "test_datasets"):
             if isinstance(data_values.get(key), list):
                 data_values[key] = tuple(data_values[key])
@@ -512,41 +511,25 @@ class TrainConfig:
         for name in ("train_prefetch_factor", "eval_prefetch_factor"):
             if getattr(d, name) <= 0:
                 raise ValueError(f"data.{name} must be positive")
-        if d.train_tasks not in {"mix", "qa", "recon"}:
-            raise ValueError("data.train_tasks must be mix, qa or recon")
-        if not 0 <= d.recon_ratio <= 1:
-            raise ValueError("data.recon_ratio must be within [0, 1]")
-        if d.recon_schedule not in {"decay", "front_loaded", "constant"}:
+        if d.train_stage not in {"two_stage", "only_qa", "only_recon", "mix"}:
             raise ValueError(
-                "data.recon_schedule must be decay, front_loaded or constant"
+                "data.train_stage must be two_stage, only_qa, only_recon or mix"
             )
-        if d.recon_schedule_curve not in {"linear", "cosine"}:
-            raise ValueError("data.recon_schedule_curve must be linear or cosine")
-        for name in ("recon_ratio_start", "recon_ratio_end", "recon_ratio_min"):
-            value = getattr(d, name)
-            if not 0 <= value <= 1:
-                raise ValueError(f"data.{name} must be within [0, 1]")
-        if d.train_tasks == "mix" and d.recon_ratio_min <= 0:
-            raise ValueError("mixed training requires data.recon_ratio_min > 0")
-        if d.train_tasks == "mix":
-            if d.recon_schedule == "constant":
-                if not d.recon_ratio_min <= d.recon_ratio < 1:
-                    raise ValueError(
-                        "constant mixed ratio must be >= recon_ratio_min and < 1"
-                    )
-            else:
+        if d.train_stage == "mix":
+            if d.recon_schedule_curve != "cosine":
+                raise ValueError("data.recon_schedule_curve must be cosine")
+            for name in ("recon_schedule", "qa_schedule"):
+                schedule = getattr(d, name)
                 if (
-                    d.recon_ratio_start < d.recon_ratio_min
-                    or d.recon_ratio_end < d.recon_ratio_min
+                    not isinstance(schedule, (tuple, list))
+                    or len(schedule) != 2
+                    or any(
+                        not isinstance(value, (int, float)) or not 0 <= value <= 1
+                        for value in schedule
+                    )
                 ):
                     raise ValueError(
-                        "recon schedule endpoints must be >= recon_ratio_min"
-                    )
-                if d.recon_ratio_end > d.recon_ratio_start:
-                    raise ValueError("Recon decay schedules require end <= start")
-                if d.recon_schedule == "front_loaded" and d.recon_ratio_start >= 1:
-                    raise ValueError(
-                        "front_loaded mixed ratio must be < 1 to retain QA"
+                        f"data.{name} must contain two probabilities in [0, 1]"
                     )
         if (
             d.max_question_tokens <= 0
@@ -639,8 +622,8 @@ class TrainConfig:
                 )
         if loss.qa_weight < 0 or loss.recon_weight < 0:
             raise ValueError("loss weights must be non-negative")
-        qa_active = d.train_tasks in {"qa", "mix"}
-        recon_active = d.train_tasks in {"recon", "mix"}
+        qa_active = d.train_stage in {"two_stage", "only_qa", "mix"}
+        recon_active = d.train_stage in {"two_stage", "only_recon", "mix"}
         if qa_active and loss.qa_weight <= 0:
             raise ValueError("QA training requires loss.qa_weight > 0")
         if recon_active and loss.recon_weight <= 0:

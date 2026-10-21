@@ -141,6 +141,35 @@ def test_resume_plan_covers_the_three_cases():
     assert plan(5, 0, 1) == (1, 0), "a degenerate loader must not divide by zero"
 
 
+def test_two_stage_resume_at_recon_boundary_continues_in_qa_stage(tmp_path):
+    from utils.config import TrainConfig
+
+    train = _train_module()
+    cfg = TrainConfig.from_dict({"data": {"train_stage": "two_stage"}})
+    resume = tmp_path / "run" / "recon" / "last.pt"
+    cfg.checkpoint.output_dir = str(tmp_path / "configured-output")
+    train._configure_run_paths(cfg, None, str(resume))
+    assert Path(cfg.checkpoint.output_dir) == tmp_path / "run"
+
+    model = _Tiny()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
+    recon_manager = CheckpointManager(tmp_path / "run" / "recon")
+    recon_manager.save(model, optimizer, scheduler, 8, cfg.to_dict(), final=True)
+
+    resumed = _Tiny()
+    resumed_optimizer = torch.optim.AdamW(resumed.parameters(), lr=1e-3)
+    resumed_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        resumed_optimizer, lambda _: 1.0
+    )
+    step, _ = CheckpointManager(resume.parent).load(
+        resume, resumed, resumed_optimizer, resumed_scheduler
+    )
+    start_epoch, skipped_batches = train.resume_plan(step, 4, 4)
+    assert (start_epoch, skipped_batches) == (2, 0)
+    assert train.training_stage("two_stage", start_epoch, 2) == "qa"
+
+
 def test_a_periodic_save_refreshes_last_pt_and_records_the_rank_count():
     with tempfile.TemporaryDirectory() as root:
         model = _Tiny()
@@ -226,9 +255,9 @@ def test_dashboard_name_does_not_replace_timestamped_directory():
 def test_the_training_loop_honours_the_resumed_position_and_the_step_budget():
     source = TRAIN_PY.read_text(encoding="utf-8")
     compact = "".join(source.split())
-    assert "resume_plan(step,steps_per_epoch,cfg.training.epochs)" in compact
+    assert "resume_plan(step,steps_per_epoch,total_epochs)" in compact
     assert "micro_batch_skip(step,steps_per_epoch,accumulation)" in compact
-    assert "for epoch in range(start_epoch, cfg.training.epochs)" in source
+    assert "for epoch in range(start_epoch, total_epochs)" in source
     # Optimizer steps are what resume plans with; the loop indexes micro-batches.
     assert "skip_first_batches(train_loader, skip_micro_batches)" in source
     assert "sampler.set_start_batch(skip_micro_batches)" in source

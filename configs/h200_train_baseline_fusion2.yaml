@@ -1,4 +1,3 @@
-# 实验层：h200（8xH200）上的 baseline。只写与 harness/train_baseline 不同的部分。
 _base_:
 - train_baseline.yaml
 memory:
@@ -11,12 +10,12 @@ memory:
   memory_resampler_output_mode: layer0
 
   readout_mode: memory_question
-  readout_length: 16  # 问题条件化 readout token 数，0 表示关闭
-  readout_keep_question_tokens: false  # readout 开启时保留 question token
-  question_resampler_hidden_size: 512  # question resampler 隐藏维度
-  question_resampler_layers: 4  # question resampler 层数
-  question_resampler_heads: 4  # question resampler 注意力头数
-  question_resampler_ffn_ratio: 2  # question resampler FFN 扩展倍数
+  readout_length: 16
+  readout_keep_question_tokens: false
+  question_resampler_hidden_size: 512
+  question_resampler_layers: 4
+  question_resampler_heads: 4
+  question_resampler_ffn_ratio: 2
 training:
   batch_size: 8
   gradient_accumulation_steps: 1
@@ -26,13 +25,10 @@ data:
     train_num_workers: 4
     train_persistent_workers: false
   task:
-    train_tasks: mix
-    recon_ratio: 0.5
-    recon_schedule: constant
+    train_stage: mix
+    recon_schedule: [0.5, 0.090909]
+    qa_schedule: [0.5, 0.909091]
     recon_schedule_curve: cosine
-    recon_ratio_start: 1.0
-    recon_ratio_end: 0.1
-    recon_ratio_min: 0.1
 evaluation:
   autoregressive_every: 2500  # 自回归验证与 checkpoint 的训练步间隔
   qa_batch_size: 24  # QA 验证批大小

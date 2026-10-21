@@ -48,7 +48,7 @@ def _configure(path: str, source: Path, samples: int) -> TrainConfig:
     # this smoke test we intentionally exercise truncation on the first row instead
     # of scanning a multi-gigabyte JSONL until a short context is found.
     cfg.data.filter_long_context = False
-    cfg.data.train_tasks = "qa"
+    cfg.data.train_stage = "only_qa"
     cfg.loss.distill_weight = 0.0
     cfg.loss.qa_weight = 1.0
     cfg.loss.recon_weight = 0.0

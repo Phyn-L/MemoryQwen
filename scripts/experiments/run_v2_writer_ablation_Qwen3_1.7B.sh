@@ -90,13 +90,10 @@ base.setdefault("data", {}).update(
     max_question_tokens=96,
     max_conversation_tokens=768,
     max_answer_tokens=128,
-    train_tasks="mix",
-    recon_ratio=0.5,
-    recon_schedule="constant",
-    recon_schedule_curve="linear",
-    recon_ratio_start=0.5,
-    recon_ratio_end=0.5,
-    recon_ratio_min=0.1,
+    train_stage="mix",
+    recon_schedule=[0.5, 0.5],
+    qa_schedule=[0.5, 0.5],
+    recon_schedule_curve="cosine",
     max_qa_sample_per_context=4,
 )
 base["data"]["train_max_samples"] = (
@@ -137,10 +134,10 @@ runs = {
     "06_width128": {"memory": {"memory_resampler_hidden_size": 128}},
     "07_width512": {"memory": {"memory_resampler_hidden_size": 512}},
     "08_mix10": {
-        "data": {"recon_ratio": 0.1, "recon_ratio_start": 0.1, "recon_ratio_end": 0.1}
+        "data": {"recon_schedule": [0.1, 0.1], "qa_schedule": [0.9, 0.9]}
     },
     "09_mix90": {
-        "data": {"recon_ratio": 0.9, "recon_ratio_start": 0.9, "recon_ratio_end": 0.9}
+        "data": {"recon_schedule": [0.9, 0.9], "qa_schedule": [0.1, 0.1]}
     },
 }
 

@@ -110,7 +110,7 @@ def _collate(rows, epoch, tokenizer=None, **kwargs):
         max_answer_tokens=4,
         max_qa_sample_per_context=2,
         training=True,
-        train_tasks="mix",
+        train_stage="mix",
         epoch=epoch,
         **kwargs,
     )

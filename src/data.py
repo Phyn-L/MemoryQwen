@@ -889,7 +889,7 @@ def collate_context_records(
     sample_qa=True,
     question_padding_side="left",
     training=False,
-    train_tasks="mix",
+    train_stage="mix",
     epoch=0,
 ):
     """Build memory-prefix QA batches from structured conversations.
@@ -903,8 +903,8 @@ def collate_context_records(
     """
     if not getattr(tokenizer, "apply_chat_template", None):
         raise ValueError("conversation training requires tokenizer.apply_chat_template")
-    if train_tasks not in {"mix", "qa", "recon"}:
-        raise ValueError("train_tasks must be qa, recon or mix")
+    if train_stage not in {"two_stage", "only_qa", "only_recon", "mix"}:
+        raise ValueError("train_stage must be two_stage, only_qa, only_recon or mix")
     contexts = [row.context for row in rows]
     c = _encode(tokenizer, contexts, max_context_tokens)
     selected: list[ConversationTurn] = []
@@ -912,11 +912,11 @@ def collate_context_records(
     task_ids: list[int] = []
     for row_index, record in enumerate(rows):
         turns = list(record.turns())
-        if training and train_tasks in {"qa", "mix"} and not turns:
+        if training and train_stage in {"two_stage", "only_qa", "mix"} and not turns:
             raise ValueError(
                 "conversation training requires at least one assistant turn"
             )
-        if training and train_tasks == "mix":
+        if training and train_stage in {"two_stage", "mix"}:
             qa_turns = _sample_turns(record, turns, max_qa_sample_per_context, epoch)
             chosen = [
                 *qa_turns,
@@ -928,7 +928,7 @@ def collate_context_records(
                 ),
             ]
             chosen_tasks = [1] * len(qa_turns) + [0]  # 1=QA, 0=Recon
-        elif training and train_tasks == "recon":
+        elif training and train_stage == "only_recon":
             chosen = [
                 ConversationTurn(
                     (),

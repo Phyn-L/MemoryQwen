@@ -50,7 +50,7 @@ def configure(
     cfg.data.max_question_tokens = max_question_tokens
     cfg.data.max_conversation_tokens = max_conversation_tokens
     cfg.data.max_answer_tokens = max_answer_tokens
-    cfg.data.train_tasks = "qa"
+    cfg.data.train_stage = "only_qa"
     cfg.loss.distill_weight = 0.0
     cfg.loss.qa_weight = 1.0
     cfg.loss.recon_weight = 0.0

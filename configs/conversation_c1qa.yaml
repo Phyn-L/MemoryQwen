@@ -7,4 +7,4 @@ data:
   limits:
     max_context_tokens: 2048  # 覆盖 context token 上限
   task:
-    train_tasks: qa  # 训练任务类型
+    train_stage: only_qa  # 训练阶段

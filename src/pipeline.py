@@ -146,6 +146,11 @@ class Collate:
 
     def __call__(self, rows):
         cfg, tokenizer = self.cfg, self.tokenizer
+        train_stage = cfg.data.train_stage
+        if self.training and train_stage == "two_stage":
+            train_stage = (
+                "only_recon" if self.epoch < cfg.training.epochs else "only_qa"
+            )
         return collate_fn(
             rows,
             tokenizer,
@@ -158,7 +163,7 @@ class Collate:
             sample_qa=self.sample_qa,
             question_padding_side=cfg.data.question_padding_side,
             training=self.training,
-            train_tasks=cfg.data.train_tasks if self.training else "qa",
+            train_stage=train_stage if self.training else "only_qa",
             epoch=self.epoch,
         )
 

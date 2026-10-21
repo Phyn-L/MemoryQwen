@@ -93,6 +93,38 @@ def micro_batch_skip(step: int, steps_per_epoch: int, accumulation: int) -> int:
     return (step % steps_per_epoch) * max(1, int(accumulation))
 
 
+def training_stage(train_stage: str, epoch: int, epochs_per_stage: int) -> str:
+    if train_stage == "two_stage":
+        return "recon" if epoch < epochs_per_stage else "qa"
+    return train_stage
+
+
+def sample_task_masks(
+    qa_context_indices: torch.Tensor,
+    recon_context_indices: torch.Tensor,
+    qa_probability: float,
+    recon_probability: float,
+    seed: int,
+    num_contexts: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample independent task flags and force one flag for every context."""
+    generator = torch.Generator(device="cpu").manual_seed(int(seed))
+    qa = torch.rand(num_contexts, generator=generator) < qa_probability
+    recon = torch.rand(num_contexts, generator=generator) < recon_probability
+    missing = ~(qa | recon)
+    if bool(missing.any()):
+        qa_only = qa_probability * (1.0 - recon_probability)
+        recon_only = recon_probability * (1.0 - qa_probability)
+        denominator = qa_only + recon_only
+        fallback_qa = 0.5 if denominator <= 0 else qa_only / denominator
+        fallback = torch.rand(num_contexts, generator=generator) < fallback_qa
+        qa[missing] = fallback[missing]
+        recon[missing] = ~fallback[missing]
+    return qa[qa_context_indices.cpu()].to(qa_context_indices.device), recon[
+        recon_context_indices.cpu()
+    ].to(recon_context_indices.device)
+
+
 def trainable_parameter_report(
     model,
 ) -> tuple[list[tuple[str, tuple[int, ...], int]], int]:
@@ -249,6 +281,8 @@ def _gradient_norm(parameters) -> torch.Tensor:
 def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None) -> None:
     if resume:
         run_dir = Path(resume).resolve().parent
+        if cfg.data.train_stage == "two_stage" and run_dir.name in {"recon", "qa"}:
+            run_dir = run_dir.parent
         cfg.checkpoint.output_dir = str(run_dir)
         cfg.logging.swanlab_run_name = cfg.logging.swanlab_run_name or run_dir.name
         cfg.logging.swanlab_log_dir = cfg.checkpoint.output_dir
@@ -401,7 +435,11 @@ def main() -> None:
         num_workers=cfg.data.train_num_workers,
         pin_memory=cfg.data.train_pin_memory,
         prefetch_factor=cfg.data.train_prefetch_factor if cfg.data.train_num_workers else None,
-        persistent_workers=cfg.data.train_persistent_workers and cfg.data.train_num_workers > 0,
+        persistent_workers=(
+            cfg.data.train_persistent_workers
+            and cfg.data.train_stage != "two_stage"
+            and cfg.data.train_num_workers > 0
+        ),
     )
     validation_dataset = make_context_dataset(
         cfg,
@@ -464,10 +502,20 @@ def main() -> None:
             micro_batches_per_rank + accelerator.num_processes - 1
         ) // accelerator.num_processes
     steps_per_epoch = optimizer_steps(micro_batches_per_rank, accumulation)
-    total_steps = max(1, steps_per_epoch * cfg.training.epochs)
+    total_epochs = cfg.training.epochs * (2 if cfg.data.train_stage == "two_stage" else 1)
+    total_steps = max(1, steps_per_epoch * total_epochs)
     optimizer = build_optimizer(model, cfg.optimizer)
     scheduler = build_scheduler(optimizer, cfg.scheduler, total_steps)
-    manager = CheckpointManager(cfg.checkpoint.output_dir)
+    output_dir = Path(cfg.checkpoint.output_dir)
+    managers = (
+        {
+            "recon": CheckpointManager(output_dir / "recon"),
+            "qa": CheckpointManager(output_dir / "qa"),
+        }
+        if cfg.data.train_stage == "two_stage"
+        else {cfg.data.train_stage: CheckpointManager(output_dir)}
+    )
+    manager = next(iter(managers.values()))
     if cfg.checkpoint.init_from and not args.resume:
         # Use a separate manager so phase-one selection metadata and RNG do not leak.
         CheckpointManager(cfg.checkpoint.output_dir).load(
@@ -478,6 +526,13 @@ def main() -> None:
 
     step = 0
     if args.resume:
+        if cfg.data.train_stage == "two_stage":
+            resume_stage = Path(args.resume).parent.name
+            if resume_stage not in managers:
+                raise ValueError(
+                    "two_stage resume checkpoints must be inside the recon/ or qa/ directory"
+                )
+            manager = managers[resume_stage]
         step, saved_run_id = manager.load(args.resume, model, optimizer, scheduler)
         if not cfg.logging.swanlab_run_id:
             cfg.logging.swanlab_run_id = saved_run_id
@@ -494,12 +549,12 @@ def main() -> None:
                     border_style="yellow",
                 )
             )
-    start_epoch, skip_batches = resume_plan(step, steps_per_epoch, cfg.training.epochs)
+    start_epoch, skip_batches = resume_plan(step, steps_per_epoch, total_epochs)
     skip_micro_batches = micro_batch_skip(step, steps_per_epoch, accumulation)
     if step and (accelerator is None or accelerator.is_main_process):
         CONSOLE.print(
             f"[bold cyan]Resume[/bold cyan]  step {step}/{total_steps} · "
-            f"epoch {start_epoch + 1}/{cfg.training.epochs} · "
+            f"epoch {start_epoch + 1}/{total_epochs} · "
             f"skip {skip_micro_batches} micro-batches"
         )
     finished = False
@@ -531,7 +586,6 @@ def main() -> None:
         # are read against the step budget, and a batch/process mismatch changes that budget
         # silently: this line is the number the progress bar will show, printed before any
         # compute is spent.
-        ranks = 1 if accelerator is None else accelerator.num_processes
         schedule = Table(
             title="Training Schedule",
             box=THREE_LINE,
@@ -539,40 +593,49 @@ def main() -> None:
         )
         schedule.add_column("Setting", style="cyan")
         schedule.add_column("Value", style="white")
-        schedule.add_column("Setting", style="cyan")
-        schedule.add_column("Value", style="white")
-        schedule.add_row(
-            "Machine", cfg.machine or "config-defaults", "Steps", f"{total_steps:,}"
-        )
-        schedule.add_row("Epochs", str(cfg.training.epochs), "Ranks", str(ranks))
-        schedule.add_row(
-            "Batch / Rank",
-            str(cfg.training.batch_size),
-            "Accumulation",
-            str(accumulation),
-        )
-        schedule.add_row(
-            "Effective Batch",
-            f"{cfg.training.batch_size * ranks * accumulation:,}",
-            "Warmup",
-            f"{cfg.scheduler.warmup_steps:,}",
-        )
-        schedule.add_row(
-            "Eval Every",
-            f"{cfg.evaluation.autoregressive_every:,}",
-            "Log Every",
-            f"{cfg.logging.log_every:,}",
-        )
         checkpoint_interval = cfg.training.gradient_checkpoint_every_n_layers
-        checkpoint_model = accelerator.unwrap_model(model) if accelerator is not None else model
-        checkpoint_depth = int(checkpoint_model.qwen.config.num_hidden_layers)
-        checkpoint_state = (
-            f"every {checkpoint_interval} layers "
-            f"({len(range(0, checkpoint_depth, checkpoint_interval))}/{checkpoint_depth})"
-            if cfg.model.context_gradient_checkpointing and checkpoint_interval > 0
-            else "disabled"
+        schedule.add_section()
+        schedule.add_row("train", "")
+        schedule.add_row("batchsize", str(cfg.training.batch_size))
+        schedule.add_row("grad_accumulation", str(accumulation))
+        schedule.add_row(
+            "grad_ckpt_every",
+            str(checkpoint_interval if cfg.model.context_gradient_checkpointing else 0),
         )
-        schedule.add_row("Gradient Checkpointing", checkpoint_state, "", "")
+        schedule.add_row("warmup", f"{cfg.scheduler.warmup_steps:,}")
+        schedule.add_row("eval_every", f"{cfg.evaluation.autoregressive_every:,}")
+
+        data = cfg.data
+        schedule.add_section()
+        schedule.add_row("task", "")
+        schedule.add_row("train_stage", data.train_stage)
+        if data.train_stage == "mix":
+            schedule.add_row("recon_schedule", str(list(data.recon_schedule)))
+            schedule.add_row("qa_schedule", str(list(data.qa_schedule)))
+            schedule.add_row("recon_schedule_curve", data.recon_schedule_curve)
+
+        memory = cfg.memory
+        schedule.add_section()
+        schedule.add_row("context resampler", "")
+        schedule.add_row("memory_length", str(memory.memory_length))
+        schedule.add_row("context_layer_indices", str(list(memory.context_layer_indices)))
+        schedule.add_row("layers", str(memory.memory_resampler_layers))
+        schedule.add_row("heads", str(memory.memory_resampler_heads))
+        schedule.add_row("hidden", str(memory.memory_resampler_hidden_size))
+        schedule.add_row("ffn_ratio", str(memory.memory_resampler_ffn_ratio))
+
+        if memory.readout_length > 0 and memory.readout_mode != "off":
+            schedule.add_section()
+            schedule.add_row("question resampler", "")
+            schedule.add_row("readout_length", str(memory.readout_length))
+            schedule.add_row(
+                "replace_question_token",
+                str(not memory.readout_keep_question_tokens).lower(),
+            )
+            schedule.add_row("layers", str(memory.question_resampler_layers))
+            schedule.add_row("heads", str(memory.question_resampler_heads))
+            schedule.add_row("hidden", str(memory.question_resampler_hidden_size))
+            schedule.add_row("ffn_ratio", str(memory.question_resampler_ffn_ratio))
         CONSOLE.print(table_panel(schedule))
 
     model.train()
@@ -604,7 +667,13 @@ def main() -> None:
         speed_start_completed=step,
     )
     progress.start()
-    for epoch in range(start_epoch, cfg.training.epochs):
+    for epoch in range(start_epoch, total_epochs):
+        stage = training_stage(cfg.data.train_stage, epoch, cfg.training.epochs)
+        manager = managers[stage]
+        stage_offset = (
+            0 if stage == "recon" else steps_per_epoch * cfg.training.epochs
+        ) if cfg.data.train_stage == "two_stage" else 0
+        stage_total_steps = steps_per_epoch * cfg.training.epochs
         sampler.set_epoch(epoch)
         sampler.set_start_batch(0)
         # Keep the deterministic QA-turn sampling of the collate on the same epoch.
@@ -683,16 +752,37 @@ def main() -> None:
                         ),
                     ]
                 )
-                qa_weight, recon_weight, effective_ratio = scheduled_task_weights(
-                    step, total_steps, cfg.data
+                qa_probability, recon_probability = scheduled_task_weights(
+                    step - stage_offset,
+                    stage_total_steps,
+                    cfg.data,
+                    stage=stage if cfg.data.train_stage == "two_stage" else None,
                 )
+                if cfg.data.train_stage == "mix":
+                    qa_rows, recon_rows = sample_task_masks(
+                        ids["qa_context_indices"],
+                        ids["recon_context_indices"],
+                        qa_probability,
+                        recon_probability,
+                        cfg.training.seed + step,
+                        ids["context_ids"].size(0),
+                    )
+                    row_mask = torch.cat([qa_rows, recon_rows])
+                    qa_weight = recon_weight = 1.0
+                else:
+                    qa_weight, recon_weight = qa_probability, recon_probability
+                    row_mask = None
                 supervised, task_terms = supervision_objectives(
                     output.supervision_losses,
                     task_ids,
                     cfg.loss,
                     qa_weight=qa_weight * cfg.loss.qa_weight,
                     recon_weight=recon_weight * cfg.loss.recon_weight,
-                    row_mask=output.supervision_mask,
+                    row_mask=(
+                        output.supervision_mask
+                        if row_mask is None
+                        else output.supervision_mask & row_mask
+                    ),
                 )
                 auxiliary_terms = output.objective_terms or {}
                 total = supervised + objective_total(
@@ -705,7 +795,8 @@ def main() -> None:
                     "qa_weight": total.detach() * 0 + qa_weight * cfg.loss.qa_weight,
                     "recon_weight": total.detach() * 0
                     + recon_weight * cfg.loss.recon_weight,
-                    "recon_ratio": total.detach() * 0 + effective_ratio,
+                    "qa_probability": total.detach() * 0 + qa_probability,
+                    "recon_probability": total.detach() * 0 + recon_probability,
                 }
                 if accelerator is not None:
                     accelerator.backward(total)
@@ -801,8 +892,8 @@ def main() -> None:
                         "grad_norm/recon_task_embedding": float(
                             recon_task_embedding_grad_norm
                         ),
-                        "data/qa_probability": float(1.0 - effective_ratio),
-                        "data/recon_probability": float(effective_ratio),
+                        "data/qa_probability": float(qa_probability),
+                        "data/recon_probability": float(recon_probability),
                         "data/micro_batches_per_step": float(micro_batches_in_step),
                     }
                     layer_weights = base_model.context_layer_logits.detach().float().softmax(dim=0)
@@ -822,7 +913,9 @@ def main() -> None:
             # evaluators all-reduce their accumulators, so every rank must call them.
             metrics = None
             if len(validation_loader) and should_evaluate(
-                step, cfg.evaluation.autoregressive_every, total_steps
+                step - stage_offset,
+                cfg.evaluation.autoregressive_every,
+                stage_total_steps,
             ):
                 # Eval uses its own Rich live display; leave only one display active.
                 progress.stop()
@@ -850,20 +943,32 @@ def main() -> None:
                     )
                 if accelerator is not None:
                     accelerator.wait_for_everyone()
-                metrics = evaluator.compare_reader_tasks(
-                    base_model,
-                    validation_loader,
-                    device,
-                    max_contexts_per_dataset=cfg.evaluation.max_eval_contexts_per_dataset,
-                    max_qa_sample_per_context=cfg.data.max_qa_sample_per_context,
-                    row_loader=validation_row_loader,
-                    row_base=validation_row_base,
-                    recon_row_loader=recon_row_loader,
-                    recon_base=recon_row_base,
-                    pre_windowed=True,
-                    include_recon=cfg.evaluation.recon_teacherforce
-                    or cfg.evaluation.recon_autoregressive,
-                )
+                if stage == "recon":
+                    metrics = {
+                        "recon_task": evaluator.recon_teacher_forced(
+                            base_model,
+                            validation_loader,
+                            device,
+                            row_loader=recon_row_loader,
+                            context_base=recon_row_base,
+                            pre_windowed=True,
+                        )
+                    }
+                else:
+                    metrics = evaluator.compare_reader_tasks(
+                        base_model,
+                        validation_loader,
+                        device,
+                        max_contexts_per_dataset=cfg.evaluation.max_eval_contexts_per_dataset,
+                        max_qa_sample_per_context=cfg.data.max_qa_sample_per_context,
+                        row_loader=validation_row_loader,
+                        row_base=validation_row_base,
+                        recon_row_loader=recon_row_loader,
+                        recon_base=recon_row_base,
+                        pre_windowed=True,
+                        include_recon=cfg.evaluation.recon_teacherforce
+                        or cfg.evaluation.recon_autoregressive,
+                    )
                 if is_main:
                     CONSOLE.print(
                         f"[bold green]Evaluation complete · step {step:,}[/bold green]"
@@ -888,31 +993,59 @@ def main() -> None:
                 # race ahead into the next training step.
                 accelerator.wait_for_everyone()
             if metrics is not None and is_main:
+                best_metric = (
+                    metrics["recon_task"]["recon_token_accuracy"]
+                    if stage == "recon"
+                    else metrics["qa_task"]["f1"]
+                )
                 improved = manager.update_best(
                     step_checkpoint,
-                    metrics["qa_task"]["f1"],
+                    best_metric,
                 )
                 if improved:
                     CONSOLE.log(
                         f"[bold green]best.pt updated[/bold green]  step={step:,} · "
-                        f"F1={metrics['qa_task']['f1']:.4f}"
+                        f"{stage} metric={best_metric:.4f}"
                     )
                 else:
                     if manager.best_f1 is None:
                         CONSOLE.log(
                             f"[yellow]best.pt unchanged[/yellow]  "
-                            f"F1={metrics['qa_task']['f1']:.4f} is not finite"
+                            f"{stage} metric={best_metric:.4f} is not finite"
                         )
                     else:
                         CONSOLE.log(
                             f"[dim]best.pt unchanged[/dim]  "
-                            f"F1={metrics['qa_task']['f1']:.4f} · "
-                            f"best F1={manager.best_f1:.4f} at step {manager.best_step:,}"
+                            f"{stage} metric={best_metric:.4f} · "
+                            f"best={manager.best_f1:.4f} at step {manager.best_step:,}"
                         )
             if metrics is not None:
                 progress.start()
         if finished:
             break
+        stage_finished = (
+            cfg.data.train_stage == "two_stage"
+            and (
+                (stage == "recon" and epoch + 1 == cfg.training.epochs)
+                or (stage == "qa" and epoch + 1 == total_epochs)
+            )
+        )
+        if stage_finished and (accelerator is None or accelerator.is_main_process):
+            checkpoint_model = (
+                accelerator.unwrap_model(model) if accelerator is not None else model
+            )
+            manager.save(
+                checkpoint_model,
+                optimizer,
+                scheduler,
+                step,
+                cfg.to_dict(),
+                final=True,
+                swanlab_run_id=getattr(run, "id", None),
+                world_size=1 if accelerator is None else accelerator.num_processes,
+            )
+        if stage_finished and accelerator is not None:
+            accelerator.wait_for_everyone()
 
     if accelerator is None or accelerator.is_main_process:
         checkpoint_model = (
