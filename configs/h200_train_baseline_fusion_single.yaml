@@ -1,4 +1,3 @@
-# 实验层：h200（8xH200）上的 baseline。只写与 harness/train_baseline 不同的部分。
 _base_:
 - train_baseline.yaml
 memory:

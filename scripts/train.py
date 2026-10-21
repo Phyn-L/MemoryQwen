@@ -805,6 +805,13 @@ def main() -> None:
                         "data/recon_probability": float(effective_ratio),
                         "data/micro_batches_per_step": float(micro_batches_in_step),
                     }
+                    layer_weights = base_model.context_layer_logits.detach().float().softmax(dim=0)
+                    payload.update({
+                        f"train/alpha_layer_{layer_index}": float(weight)
+                        for layer_index, weight in zip(
+                            base_model.context_layer_indices, layer_weights, strict=True
+                        )
+                    })
                     run.log(payload, step=step)
             is_main = accelerator is None or accelerator.is_main_process
             # Validation runs on EVERY rank.  accelerator.prepare shards the validation
