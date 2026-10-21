@@ -223,3 +223,29 @@ def test_only_canonical_data_tree_resolves(tmp_path):
     from src.eval_data import split_locations
 
     assert split_locations("test") == (("meta/test", ".json"),)
+
+
+def test_race_icl_and_memory_share_options_and_full_answer(tmp_path):
+    from src.data import _messages_from_row
+    from src.icl_baseline import format_prompt
+
+    row = _pair_row(
+        dataset="race", pairs=(("Which?", "second option"),),
+        options=["first option", "second option", "third option", "fourth option"],
+    )
+    path = _write(tmp_path / "race.jsonl", [row])
+    example, = load_jsonl(path, "race")
+    user, assistant = _messages_from_row(row)
+    expected = "Which?\nOptions:\nfirst option\nsecond option\nthird option\nfourth option"
+    assert example.question == user.content == expected
+    assert format_prompt(example, []).endswith(expected)
+    assert format_prompt(example, [example]).endswith(expected)
+    assert example.references == assistant.answers == ("second option",)
+
+
+def test_other_dataset_questions_do_not_gain_options(tmp_path):
+    from src.data import _messages_from_row
+
+    row = _pair_row(pairs=(("Which?", "second option"),), options=["first", "second"])
+    example, = load_jsonl(_write(tmp_path / "squad.jsonl", [row]), "squad")
+    assert example.question == _messages_from_row(row)[0].content == "Which?"

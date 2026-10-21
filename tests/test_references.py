@@ -42,11 +42,13 @@ def test_race_row_uses_the_prebuilt_text_question_and_answer():
             "question": "Which option?",
             "answers": ["option text"],
             "answer": "option text",
-            "metadata": {},
+            "metadata": {"options": ["first", "option text", "third", "fourth"]},
         }],
     }
     user, assistant = _messages_from_row(row)
-    assert user.content == "Which option?"
+    assert user.content == (
+        "Which option?\nOptions:\nfirst\noption text\nthird\nfourth"
+    )
     assert assistant.content == "option text"
     assert assistant.answers == ("option text",)
     assert best_reference_metrics("option text", assistant.answers) == {

@@ -19,6 +19,7 @@ from tqdm.auto import tqdm
 from utils.ddp import is_main_process
 
 from . import cache_utils
+from .qa_prompt import format_question
 
 _FILTER_WORKER_TOKENIZER = None
 _FILTER_WORKER_OPTIONS = None
@@ -397,6 +398,7 @@ def _messages_from_row(row: dict[str, Any]) -> tuple[ConversationMessage, ...]:
             answer = str(pair.get("answer") or (answers[0] if answers else "")).strip()
             if not question or not answer:
                 continue
+            question = format_question(question, row.get("dataset", ""), pair.get("metadata") or {})
             messages.extend(
                 (
                     ConversationMessage("user", question),
@@ -981,6 +983,25 @@ def collate_context_records(
             )
         finally:
             tokenizer.truncation_side = previous_truncation
+        qa_turns = [turn for turn, task in zip(selected, task_ids, strict=True) if task == 1]
+        if any(turn.dataset == "race" for turn in qa_turns):
+            # RACE must retain every option; keep the configured cap for other datasets.
+            token_rows = [
+                tokenizer(text, add_special_tokens=False).input_ids
+                if turn.dataset == "race" else ids[mask.bool()].tolist()
+                for text, turn, ids, mask in zip(
+                    qa_rendered, qa_turns, qa_encoded.input_ids,
+                    qa_encoded.attention_mask, strict=True,
+                )
+            ]
+            previous_padding = tokenizer.padding_side
+            tokenizer.padding_side = question_padding_side
+            try:
+                qa_encoded = tokenizer.pad(
+                    {"input_ids": token_rows}, padding=True, return_tensors="pt",
+                )
+            finally:
+                tokenizer.padding_side = previous_padding
         q = torch.zeros((len(selected), qa_encoded.input_ids.size(1)), dtype=qa_encoded.input_ids.dtype)
         q_mask = torch.zeros((len(selected), qa_encoded.attention_mask.size(1)), dtype=torch.bool)
         qa_rows = torch.tensor([task == 1 for task in task_ids])
@@ -996,7 +1017,7 @@ def collate_context_records(
     target_rows = [
         tokenizer(
             turn.answer,
-            truncation=True,
+            truncation=turn.dataset != "race" or task == 0,
             max_length=max_context_tokens if task == 0 else max_answer_tokens,
             add_special_tokens=False,
         ).input_ids

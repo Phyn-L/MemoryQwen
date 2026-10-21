@@ -12,9 +12,10 @@ is also how the truncation limits of the two views could drift apart.
 """
 from __future__ import annotations
 
+import pytest
 import torch
 
-from src.data import ContextRecord, collate_context_records
+from src.data import ContextRecord, _messages_from_row, collate_context_records
 
 
 class _Batch:
@@ -172,3 +173,33 @@ def test_mix_emits_one_recon_row_and_qa_per_context():
     assert batch["qa_context_indices"].tolist() == [0, 0, 1, 1]
     assert batch["recon_context_indices"].tolist() == [0, 1]
     assert batch["context_ids"].size(0) == 2
+
+
+@pytest.mark.parametrize("training", [False, True])
+def test_race_keeps_all_options_and_full_target_beyond_token_limits(training):
+    answer = "answer " * 12
+    messages = _messages_from_row({
+        "dataset": "race",
+        "qa_pairs": [{
+            "question": "question",
+            "answer": answer.strip(),
+            "metadata": {"options": ["cat", answer.strip(), "dog", "sat"]},
+        }],
+    })
+    race = ContextRecord("ctx", messages, dataset="race", independent_qa=True)
+    tokenizer = _WordTokenizer()
+    batch = collate_context_records(
+        [race, _record(0, turns=1)], tokenizer,
+        max_context_tokens=8, max_question_tokens=4, max_answer_tokens=4,
+        training=training, train_stage="only_qa", sample_qa=False,
+    )
+    expected = tokenizer.apply_chat_template([
+        {"role": "user", "content": messages[0].content},
+    ])
+    actual = batch["qa_input_ids"][0][batch["qa_input_mask"][0]].tolist()
+    assert actual == tokenizer._ids(expected)
+    assert batch["qa_input_mask"][1].sum() == 4
+    assert batch["qa_target_mask"][0].sum() == 13  # Full option plus EOS.
+    assert batch["records"][0].answer == answer.strip()
+    assert tokenizer.padding_side == "right"
+    assert tokenizer.truncation_side == "right"

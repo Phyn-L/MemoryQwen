@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .metrics import METRIC_KEYS, answer_line, best_reference_metrics, normalize_answer
+from .qa_prompt import format_question
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a precise question-answering system. Use only the provided passage and follow "
@@ -112,6 +113,9 @@ def _flat_row_from_pair(row: dict, pair: dict, dataset: str | None):
     question = str(pair.get("question", "")).strip()
     if not question:
         return None
+    question = format_question(
+        question, str(row.get("dataset", "")) or (dataset or ""), pair["metadata"],
+    )
     references = pair.get("answers") or ()
     if isinstance(references, str):
         references = (references,)
@@ -287,7 +291,8 @@ def format_prompt(example: ICLExample, demonstrations: Sequence[ICLExample]) -> 
         blocks.append(
             f"Example {index}:\n{_question_block(demo)}\nAnswer: {_demo_answer(demo)}"
         )
-    blocks.append(f"Now answer this question:\n{_question_block(example)}\nAnswer:")
+    suffix = "" if example.dataset == "race" else "\nAnswer:"
+    blocks.append(f"Now answer this question:\n{_question_block(example)}{suffix}")
     return "\n\n".join(blocks)
 
 
