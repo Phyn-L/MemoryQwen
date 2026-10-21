@@ -8,6 +8,7 @@ if [[ -f scripts/env.local.sh ]]; then source scripts/env.local.sh; fi
 # Edit these settings; CLI arguments override the defaults below.
 MACHINE="${MACHINE:-4090}"
 MODEL="${MODEL:-Qwen3-8B}"
+PROMPT_MODE="${PROMPT_MODE:-instruct}"
 DATASETS="${DATASETS:-squad ms_marco_v1 ms_marco_v2 hotpotqa race}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 MAX_INPUT_TOKENS="${MAX_INPUT_TOKENS:-1024}"
@@ -23,6 +24,7 @@ OUTPUT_DIR="${OUTPUT_DIR:-}"
 
 read -r -a dataset_args <<< "$DATASETS"
 args=(--machine "$MACHINE" --model "$MODEL" --datasets "${dataset_args[@]}"
+      --prompt-mode "$PROMPT_MODE"
       --bs "$BATCH_SIZE" --max-input-tokens "$MAX_INPUT_TOKENS"
       --max-new-tokens "$MAX_NEW_TOKENS" --max-context-tokens "$MAX_CONTEXT_TOKENS")
 if [[ -n "$MAX_CONTEXTS" ]]; then args+=(--max-contexts "$MAX_CONTEXTS"); fi

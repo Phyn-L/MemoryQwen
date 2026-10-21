@@ -306,17 +306,25 @@ def render_prompt(
     example: ICLExample,
     demonstrations: Sequence[ICLExample],
     use_chat_template: bool = True,
+    prompt_mode: str = "instruct",
 ) -> str:
-    prompt = format_prompt(example, demonstrations)
+    if prompt_mode == "raw":
+        if demonstrations:
+            raise ValueError("raw prompt requires zero demonstrations")
+        prompt = f"{example.context}\n\n{example.question}"
+    elif prompt_mode == "instruct":
+        prompt = format_prompt(example, demonstrations)
+    else:
+        raise ValueError("prompt_mode must be raw or instruct")
     if not use_chat_template or not getattr(tokenizer, "apply_chat_template", None):
         return prompt
-    messages = [
-        {
+    messages = []
+    if prompt_mode == "instruct":
+        messages.append({
             "role": "system",
             "content": system_prompt_for(example.dataset),
-        },
-        {"role": "user", "content": prompt},
-    ]
+        })
+    messages.append({"role": "user", "content": prompt})
     return tokenizer.apply_chat_template(
         messages,
         tokenize=False,

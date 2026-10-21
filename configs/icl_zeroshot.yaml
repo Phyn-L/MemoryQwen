@@ -11,6 +11,8 @@ data:
   max_contexts: null  # 最大 context 数，null 表示不限制
   max_context_tokens: null  # 覆盖 context token 上限
 inference:
+  prompt_mode: instruct  # instruct: 原有提示；raw: user 仅含 context + 空行 + question
+  use_chat_template: true  # raw / instruct 均保留模型原生 chat template
   batch_size: 2  # 推理批大小
   num_shots: 0  # 每个问题使用的示例数
   max_input_tokens: 8192  # 模型输入最大 token 数

@@ -34,6 +34,7 @@ class ICLInference:
     seed: int = 42
     num_workers: int = 0
     use_chat_template: bool = True
+    prompt_mode: str = 'instruct'
 
 
 def load_icl_defaults(path, machine=None):
@@ -48,6 +49,10 @@ def load_icl_defaults(path, machine=None):
     model = ICLModel(**raw.get('model', {}))
     data = ICLData(**raw.get('data', {}))
     inference = ICLInference(**raw.get('inference', {}))
+    if inference.prompt_mode not in ('raw', 'instruct'):
+        raise ValueError('inference.prompt_mode must be raw or instruct')
+    if inference.prompt_mode == 'raw' and inference.num_shots != 0:
+        raise ValueError('raw prompt requires inference.num_shots=0')
     invalid = any(
         not isinstance(name, str) or not name or '/' in name or name in ('.', '..')
         for name in (data.datasets or [])

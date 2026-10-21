@@ -91,7 +91,11 @@ def parse_args(argv=None):
         "--datasets", nargs="+", default=["squad", "race"]
     )
     parser.add_argument("--output-dir", default="outputs/icl_baseline/qwen3-1.7b")
-    parser.add_argument("--num-shots", type=int, default=4)
+    parser.add_argument("--num-shots", type=int)
+    parser.add_argument(
+        "--prompt-mode", choices=("raw", "instruct"), default="instruct",
+        help="raw: context + blank line + question in a user message; zero-shot only",
+    )
     parser.add_argument("--batch-size", "--bs", type=int, default=2, help="Per-GPU batch size")
     parser.add_argument("--max-input-tokens", type=int, default=8192)
     parser.add_argument("--squad-max-new-tokens", type=int, default=32)
@@ -127,6 +131,12 @@ def parse_args(argv=None):
     )
     parser.set_defaults(**defaults)
     args = parser.parse_args(argv)
+    if args.num_shots is None:
+        args.num_shots = 0 if args.prompt_mode == "raw" else 4
+    if args.prompt_mode not in ("raw", "instruct"):
+        parser.error("prompt-mode must be raw or instruct")
+    if args.prompt_mode == "raw" and args.num_shots != 0:
+        parser.error("raw prompt requires --num-shots 0")
     if args.num_shots < 0 or args.batch_size <= 0 or args.max_input_tokens <= 0:
         parser.error(
             "num-shots must be non-negative and batch/token limits must be positive"
@@ -254,7 +264,10 @@ def evaluate_dataset(
         )
         for indices, examples in progress:
             prompts = [
-                render_prompt(tokenizer, example, demos, not args.no_chat_template)
+                render_prompt(
+                    tokenizer, example, demos, not args.no_chat_template,
+                    prompt_mode=args.prompt_mode,
+                )
                 for example in examples
             ]
             encoded = tokenizer(
@@ -331,6 +344,8 @@ def experiment_metadata(args, world_size, demonstrations):
     return {
         "arguments": vars(args),
         "protocol": {
+            "prompt_mode": args.prompt_mode,
+            "chat_template": not args.no_chat_template,
             "decoding": "greedy",
             "datasets": dataset_paths(args),
             "answer_filter": "Skip QA rows with no reference answer",
@@ -339,9 +354,9 @@ def experiment_metadata(args, world_size, demonstrations):
             "bleu_4": "corpus BLEU-4, closest reference length, add-one smoothing",
             "rouge_l": "sentence-level LCS F1, macro average",
             "system_prompts": {
-                dataset: system_prompt_for(dataset, args.source_version)
+                dataset: system_prompt_for(dataset)
                 for dataset in args.datasets
-            },
+            } if args.prompt_mode == "instruct" and not args.no_chat_template else {},
         },
         "distributed": {"world_size": world_size},
         "demonstrations": {
@@ -357,8 +372,21 @@ def experiment_metadata(args, world_size, demonstrations):
     }
 
 
+def validate_resume_prompt(args):
+    if not args.resume:
+        return
+    saved = json.loads((Path(args.output_dir) / "run_config.json").read_text())
+    protocol = saved["protocol"]
+    if (
+        protocol.get("prompt_mode") != args.prompt_mode
+        or protocol.get("chat_template") != (not args.no_chat_template)
+    ):
+        raise ValueError("Cannot resume with a different prompt mode or chat template; use a new output directory")
+
+
 def worker_main():
     args = parse_args()
+    validate_resume_prompt(args)
     rank, world_size, device = distributed_context()
     seed_everything(args.seed, rank=rank)
     if dist.is_initialized():
@@ -437,6 +465,7 @@ def suite_main(argv=None):
     parser.add_argument('--max-contexts', type=int)
     parser.add_argument('--max-qa-sample-per-context', type=int)
     parser.add_argument('--context-shuffle-seed', type=int, default=42)
+    parser.add_argument('--prompt-mode', choices=('raw', 'instruct'), default='instruct')
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
     for key in (
@@ -459,6 +488,7 @@ def suite_main(argv=None):
         command = [sys.executable, '-m', 'utils.launcher', 'icl',
                    '--config', 'configs/icl_zeroshot.yaml', '--model', model,
                    '--num-shots', '0', '--datasets', plan['name'], '--split', plan['split'],
+                   '--prompt-mode', args.prompt_mode,
                    '--data-root', str(root), '--output-dir', str(destination),
                    '--bs', str(args.bs), '--max-input-tokens', str(args.max_input_tokens),
                    '--max-new-tokens', str(args.max_new_tokens),
@@ -477,7 +507,7 @@ def suite_main(argv=None):
             command += ['--max-samples', str(args.max_samples)]
         print(shlex.join(command), flush=True)
         row = dict(dataset=plan['name'], split=plan['split'], model=model,
-                   num_shots=0, command=command, status='planned')
+                   num_shots=0, prompt_mode=args.prompt_mode, command=command, status='planned')
         if not args.dry_run:
             # Inherit stdout/stderr so tqdm progress is visible in the terminal.
             result = subprocess.run(command)
