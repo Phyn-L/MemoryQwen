@@ -12,7 +12,7 @@ memory:
 
   readout_mode: memory_question
   readout_length: 16  # 问题条件化 readout token 数，0 表示关闭
-  readout_keep_question_tokens: false  # readout 开启时保留 question token
+  readout_keep_question_tokens: true  # readout 开启时保留 question token
   question_resampler_hidden_size: 512  # question resampler 隐藏维度
   question_resampler_layers: 4  # question resampler 层数
   question_resampler_heads: 4  # question resampler 注意力头数
