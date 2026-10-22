@@ -73,10 +73,9 @@ def test_legacy_save_cadence_is_removed_from_resolved_config():
 def test_a_checkpoint_carries_and_restores_python_numpy_and_device_rng(tmp_path):
     """A resumed run must continue the *same* random stream, on every device.
 
-    ``losses.sample_positions`` draws on the device RNG during training, so restoring only the
-    torch CPU state made a resumed run sample a different distillation subset than the run it
-    was continuing -- ``deterministic: true`` cannot help, because it pins operators, not the
-    random stream.
+    Dropout draws on the device RNG during training, so restoring only the torch CPU state
+    would use different dropout masks -- ``deterministic: true`` pins operators, not the random
+    stream.
     """
     import random
 

@@ -29,14 +29,14 @@ def test_reconstruction_preserves_memory_embeddings():
             saved = prefix.memory_embedding.clone()
             baseline = model.forward_with_memory_prefix(prefix, indices, embed(question), question.bool(),
                                                     embed(answer), answer.bool(), answer)
-            recon = model._distillation_student_hidden(prefix, embed(context), context.bool())
+            model.recon_teacher_forced(prefix, embed(context), context.bool(), context)
             torch.testing.assert_close(prefix.memory_embedding, saved)
             for _ in range(2):
                 output = model.forward_with_memory_prefix(prefix, indices, embed(question), question.bool(),
                                                       embed(answer), answer.bool(), answer)
                 torch.testing.assert_close(output.logits, baseline.logits)
             if training:
-                (output.logits.float().square().mean() + recon.float().square().mean()).backward()
+                output.logits.float().square().mean().backward()
                 assert model.context_resampler.latents.grad is not None
                 assert torch.isfinite(model.context_resampler.latents.grad).all()
                 assert model.context_resampler.latents.grad.abs().sum() > 0

@@ -5,10 +5,10 @@ from dataclasses import dataclass
 
 import torch
 from torch import nn
-from torch.nn import functional as F
 
 from .dtypes import no_autocast
 from .resampler import ContextMemoryResampler, LearnedPrefix, QuestionResampler
+
 
 @dataclass
 class ContextMemoryOutput:
@@ -174,8 +174,16 @@ class ContextMemoryModel(nn.Module):
         # Which LoRA implementation is active, recorded so a run is reproducible.
         self.lora_backend = "manual" if self.target_modules else "none"
         self.qwen = self._add_lora(qwen, rank, alpha, dropout)
-        self.register_buffer("recon_user_token_ids", torch.tensor(recon_user_token_ids, dtype=torch.long), persistent=False)
-        self.register_buffer("recon_answer_prefix_token_ids", torch.tensor(recon_answer_prefix_token_ids, dtype=torch.long), persistent=False)
+        self.register_buffer(
+            "recon_user_token_ids",
+            torch.tensor(recon_user_token_ids, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "recon_answer_prefix_token_ids",
+            torch.tensor(recon_answer_prefix_token_ids, dtype=torch.long),
+            persistent=False,
+        )
         # `_transformer_body` resolves and caches the headless decoder stack on first use; it
         # is not assigned here because that would register it as a duplicate submodule.
         object.__setattr__(self, "_body", None)
@@ -484,7 +492,7 @@ class ContextMemoryModel(nn.Module):
         # and a left-padded batch number the same real tokens the same way.
         positions = compact_positions(context_mask, 0)
         with self.lora_enabled(True):
-        context_hidden, _ = self._encode_context_hidden(
+            context_hidden, _ = self._encode_context_hidden(
                 context_embeds, context_mask, positions,
             )
         memory_embedding = self.context_resampler(context_hidden, context_mask).to(dtype=self.dtype)
@@ -629,8 +637,12 @@ class ContextMemoryModel(nn.Module):
         )
         memory = prefix.memory_embedding.index_select(0, indices).to(dtype=self.dtype)
         embedding = self.qwen.get_input_embeddings()
-        user = embedding(self.recon_user_token_ids.to(context_embeds.device))[None].expand(context_embeds.size(0), -1, -1)
-        header = embedding(self.recon_answer_prefix_token_ids.to(context_embeds.device))[None].expand(context_embeds.size(0), -1, -1)
+        user = embedding(self.recon_user_token_ids.to(context_embeds.device))[None].expand(
+            context_embeds.size(0), -1, -1
+        )
+        header = embedding(
+            self.recon_answer_prefix_token_ids.to(context_embeds.device)
+        )[None].expand(context_embeds.size(0), -1, -1)
         sequence = torch.cat([user, memory, task, header, context_embeds], dim=1)
         full_mask = torch.cat([
             context_mask.new_ones(context_mask.size(0), user.size(1) + memory.size(1)),
@@ -1160,7 +1172,7 @@ class ContextMemoryModel(nn.Module):
         decode_cache_length = cache_length + input_length + tail_length
         generated = []
         eos_id = getattr(tokenizer, "eos_token_id", None)
-        for step in range(max(0, int(max_new_tokens))):
+        for _ in range(max(0, int(max_new_tokens))):
             token_id = int(next_id.item())
             generated.append(token_id)
             token = embedding(next_id[:, None])
@@ -1257,7 +1269,6 @@ def load_model(cfg):
 __all__ = [
     "ContextMemoryModel", "ContextMemoryOutput", "ConversationState",
     "MetaLoRA", "ContextPrefix",
-    "TiedUnembedding",
     "ContextMemoryResampler", "QuestionResampler",
     "build_causal_mask", "compact_positions",
     "is_trainable_parameter_name", "load_model", "TASK_RECON", "TASK_QA",

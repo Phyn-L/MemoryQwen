@@ -48,7 +48,6 @@ def _configure(path: str, source: Path, samples: int) -> TrainConfig:
     # of scanning a multi-gigabyte JSONL until a short context is found.
     cfg.data.filter_long_context = False
     cfg.data.train_stage = "only_qa"
-    cfg.loss.distill_weight = 0.0
     cfg.loss.qa_weight = 1.0
     cfg.loss.recon_weight = 0.0
     cfg.training.batch_size = 1
@@ -68,12 +67,12 @@ def _run_one(name: str, cfg: TrainConfig, tokenizer, model, device: torch.device
 
     # Show the exact rendered prompt once, which also verifies that the native
     # Qwen chat template was used for the structured messages.
-    prompt = tokenizer.decode(ids["input_ids"][0], skip_special_tokens=False)
+    prompt = tokenizer.decode(ids["qa_input_ids"][0], skip_special_tokens=False)
     print(
         f"[{name}] rows={len(dataset)} turns={len(records[0].messages)} "
         f"context_tokens={int(ids['context_mask'][0].sum())} "
-        f"question_tokens={int(ids['input_mask'][0].sum())} "
-        f"answer_tokens={int(ids['target_mask'][0].sum())}"
+        f"question_tokens={int(ids['qa_input_mask'][0].sum())} "
+        f"answer_tokens={int(ids['qa_target_mask'][0].sum())}"
     )
     print(f"[{name}] rendered_prompt={prompt!r}")
 
@@ -81,11 +80,11 @@ def _run_one(name: str, cfg: TrainConfig, tokenizer, model, device: torch.device
     output = model(
         embedding(ids["context_ids"]),
         ids["context_mask"],
-        embedding(ids["input_ids"]),
-        ids["input_mask"],
-        embedding(ids["target_ids"]),
-        ids["target_mask"],
-        ids["labels"],
+        embedding(ids["qa_input_ids"]),
+        ids["qa_input_mask"],
+        embedding(ids["qa_target_ids"]),
+        ids["qa_target_mask"],
+        ids["qa_labels"],
         ids["qa_context_indices"],
         loss_only=True,
     )

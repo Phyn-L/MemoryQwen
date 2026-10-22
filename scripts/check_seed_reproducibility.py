@@ -12,7 +12,7 @@ import torch
 def worker(args):
     from transformers import Qwen3Config, Qwen3ForCausalLM
 
-    from src.losses import objective_total, supervision_objectives
+    from src.losses import supervision_objectives
     from src.model import ContextMemoryModel, is_trainable_parameter_name
     from utils import seed_everything
     from utils.config import LossConfig
@@ -26,15 +26,14 @@ def worker(args):
     config._attn_implementation = 'sdpa'
     backbone = Qwen3ForCausalLM(config).to(dtype=getattr(torch, args.dtype))
     model = ContextMemoryModel(backbone, rank=4, alpha=8, memory_length=8,
-                     max_context_tokens=64, distillation=True,
+                     max_context_tokens=64,
                      dropout=0.1, recon_user_token_ids=(2,),
                      recon_answer_prefix_token_ids=(3, 4)).to(args.device).train()
     for name, p in model.named_parameters():
         p.requires_grad_(is_trainable_parameter_name(name))
     params = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(params, lr=1e-3)
-    objective = LossConfig(distill_weight=0.3,
-                           distill_positions=8, distill_entropy_weight=True)
+    objective = LossConfig()
     # Inputs stay identical even in the different-seed control.
     generator = torch.Generator().manual_seed(123)
     batches = [[torch.randint(2, 128, (2, length), generator=generator).to(args.device)
@@ -43,24 +42,20 @@ def worker(args):
         return torch.cat([p.detach().float().cpu().reshape(-1) for p in values])
     initial = snapshot(params)
     trajectory = []
-    for step, (context, question, answer) in enumerate(batches):
+    for context, question, answer in batches:
         embedding = model.qwen.get_input_embeddings()
-        # The distillation position sampling is driven by an explicit generator seeded from
-        # (seed, step), exactly like the training loop: reproducible by construction, and
-        # unaffected by any other consumer of the global RNG.
-        sampling = torch.Generator(device=args.device).manual_seed(args.seed + step)
         out = model(embedding(context), torch.ones_like(context, dtype=torch.bool),
                     embedding(question), torch.ones_like(question, dtype=torch.bool),
                     embedding(answer), torch.ones_like(answer, dtype=torch.bool), answer,
-                    torch.arange(2, device=args.device), context_ids=context,
-                    loss_config=objective, loss_only=True, generator=sampling)
+                    torch.arange(2, device=args.device),
+                    loss_config=objective, loss_only=True)
         supervised, _ = supervision_objectives(
             out.supervision_losses,
             torch.ones(out.supervision_losses.size(0), dtype=torch.long, device=args.device),
             objective,
             row_mask=out.supervision_mask,
         )
-        loss = supervised + objective_total(supervised * 0, out.objective_terms, objective)
+        loss = supervised
         loss.backward()
         gradients = snapshot([p.grad for p in params if p.grad is not None])
         optimizer.step()

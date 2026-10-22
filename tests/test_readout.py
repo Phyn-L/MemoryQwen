@@ -196,7 +196,6 @@ def _forward(model, batch, **kwargs):
         embedding(batch["question_ids"]), batch["question_mask"],
         embedding(batch["answer_ids"]), batch["answer_mask"], batch["answer_ids"],
         torch.arange(batch["context_ids"].size(0)),
-        context_ids=batch["context_ids"],
         question_prefix_embeds=embedding(user_ids),
         question_prefix_mask=torch.ones_like(user_ids, dtype=torch.bool),
         answer_prefix_embeds=embedding(header_ids),

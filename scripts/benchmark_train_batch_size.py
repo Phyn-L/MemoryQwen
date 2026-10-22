@@ -49,7 +49,6 @@ def configure(
     cfg.data.max_question_tokens = max_question_tokens
     cfg.data.max_answer_tokens = max_answer_tokens
     cfg.data.train_stage = "only_qa"
-    cfg.loss.distill_weight = 0.0
     cfg.loss.qa_weight = 1.0
     cfg.loss.recon_weight = 0.0
     # Read the first rows and let the normal collator truncate them to the
@@ -225,11 +224,11 @@ def main() -> None:
                 output = model(
                     embedding(ids["context_ids"]),
                     ids["context_mask"],
-                    embedding(ids["input_ids"]),
-                    ids["input_mask"],
-                    embedding(ids["target_ids"]),
-                    ids["target_mask"],
-                    ids["labels"],
+                    embedding(ids["qa_input_ids"]),
+                    ids["qa_input_mask"],
+                    embedding(ids["qa_target_ids"]),
+                    ids["qa_target_mask"],
+                    ids["qa_labels"],
                     ids["qa_context_indices"],
                     loss_only=True,
                 )

@@ -25,7 +25,7 @@ from src.cache_build import DEFAULT_BUILD_WORKERS as BUILD_WORKERS
 from src.cache_build import ensure_cache
 from src.data import SortishSampler
 from src.evaluator import Evaluator
-from src.losses import objective_total, scheduled_task_weights, supervision_objectives
+from src.losses import scheduled_task_weights, supervision_objectives
 from src.model import load_model
 from src.pipeline import (
     data_cache_dir,
@@ -652,10 +652,6 @@ def main() -> None:
         CONSOLE.print(table_panel(schedule))
 
     model.train()
-    # Deterministic objective sampling: the distillation position subset is drawn from a
-    # generator reseeded with (training.seed, step), so it is recomputable from the step
-    # number alone -- and therefore identical after a resume (see losses.sample_positions).
-    sampling_generator = torch.Generator(device=device.type)
     # Scalar sums of the micro-batches in the group that is currently accumulating; the step
     # that closes the group logs and resets them.
     group_terms: dict[str, torch.Tensor] = {}
@@ -716,11 +712,6 @@ def main() -> None:
                 batch_index + 1
             ) % accumulation == 0 or batch_index + 1 >= micro_batches_per_rank
             with accumulation_context(accelerator, model):
-                sampling_generator.manual_seed(
-                    cfg.training.seed
-                    + step * accumulation
-                    + (batch_index % accumulation)
-                )
                 ids = {
                     k: v.to(device, non_blocking=True)
                     for k, v in batch.items()
@@ -747,11 +738,9 @@ def main() -> None:
                     ids["qa_target_mask"],
                     ids["qa_labels"],
                     ids["qa_context_indices"],
-                    context_ids=ids["context_ids"],
                     loss_config=cfg.loss,
                     loss_only=True,
                     recon_batch=recon_batch,
-                    generator=sampling_generator,
                     question_prefix_embeds=embedding(ids["qa_prefix_ids"]),
                     question_prefix_mask=ids["qa_prefix_mask"],
                     answer_prefix_embeds=embedding(ids["qa_answer_prefix_ids"]),
@@ -801,12 +790,8 @@ def main() -> None:
                         else output.supervision_mask & row_mask
                     ),
                 )
-                auxiliary_terms = output.objective_terms or {}
-                total = supervised + objective_total(
-                    supervised * 0, auxiliary_terms, cfg.loss
-                )
+                total = supervised
                 terms = {
-                    **auxiliary_terms,
                     **task_terms,
                     "loss": total,
                     "qa_weight": total.detach() * 0 + qa_weight * cfg.loss.qa_weight,
@@ -889,7 +874,6 @@ def main() -> None:
                         "loss/total": logged["loss"],
                         "loss/qa": logged["qa_loss"],
                         "loss/recon": logged["recon_loss"],
-                        "loss/distill": logged["distill_loss"],
                         "train/lr": float(scheduler.get_last_lr()[0]),
                         "loss/ppl": float(math.exp(min(logged["qa_loss"], 20.0))),
                         "loss/qa_ppl": float(math.exp(min(logged["qa_loss"], 20.0))),

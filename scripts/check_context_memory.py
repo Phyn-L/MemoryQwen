@@ -16,7 +16,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.losses import objective_total, supervision_objectives
+from src.losses import supervision_objectives
 from src.model import ContextMemoryModel, load_model
 from utils.config import TrainConfig
 
@@ -75,7 +75,7 @@ def main():
         torch.cuda.reset_peak_memory_stats()
         torch.cuda.synchronize()
     started = time.perf_counter()
-    for step in trange(args.steps, desc="context memory", disable=rank != 0):
+    for _ in trange(args.steps, desc="context memory", disable=rank != 0):
         if args.backward:
             optimizer.zero_grad(set_to_none=True)
             # Both supervision branches the trainer runs: the QA row and the Recon row that
@@ -88,16 +88,13 @@ def main():
                 "context_mask": mask,
                 "labels": ids,
             }
-            generator = torch.Generator(device=device.type).manual_seed(
-                cfg.training.seed + step
-            )
             output = wrapped(
                 context, mask, question, torch.ones_like(question_ids, dtype=torch.bool),
                 answer, torch.ones_like(answer_ids, dtype=torch.bool), answer_ids,
-                context_ids=ids, loss_config=cfg.loss, loss_only=True,
-                recon_batch=recon_batch, generator=generator,
+                loss_config=cfg.loss, loss_only=True,
+                recon_batch=recon_batch,
             )
-            # Same objective the trainer builds: per-row means, both tasks, distill on top.
+            # Same task-weighted row means the trainer builds.
             task_ids = torch.cat([
                 torch.ones(batch_contexts, dtype=torch.long, device=device),
                 torch.zeros(batch_contexts, dtype=torch.long, device=device),
@@ -109,8 +106,6 @@ def main():
                 row_mask=output.supervision_mask,
             )
             loss = supervised
-            if output.objective_terms:
-                loss = loss + objective_total(supervised * 0, output.objective_terms, cfg.loss)
             assert torch.isfinite(loss), loss
             assert torch.isfinite(terms["qa_loss"]) and torch.isfinite(terms["recon_loss"]), terms
             loss.backward()

@@ -201,7 +201,7 @@ def test_the_progress_line_carries_loss_qa_recon_and_ppl_at_once():
     """
     module = _train_module()
     # Sums over a two-micro-batch group (what `group_terms` holds at the boundary).
-    terms = {"loss": 24.0, "qa_loss": 20.0, "recon_loss": 4.0, "distill_loss": 0.0}
+    terms = {"loss": 24.0, "qa_loss": 20.0, "recon_loss": 4.0}
     postfix = module.step_postfix(terms, 2)
     assert postfix["loss"] == "12.0000"
     assert postfix["qa"] == "10.0000"

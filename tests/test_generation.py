@@ -225,7 +225,12 @@ def test_append_conversation_turn_rejects_batched_turn():
     )
     try:
         model.append_conversation_turn(
-            state, torch.tensor([[8, 9, 2, 3, 5, 10, 6, 7, 11, 12], [8, 9, 2, 3, 5, 10, 6, 7, 11, 12]]), _Tokenizer(), 1,
+            state,
+            torch.tensor(
+                [[8, 9, 2, 3, 5, 10, 6, 7, 11, 12], [8, 9, 2, 3, 5, 10, 6, 7, 11, 12]]
+            ),
+            _Tokenizer(),
+            1,
         )
     except ValueError as error:
         assert "batch size 1" in str(error) or "one non-empty" in str(error)

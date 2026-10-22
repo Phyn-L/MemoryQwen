@@ -167,7 +167,7 @@ def teacher_forced_row_stats(hidden, labels, head, max_logits_rows=256):
     return {"nll": nll, "correct": correct, "tokens": tokens}
 
 
- def scheduled_task_weights(step, total_steps, cfg, stage=None):
+def scheduled_task_weights(step, total_steps, cfg, stage=None):
     """Return the QA and Recon sampling probabilities at one optimizer step."""
     if cfg.train_stage == "only_qa" or stage == "qa":
         return 1.0, 0.0

@@ -233,11 +233,9 @@ def test_the_objective_has_its_own_config_section():
     assert cfg.loss.qa_weight == 0.25
     assert cfg.loss.max_logits_rows == 64
     assert not hasattr(cfg.memory, "qa_weight")
-    assert not hasattr(cfg.memory, "distill_weight")
+    assert not hasattr(cfg.loss, "distill_weight")
     with pytest.raises(ValueError, match="loss section"):
         TrainConfig.from_dict({"memory": {"qa_weight": 1.0}})
-    with pytest.raises(ValueError, match="loss section"):
-        TrainConfig.from_dict({"memory": {"distill_weight": 0.3}})
 
 
 def test_a_bare_off_readout_mode_is_accepted_as_the_string_mode():

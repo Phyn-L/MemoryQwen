@@ -192,24 +192,12 @@ class LossConfig:
     """Every knob the objective reads.
 
     Kept apart from :class:`MemoryConfig` so that the *architecture* (slots, resampler
-    width, read-out) and the *objective* (weights, distillation budget, logits chunk size)
+    width, read-out) and the *objective* (task weights, logits chunk size)
     can be read, swept and diffed independently.
     """
 
     qa_weight: float = 1.0
     recon_weight: float = 1.0
-    # Distil the *full-context* distribution into the memory-conditioned one:
-    # T^2 * KL(p_teacher || p_student) where the teacher is the plain causal LM over the
-    # context (free: the encoder pass's context rows) and the student is the memory-prefixed
-    # autoencoding pass. 0 = off. Runs the prefix-KV path independently of its CE weight.
-    distill_weight: float = 0.0
-    distill_temperature: float = 1.0
-    # Positions scored by the distillation objective; <= 0 scores every position.
-    distill_positions: int = 256
-    # Weight each position by the teacher's own entropy instead of uniformly.
-    distill_entropy_weight: bool = False
-    # Truncate the teacher distribution to its k most likely tokens (0 = keep all).
-    distill_topk: int = 0
     # Vocabulary rows projected per chunk. Bounds the [rows, vocab] logits that stay alive
     # for the backward pass; the whole batch is still projected in one flattened pass, so
     # this only trades peak memory against kernel count.
@@ -587,16 +575,6 @@ class TrainConfig:
                 raise ValueError("memory.question_resampler_info_source must be hidden or embedding")
             if not isinstance(m.readout_keep_question_tokens, bool):
                 raise ValueError("memory.readout_keep_question_tokens must be a boolean")
-        if loss.distill_weight < 0:
-            raise ValueError("loss.distill_weight must be non-negative")
-        if loss.distill_temperature <= 0:
-            raise ValueError("loss.distill_temperature must be positive")
-        if loss.distill_positions < 0:
-            raise ValueError(
-                "loss.distill_positions must be >= 0 (0 scores every position)"
-            )
-        if loss.distill_topk < 0:
-            raise ValueError("loss.distill_topk must be >= 0")
         if loss.max_logits_rows <= 0:
             raise ValueError("loss.max_logits_rows must be positive")
         if m.readout_mode not in {

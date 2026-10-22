@@ -7,18 +7,13 @@ Two properties decide whether the reported losses mean what the config says:
 2. that happens in one flattened vocabulary projection, so the chunk size
    (``loss.max_logits_rows``) must not change any number.
 
-The distillation position sampler is pinned here too: with an explicit generator it has to be
-recomputable from (seed, step), which is what lets a resumed run continue the *same* run.
 """
 from __future__ import annotations
-
-import random
 
 import torch
 from torch import nn
 
 from src.losses import (
-    sample_positions,
     sequence_lm_loss,
     supervision_objectives,
     teacher_forced_row_stats,
@@ -103,40 +98,6 @@ def test_gradients_reach_every_row_of_the_flattened_projection():
     assert hidden.grad is not None
     assert bool(torch.isfinite(hidden.grad).all())
     assert hidden.grad.abs().sum() > 0
-
-
-def test_sample_positions_is_reproducible_from_an_explicit_generator():
-    mask = torch.ones(2, 8, dtype=torch.bool)
-
-    def draw(seed):
-        return sample_positions(mask, 3, generator=torch.Generator().manual_seed(seed))
-
-    first, keep = draw(42)
-    again, _ = draw(42)
-    assert torch.equal(first, again)
-    assert bool(keep.all())
-    other, _ = draw(43)
-    assert not torch.equal(first, other)
-
-    # A short row leaves -1 in the slots that could not be filled, so a caller that forgot the
-    # keep-mask cannot silently score another token instead.
-    short = torch.zeros(1, 8, dtype=torch.bool)
-    short[0, :2] = True
-    positions, keep = sample_positions(short, 4, generator=torch.Generator().manual_seed(0))
-    assert int(keep.sum()) == 2
-    assert bool((positions[0][~keep[0]] == -1).all())
-
-
-def test_sample_positions_accepts_a_step_derived_generator_instead_of_the_global_stream():
-    """Same (seed, step) -> same subset, and consuming the global RNG changes nothing."""
-    mask = torch.ones(1, 16, dtype=torch.bool)
-    generator = torch.Generator().manual_seed(7 + 3)
-    first, _ = sample_positions(mask, 4, generator=generator)
-    random.random()
-    torch.rand(99)
-    generator.manual_seed(7 + 3)
-    again, _ = sample_positions(mask, 4, generator=generator)
-    assert torch.equal(first, again)
 
 
 def test_teacher_forced_row_stats_match_a_manual_computation():

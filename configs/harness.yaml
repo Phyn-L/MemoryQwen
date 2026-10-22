@@ -44,11 +44,6 @@ data:
 loss:
   qa_weight: 1.0
   recon_weight: 1.0
-  distill_weight: 0.0
-  distill_positions: 128
-  distill_temperature: 1.0
-  distill_topk: 0
-  distill_entropy_weight: true
   max_logits_rows: 256
 evaluation:
   autoregressive_every: 2500

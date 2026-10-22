@@ -48,7 +48,7 @@ def test_context_encoding_produces_memory_without_a_separate_backbone_pass():
     assert calls[0]["output_hidden_states"] is False
     assert calls[0]["attention_mask"] is None
     assert prefix.memory.shape == prefix.memory_embedding.shape == (2, 4, 32)
-    assert prefix.context_hidden is None
+    assert not hasattr(prefix, "context_hidden")
     assert not hasattr(prefix, "context_target")
 
 

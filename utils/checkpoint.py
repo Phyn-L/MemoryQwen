@@ -10,9 +10,8 @@ import torch
 def _capture_rng_state():
     """Python, NumPy, torch CPU and every CUDA device RNG state.
 
-    The torch *CPU* state alone is not enough. ``losses.sample_positions`` draws on the device
-    RNG (CUDA during training) and dropout uses it too, so a resumed run would otherwise
-    sample a different distillation subset -- and different dropout masks -- than the
+    The torch *CPU* state alone is not enough. Dropout draws from the device RNG (CUDA during
+    training), so a resumed run would otherwise use different dropout masks than the
     uninterrupted run it is continuing, with ``deterministic: true`` unable to help because
     deterministic algorithms only fix the *operators*, not the random stream.
     """
