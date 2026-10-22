@@ -35,7 +35,6 @@ def main() -> None:
     )
     parser.add_argument("--max-context-tokens", type=int)
     parser.add_argument("--max-input-tokens", type=int)
-    parser.add_argument("--max-conversation-tokens", type=int)
     parser.add_argument("--max-question-tokens", type=int)
     parser.add_argument("--max-answer-tokens", type=int)
     parser.add_argument("--tokenizer-filter-batch-size", type=int)
@@ -54,8 +53,6 @@ def main() -> None:
         cfg.data.max_context_tokens = args.max_context_tokens
     if args.max_input_tokens is not None:
         cfg.data.max_input_tokens = args.max_input_tokens
-    if args.max_conversation_tokens is not None:
-        cfg.data.max_conversation_tokens = args.max_conversation_tokens
     if args.max_question_tokens is not None:
         cfg.data.max_question_tokens = args.max_question_tokens
     if args.max_answer_tokens is not None:

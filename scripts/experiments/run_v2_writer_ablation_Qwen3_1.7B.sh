@@ -88,7 +88,6 @@ base.setdefault("data", {}).update(
     max_context_tokens=4096,
     max_input_tokens=40960,
     max_question_tokens=96,
-    max_conversation_tokens=768,
     max_answer_tokens=128,
     train_stage="mix",
     recon_schedule=[0.5, 0.5],

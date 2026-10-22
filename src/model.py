@@ -10,18 +10,11 @@ from torch.nn import functional as F
 from .dtypes import no_autocast
 from .resampler import ContextMemoryResampler, LearnedPrefix, QuestionResampler
 
-try:
-    from transformers.cache_utils import DynamicCache
-except ImportError:  # pragma: no cover - transformers is required at runtime
-    DynamicCache = None
-
-
 @dataclass
-class MetaLoRAOutput:
+class ContextMemoryOutput:
     logits: torch.Tensor | None
     labels: torch.LongTensor
     memory: torch.Tensor
-    layer_memory: torch.Tensor
     supervision_losses: torch.Tensor | None = None
     # Which supervision rows carried a target (see losses.supervision_objectives).
     supervision_mask: torch.Tensor | None = None
@@ -33,15 +26,23 @@ class MetaLoRAOutput:
 
 @dataclass
 class ContextPrefix:
-    layer_memory: torch.Tensor
     memory: torch.Tensor
-    memory_cache: object
     context_length: int
     memory_length: int
     # Last-layer states of context rows, retained only when distillation is enabled.
     context_hidden: torch.Tensor | None = None
     memory_embedding: torch.Tensor | None = None
-    layer_memory_embedding: torch.Tensor | None = None
+
+
+@dataclass
+class ConversationState:
+    user_prefix: torch.Tensor
+    user_prefix_mask: torch.BoolTensor
+    memory: torch.Tensor
+    memory_hidden: torch.Tensor
+    past_key_values: object
+    history_ids: torch.LongTensor
+    turn_count: int = 0
 
 
 def compact_positions(
@@ -146,50 +147,15 @@ class MetaLoRA(nn.Module):
         return base_out + delta.to(base_dtype)
 
 
-def build_continuation_mask(
-    question_mask: torch.Tensor,
-    answer_mask: torch.Tensor,
-    memory_length: int,
-    dtype: torch.dtype,
-    readout_length: int = 0,
-) -> torch.Tensor:
-    """Mask for question/read-out/answer tokens attending to a memory-only cache.
-
-    The optional read-out rows sit between the question and the answer. They are built from
-    the question and the memory, so they may read every valid question key but never the
-    answer; the answer rows may read them.
-    """
-    question_mask, answer_mask = question_mask.bool(), answer_mask.bool()
-    bsz, question_length = question_mask.shape
-    answer_length = answer_mask.shape[1]
-    readout_length = int(readout_length)
-    if readout_length < 0:
-        raise ValueError("readout_length must be >= 0")
-    current = question_length + readout_length + answer_length
-    device = question_mask.device
-    row = torch.arange(current, device=device)
-    causal = row[:, None] >= row[None, :]
-    allowed = torch.zeros((bsz, current, memory_length + current), dtype=torch.bool, device=device)
-    allowed[:, :, :memory_length] = True
-    r0 = question_length + readout_length
-    allowed[:, :question_length, memory_length:memory_length + question_length] = (
-        question_mask[:, None, :] & causal[:question_length, :question_length]
-    )
-    if readout_length:
-        allowed[:, question_length:r0, memory_length:memory_length + question_length] = question_mask[:, None, :]
-    allowed[:, r0:, memory_length:memory_length + question_length] = question_mask[:, None, :]
-    if readout_length:
-        allowed[:, r0:, memory_length + question_length:memory_length + r0] = True
-    allowed[:, r0:, memory_length + r0:] = (
-        answer_mask[:, None, :] & causal[r0:, r0:]
-    )
-    valid = torch.cat(
-        [question_mask, question_mask.new_ones(bsz, readout_length), answer_mask], dim=1
-    )
-    self_edge = torch.zeros_like(allowed)
-    self_edge[:, row, memory_length + row] = True
+def build_causal_mask(valid: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """Causal mask for a complete embedding sequence with padded rows."""
+    valid = valid.bool()
+    bsz, length = valid.shape
+    causal = torch.tril(torch.ones((length, length), dtype=torch.bool, device=valid.device))
+    allowed = valid[:, None, :] & causal[None]
+    self_edge = torch.eye(length, dtype=torch.bool, device=valid.device)[None]
     allowed = torch.where(valid[:, :, None], allowed, self_edge)
-    mask = torch.zeros((bsz, 1, current, memory_length + current), dtype=dtype, device=device)
+    mask = torch.zeros((bsz, 1, length, length), dtype=dtype, device=valid.device)
     return mask.masked_fill(~allowed[:, None], torch.finfo(dtype).min)
 
 
@@ -202,7 +168,7 @@ class ContextMemoryModel(nn.Module):
     ``lora_A``/``lora_B`` -- can be kept in ``trainable_dtype`` (float32 by
     default) so that AdamW's moments and its ``param.add_(update, alpha=-lr)`` step
     are not quantised to bfloat16 resolution. The casts that reconcile the two dtypes
-    live in the context resampler and short memory pass,
+    live in the context resampler and complete sequence passes,
     ``MetaLoRA`` casts on entry and exit, and the losses
     upcast before reducing.
     """
@@ -214,14 +180,17 @@ class ContextMemoryModel(nn.Module):
         readout_length=0, question_resampler_layers=2, question_resampler_heads=4,
         question_resampler_hidden_size=256, question_resampler_ffn_ratio=2,
         question_resampler_use_self_attention=True,
-        readout_keep_question_tokens=True,
+        readout_keep_question_tokens=None,
         readout_mode="memory_question", context_layer_indices=(-1,),
         memory_resampler_layers=2, memory_resampler_heads=4,
         memory_resampler_hidden_size=256, memory_resampler_ffn_ratio=2,
         memory_resampler_use_self_attention=True,
-        memory_resampler_output_mode="layer0",
-        reader_memory_source="memory_hidden", context_gradient_checkpointing=False,
+        question_resampler_info_source=None, context_gradient_checkpointing=False,
         gradient_checkpoint_every_n_layers=1,
+        conversation_enabled=False, recompress_threshold=2048,
+        max_recompress_tokens=2048,
+        recon_user_token_ids: tuple[int, ...] = (),
+        recon_answer_prefix_token_ids: tuple[int, ...] = (),
     ):
         super().__init__()
         self.rank, self.alpha = rank, alpha
@@ -234,6 +203,8 @@ class ContextMemoryModel(nn.Module):
         # Which LoRA implementation is active, recorded so a run is reproducible.
         self.lora_backend = "manual" if self.target_modules else "none"
         self.qwen = self._add_lora(qwen, rank, alpha, dropout)
+        self.register_buffer("recon_user_token_ids", torch.tensor(recon_user_token_ids, dtype=torch.long), persistent=False)
+        self.register_buffer("recon_answer_prefix_token_ids", torch.tensor(recon_answer_prefix_token_ids, dtype=torch.long), persistent=False)
         # `_transformer_body` resolves and caches the headless decoder stack on first use; it
         # is not assigned here because that would register it as a duplicate submodule.
         object.__setattr__(self, "_body", None)
@@ -250,6 +221,18 @@ class ContextMemoryModel(nn.Module):
         self.max_context_tokens = (
             self.window_limit if max_context_tokens is None else int(max_context_tokens)
         )
+        self.conversation_enabled = bool(conversation_enabled)
+        self.recompress_threshold = int(recompress_threshold)
+        self.max_recompress_tokens = int(max_recompress_tokens)
+        if self.conversation_enabled and (
+            self.recompress_threshold <= 0 or self.max_recompress_tokens < memory_length
+        ):
+            raise ValueError("conversation token limits must include the memory slots")
+        if self.conversation_enabled and (
+            self.recompress_threshold > self.window_limit
+            or self.max_recompress_tokens > self.window_limit
+        ):
+            raise ValueError("conversation token limits must fit the backbone window")
         if not 0 < memory_length <= self.window_limit:
             raise ValueError("memory_length must be within the backbone window")
         self.context_gradient_checkpointing = bool(context_gradient_checkpointing)
@@ -271,13 +254,9 @@ class ContextMemoryModel(nn.Module):
             self.qwen_hidden_size, memory_length, memory_resampler_layers,
             memory_resampler_heads, memory_resampler_hidden_size,
             memory_resampler_ffn_ratio, dtype=trainable_dtype,
-            backbone_layers=depth,
-            output_mode=memory_resampler_output_mode,
             use_self_attention=memory_resampler_use_self_attention,
         )
-        # Recon has one continuous task marker. It is initialised from the mean of the
-        # pretrained input embeddings of the assistant generation header, which gives it the
-        # same role and scale as the chat-template prefix while keeping it a trainable vector.
+        # Recon's user-side task marker starts from the mean embedding of its instruction phrase.
         # ``load_model`` resolves those ids with the run's own tokenizer.
         embedding = self.qwen.get_input_embeddings().weight.detach()
         self.task_init_token_ids: tuple[int, ...] = ()
@@ -303,17 +282,26 @@ class ContextMemoryModel(nn.Module):
             TiedUnembedding(lambda: self.qwen.get_input_embeddings().weight)
             if self.distillation else None
         )
-        # Per-question read-out over the (question-agnostic, cacheable) memory. Zero means
+        # Per-question read-out over the question-agnostic memory. Zero means
         # the historical behaviour: the answer attends only to the memory and the question.
-        if readout_mode not in {"memory_question", "memory_only", "learned_prefix", "off"}:
+        if readout_mode not in {"memory_question", "learned_prefix", "off"}:
             raise ValueError(f"invalid readout_mode: {readout_mode}")
         if readout_length < 0:
             raise ValueError("readout_length must be non-negative")
         self.readout_mode = readout_mode
+        if readout_mode == "memory_question":
+            if question_resampler_info_source is None:
+                question_resampler_info_source = "hidden"
+            readout_keep_question_tokens = (
+                True if readout_keep_question_tokens is None else readout_keep_question_tokens
+            )
+            if question_resampler_info_source not in {"hidden", "embedding"}:
+                raise ValueError("question_resampler_info_source must be hidden or embedding")
+        else:
+            question_resampler_info_source = None
+            readout_keep_question_tokens = True
         self.readout_keep_question_tokens = bool(readout_keep_question_tokens)
-        if reader_memory_source not in {"memory_hidden", "memory_embedding", "layer_mean"}:
-            raise ValueError("reader_memory_source must be memory_hidden, memory_embedding or layer_mean")
-        self.reader_memory_source = reader_memory_source
+        self.question_resampler_info_source = question_resampler_info_source
         self.readout_length = 0 if readout_mode == "off" else int(readout_length)
         self.resampler = None
         if self.readout_length > 0:
@@ -328,7 +316,7 @@ class ContextMemoryModel(nn.Module):
                     question_resampler_hidden_size=question_resampler_hidden_size,
                     question_resampler_ffn_ratio=question_resampler_ffn_ratio,
                     question_resampler_use_self_attention=question_resampler_use_self_attention,
-                    dtype=trainable_dtype, mode=readout_mode,
+                    dtype=trainable_dtype,
                 )
         self.to(dtype=qwen_dtype)
         self.set_trainable_dtype(trainable_dtype)
@@ -394,12 +382,9 @@ class ContextMemoryModel(nn.Module):
     def dtype(self) -> torch.dtype:
         return self.qwen.get_input_embeddings().weight.dtype
 
-    def _memory_prefix(self, layer_memory):
-        return layer_memory[:, -1]  # final Qwen layer memory is the input prefix
-
     @property
     def _transformer_body(self):
-        """The decoder stack without the language-model head, resolved once and cached.
+        """The decoder stack without the language-model head, resolved once and retained.
 
         ``encode_context_prefix`` only reads ``hidden_states`` and ``past_key_values``, but
         ``load_model`` builds a ``Qwen3ForCausalLM``: calling ``self.qwen`` would additionally
@@ -500,7 +485,10 @@ class ContextMemoryModel(nn.Module):
         for index in resolved:
             if index not in captured:
                 raise RuntimeError(f"Qwen did not produce requested context layer {index}")
-            selected.append(captured[index])
+            hidden = captured[index]
+            if index != depth - 1:
+                hidden = body.norm(hidden)
+            selected.append(hidden)
         weights = self.context_layer_logits.softmax(dim=0)
         mixed = sum(
             weight.to(hidden.dtype) * hidden
@@ -508,16 +496,19 @@ class ContextMemoryModel(nn.Module):
         )
         return mixed, out.last_hidden_state
 
-    def encode_context_prefix(self, context_embeds, context_mask) -> ContextPrefix:
-        """Encode context once, resample it, then run one short memory-only pass."""
+    def encode_context_prefix(self, context_embeds, context_mask, max_tokens=None) -> ContextPrefix:
+        """Encode context once and resample it into memory embeddings."""
         if context_embeds.ndim != 3 or context_embeds.size(-1) != self.qwen_hidden_size:
             raise ValueError("context_embeds must have shape [B, L, backbone_hidden_size]")
         if context_mask.shape != context_embeds.shape[:2]:
             raise ValueError("context_mask must have shape [B, L]")
-        if not 0 < context_embeds.size(1) <= self.max_context_tokens:
+        context_limit = self.max_context_tokens if max_tokens is None else min(
+            int(max_tokens), self.window_limit
+        )
+        if not 0 < context_embeds.size(1) <= context_limit:
             raise ValueError(
-                f"context length {context_embeds.size(1)} must be within the configured "
-                f"max_context_tokens ({self.max_context_tokens}); the backbone window is "
+                f"context length {context_embeds.size(1)} must be within max_context_tokens "
+                f"({context_limit}); the backbone window is "
                 f"{self.window_limit}"
             )
         if not bool(context_mask.bool().any(dim=1).all()):
@@ -532,93 +523,18 @@ class ContextMemoryModel(nn.Module):
             context_hidden, context_last_hidden = self._encode_context_hidden(
                 context_embeds, context_mask, positions,
             )
-        encoded_memory = self.context_resampler(context_hidden, context_mask).to(dtype=self.dtype)
-        if self.context_resampler.output_mode == "layer0":
-            memory_embedding = encoded_memory
-            layer_memory_embedding = None
-        else:
-            layer_memory_embedding = encoded_memory
-            memory_embedding = layer_memory_embedding[:, 0]
-        # Short Qwen pass over fixed-length memory embeddings produces the reusable KV.
-        memory_positions = torch.arange(memory_embedding.size(1), device=memory_embedding.device)
-        memory_positions = memory_positions.unsqueeze(0).expand(memory_embedding.size(0), -1)
-        memory_mask = torch.ones(
-            memory_embedding.size(0), memory_embedding.size(1),
-            dtype=torch.bool, device=memory_embedding.device,
-        )
-        body = self._transformer_body
-        hooks = []
-        layers = getattr(body, "layers", None)
-        if layers is None:
-            raise RuntimeError("Qwen transformer body does not expose decoder layers")
-        if layer_memory_embedding is not None and layer_memory_embedding.size(1) != len(layers):
-            raise RuntimeError("layer-wise memory embedding count does not match Qwen layers")
-
-        def inject(layer_index):
-            def hook(_module, inputs):
-                hidden = inputs[0]
-                conditioned = hidden.clone()
-                conditioned[:, :memory_embedding.size(1)] = (
-                    hidden[:, :memory_embedding.size(1)]
-                    + self.context_resampler.layer_gates[layer_index]
-                    * layer_memory_embedding[:, layer_index]
-                )
-                return (conditioned, *inputs[1:])
-            return hook
-
-        if layer_memory_embedding is not None:
-            for index, layer in enumerate(layers):
-                hooks.append(layer.register_forward_pre_hook(inject(index)))
-        try:
-            with self.lora_enabled(False):
-                memory_out = body(
-                    inputs_embeds=memory_embedding,
-                    attention_mask=memory_mask,
-                    position_ids=memory_positions,
-                    output_hidden_states=True,
-                    use_cache=True,
-                    return_dict=True,
-                )
-        finally:
-            for hook in hooks:
-                hook.remove()
-        layer_memory = torch.stack(memory_out.hidden_states[1:], dim=1)
-        cache = memory_out.past_key_values
-        if cache is None:
-            raise RuntimeError("Qwen did not return a KV cache for prefix encoding")
+        memory_embedding = self.context_resampler(context_hidden, context_mask).to(dtype=self.dtype)
         return ContextPrefix(
-            layer_memory, self._memory_prefix(layer_memory), cache,
+            memory_embedding,
             context_embeds.size(1), memory_embedding.size(1),
             context_hidden=context_last_hidden if self.distillation else None,
             memory_embedding=memory_embedding,
-            layer_memory_embedding=layer_memory_embedding,
         )
 
-    @staticmethod
-    def _select_cache(cache, indices, config):
-        """A cache holding only the rows ``indices`` of ``cache``.
-
-        ``DynamicCache(ddp_cache_data=..., config=...)`` is the transformers 5.x constructor
-        (requirements.lock pins the version we test). A different major version fails with a
-        TypeError that says nothing about the cause, so translate it here.
-        """
-        layers = [
-            (layer.keys.index_select(0, indices), layer.values.index_select(0, indices))
-            for layer in cache.layers
-        ]
-        try:
-            return DynamicCache(ddp_cache_data=layers, config=config)
-        except TypeError as error:
-            import transformers
-
-            raise RuntimeError(
-                "this build expects the transformers 5.x "
-                "DynamicCache(ddp_cache_data=..., config=...) constructor, which "
-                f"transformers {transformers.__version__} does not provide; the tested "
-                "versions are in requirements.lock"
-            ) from error
-
-    def _readout_embeddings(self, prefix, question_embeds, question_mask, indices=None):
+    def _readout_embeddings(
+        self, prefix, question_embeds, question_mask, indices=None,
+        prompt_prefix_embeds=None, prompt_prefix_mask=None,
+    ):
         """Encode memory and question, then resample their frozen LLM hidden states.
 
         ``indices`` selects which memory rows the questions belong to (the training collate
@@ -635,91 +551,81 @@ class ContextMemoryModel(nn.Module):
         memory = memory if indices is None else memory.index_select(0, indices)
         memory_mask = torch.ones(memory.shape[:2], dtype=torch.bool, device=memory.device)
         question_mask = question_mask.bool()
-        if self.readout_mode == "memory_only":
-            question_embeds = question_embeds[:, :0]
-            question_mask = question_mask[:, :0]
-        inputs = torch.cat([memory, question_embeds.to(dtype=self.dtype)], dim=1)
-        attention_mask = torch.cat([memory_mask, question_mask], dim=1)
-        positions = compact_positions(attention_mask, 0)
-        with self.lora_enabled(False):
-            encoded = self._transformer_body(
-                inputs_embeds=inputs,
-                attention_mask=attention_mask,
-                position_ids=positions,
-                output_hidden_states=False,
-                use_cache=False,
-                return_dict=True,
-            ).last_hidden_state
-        readout_mask = torch.cat([memory_mask, question_mask], dim=1)
-        readout = self.resampler(encoded, readout_mask)
+        question_embeds = question_embeds.to(dtype=self.dtype)
+        if self.question_resampler_info_source == "embedding":
+            inputs = torch.cat([memory, question_embeds], dim=1)
+            readout_mask = torch.cat([memory_mask, question_mask], dim=1)
+        else:
+            pieces = []
+            masks = []
+            if prompt_prefix_embeds is not None:
+                pieces.append(prompt_prefix_embeds.to(dtype=self.dtype))
+                masks.append(prompt_prefix_mask.bool())
+            pieces.extend([memory, question_embeds])
+            masks.extend([memory_mask, question_mask])
+            inputs = torch.cat(pieces, dim=1)
+            attention_mask = torch.cat(masks, dim=1)
+            positions = compact_positions(attention_mask, 0)
+            with self.lora_enabled(False):
+                inputs = self._transformer_body(
+                    inputs_embeds=inputs,
+                    attention_mask=attention_mask,
+                    position_ids=positions,
+                    output_hidden_states=False,
+                    use_cache=False,
+                    return_dict=True,
+                ).last_hidden_state
+            readout_mask = attention_mask
+        readout = self.resampler(inputs, readout_mask)
         return readout.to(dtype=self.dtype)
-
-    def _qa_positions(self, prefix, question_mask, answer_length, readout_length, device):
-        """Absolute positions of ``[question, (read-out), answer]`` after memory.
-
-        The numbering is the one the generation path builds row by row
-        (:meth:`generate_answers_with_prefix`): every real token takes the rank of its own
-        slot, so a row's real question tokens sit at ``start + i``, the read-out slots at
-        ``start + valid + j`` and the answer at ``start + valid + readout_length + k``,
-        whatever the question padding looks like. Padding slots are masked out, so their
-        position never reaches attention. It used to be a single ``arange`` over the padded
-        block, which made the memory-to-question distance depend on the longest question in
-        the batch and disagreed with generation.
-
-        Both blocks are numbered by :func:`compact_positions`, so the equivalence with
-        generation is structural rather than something the tests have to keep re-checking.
-        """
-        question_mask = question_mask.bool()
-        blocks = [question_mask]
-        if readout_length:
-            blocks.append(
-                question_mask.new_ones(question_mask.size(0), int(readout_length))
-            )
-        if answer_length:
-            # The answer block is padded on the right and its padding is dropped by the
-            # label mask, so all of its slots are numbered as real ones -- exactly what a
-            # row-by-row decode produces.
-            blocks.append(
-                question_mask.new_ones(question_mask.size(0), int(answer_length))
-            )
-        return compact_positions(torch.cat(blocks, dim=1), int(prefix.memory_length)).to(device)
 
     def forward_with_memory_prefix(
         self, prefix, qa_context_indices, question_embeds, question_mask,
         answer_embeds, answer_mask, labels, loss_only=False, max_logits_rows=256,
+        prompt_prefix_embeds=None, prompt_prefix_mask=None,
+        answer_prefix_embeds=None, answer_prefix_mask=None,
     ):
         question_embeds, answer_embeds = question_embeds.to(dtype=self.dtype), answer_embeds.to(dtype=self.dtype)
         indices = qa_context_indices.to(question_embeds.device, dtype=torch.long)
         question_mask = question_mask.bool()
-        cache = self._select_cache(prefix.memory_cache, indices, self.qwen.config)
-        readout = self._readout_embeddings(prefix, question_embeds, question_mask, indices)
-        extra = 0 if readout is None else readout.size(1)
+        if prompt_prefix_embeds is None:
+            prompt_prefix_embeds = question_embeds.new_empty((question_embeds.size(0), 0, self.qwen_hidden_size))
+            prompt_prefix_mask = question_mask.new_empty((question_mask.size(0), 0))
+        prompt_prefix_embeds = prompt_prefix_embeds.to(dtype=self.dtype)
+        prompt_prefix_mask = prompt_prefix_mask.bool()
+        readout = self._readout_embeddings(
+            prefix, question_embeds, question_mask, indices,
+            prompt_prefix_embeds, prompt_prefix_mask,
+        )
         keep_question = readout is None or self.readout_keep_question_tokens
-        continuation_question_mask = question_mask if keep_question else question_mask[:, :0]
-        sequence = (
-            torch.cat([question_embeds, answer_embeds], dim=1) if readout is None
-            else torch.cat(
-                ([question_embeds, readout, answer_embeds] if keep_question else [readout, answer_embeds]),
-                dim=1,
-            )
-        )
-        mask = build_continuation_mask(
-            continuation_question_mask, answer_mask, prefix.memory_length, sequence.dtype,
-            readout_length=extra,
-        )
-        positions = self._qa_positions(
-            prefix, continuation_question_mask, answer_embeds.size(1), extra, sequence.device
-        )
+        memory = prefix.memory_embedding.index_select(0, indices).to(dtype=self.dtype)
+        parts = [prompt_prefix_embeds, memory]
+        masks = [prompt_prefix_mask, torch.ones(memory.shape[:2], dtype=torch.bool, device=memory.device)]
+        if keep_question:
+            parts.append(question_embeds)
+            masks.append(question_mask)
+        if readout is not None:
+            parts.append(readout)
+            masks.append(torch.ones(readout.shape[:2], dtype=torch.bool, device=readout.device))
+        if answer_prefix_embeds is not None:
+            parts.append(answer_prefix_embeds.to(dtype=self.dtype))
+            masks.append(answer_prefix_mask.bool())
+        parts.append(answer_embeds)
+        masks.append(answer_mask)
+        sequence = torch.cat(parts, dim=1)
+        full_mask = torch.cat(masks, dim=1)
+        mask = build_causal_mask(full_mask, sequence.dtype)
+        positions = compact_positions(full_mask, 0).to(sequence.device)
         if int(positions.max()) >= self.window_limit:
             raise ValueError("memory + prompt + readout + target exceeds the backbone window")
         body = self._transformer_body if loss_only else self.qwen
         with self.lora_enabled(False):
             out = body(
                 inputs_embeds=sequence, attention_mask=mask, position_ids=positions,
-                past_key_values=cache, use_cache=not loss_only, return_dict=True,
+                use_cache=False, return_dict=True,
             )
         ignored = torch.full(
-            (labels.size(0), (question_embeds.size(1) if keep_question else 0) + extra), -100,
+            (labels.size(0), sequence.size(1) - answer_embeds.size(1)), -100,
             dtype=labels.dtype, device=labels.device,
         )
         full_labels = torch.cat([ignored, labels], dim=1)
@@ -734,11 +640,10 @@ class ContextMemoryModel(nn.Module):
                 out.last_hidden_state[:, :-1], full_labels[:, 1:], head,
                 max_logits_rows=max_logits_rows,
             )
-        return MetaLoRAOutput(
+        return ContextMemoryOutput(
             logits=None if loss_only else out.logits,
             labels=full_labels,
             memory=prefix.memory,
-            layer_memory=prefix.layer_memory,
             supervision_losses=row_losses,
             supervision_mask=row_mask,
         )
@@ -747,7 +652,9 @@ class ContextMemoryModel(nn.Module):
         self, prefix, recon_context_indices, context_embeds, context_mask,
         labels, loss_only=False, max_logits_rows=256, return_stats=False,
     ):
-        """Reconstruct context as assistant content after a memory/task user prefix."""
+        """Reconstruct context in the assistant turn after a memory/task user turn."""
+        if self.recon_user_token_ids.numel() == 0 or self.recon_answer_prefix_token_ids.numel() == 0:
+            raise RuntimeError("Recon requires user and assistant headers from the chat template")
         context_embeds = context_embeds.to(dtype=self.dtype)
         context_mask = context_mask.bool()
         indices = recon_context_indices.to(context_embeds.device, dtype=torch.long)
@@ -757,14 +664,17 @@ class ContextMemoryModel(nn.Module):
         user_mask = torch.ones(
             (context_embeds.size(0), 1), dtype=torch.bool, device=context_embeds.device
         )
-        cache = self._select_cache(prefix.memory_cache, indices, self.qwen.config)
-        sequence = torch.cat([task, context_embeds], dim=1)
-        mask = build_continuation_mask(
-            user_mask, context_mask, prefix.memory_length, sequence.dtype,
-        )
-        positions = compact_positions(
-            torch.cat([user_mask, context_mask], dim=1), int(prefix.memory_length)
-        )
+        memory = prefix.memory_embedding.index_select(0, indices).to(dtype=self.dtype)
+        embedding = self.qwen.get_input_embeddings()
+        user = embedding(self.recon_user_token_ids.to(context_embeds.device))[None].expand(context_embeds.size(0), -1, -1)
+        header = embedding(self.recon_answer_prefix_token_ids.to(context_embeds.device))[None].expand(context_embeds.size(0), -1, -1)
+        sequence = torch.cat([user, memory, task, header, context_embeds], dim=1)
+        full_mask = torch.cat([
+            context_mask.new_ones(context_mask.size(0), user.size(1) + memory.size(1)),
+            user_mask, context_mask.new_ones(context_mask.size(0), header.size(1)), context_mask,
+        ], dim=1)
+        mask = build_causal_mask(full_mask, sequence.dtype)
+        positions = compact_positions(full_mask, 0)
         if int(positions.max()) >= self.window_limit:
             raise ValueError("memory + recon task + context exceeds the backbone window")
         body = self._transformer_body if loss_only else self.qwen
@@ -773,12 +683,12 @@ class ContextMemoryModel(nn.Module):
                 inputs_embeds=sequence,
                 attention_mask=mask,
                 position_ids=positions,
-                past_key_values=cache,
-                use_cache=not loss_only,
+                use_cache=False,
                 return_dict=True,
             )
         ignored = torch.full(
-            (labels.size(0), 1), -100, dtype=labels.dtype, device=labels.device,
+            (labels.size(0), sequence.size(1) - context_embeds.size(1)), -100,
+            dtype=labels.dtype, device=labels.device,
         )
         full_labels = torch.cat([ignored, labels], dim=1)
         row_losses = row_mask = row_stats = None
@@ -786,18 +696,20 @@ class ContextMemoryModel(nn.Module):
             from .losses import sequence_lm_loss, teacher_forced_row_stats
             head = self.qwen.get_output_embeddings()
             hidden, target = out.last_hidden_state[:, :-1], full_labels[:, 1:]
-            row_losses, row_mask = sequence_lm_loss(
-                hidden, target, head, max_logits_rows=max_logits_rows,
-            )
             if return_stats:
                 row_stats = teacher_forced_row_stats(
                     hidden, target, head, max_logits_rows=max_logits_rows,
                 )
-        return MetaLoRAOutput(
+                row_losses = row_stats["nll"] / row_stats["tokens"].clamp_min(1.0)
+                row_mask = row_stats["tokens"] > 0
+            else:
+                row_losses, row_mask = sequence_lm_loss(
+                    hidden, target, head, max_logits_rows=max_logits_rows,
+                )
+        return ContextMemoryOutput(
             logits=None if loss_only else out.logits,
             labels=full_labels,
             memory=prefix.memory,
-            layer_memory=prefix.layer_memory,
             supervision_losses=row_losses,
             supervision_mask=row_mask,
             row_stats=row_stats,
@@ -820,35 +732,34 @@ class ContextMemoryModel(nn.Module):
         return output.row_stats
 
     def _distillation_student_hidden(self, prefix, context_embeds, context_mask):
-        """Run context tokens behind the reusable memory KV for distillation."""
+        """Run context tokens after the resampled memory embeddings for distillation."""
         context_embeds = context_embeds.to(dtype=self.dtype)
         context_mask = context_mask.bool()
         if prefix.memory_length + context_embeds.size(1) > self.window_limit:
             raise ValueError("distillation needs memory_length + context_length within the backbone window")
+        memory = prefix.memory_embedding.to(dtype=self.dtype)
         mask = torch.cat([
             context_mask.new_ones(context_mask.size(0), prefix.memory_length), context_mask,
         ], dim=1)
-        positions = compact_positions(context_mask, int(prefix.memory_length))
-        # Qwen updates a supplied DynamicCache even with use_cache=False. Keep
-        # the context tokens out of the reusable memory-only prefix.
+        positions = compact_positions(mask, 0)
+        sequence = torch.cat([memory, context_embeds], dim=1)
         indices = torch.arange(context_embeds.size(0), device=context_embeds.device)
-        cache = self._select_cache(prefix.memory_cache, indices, self.qwen.config)
         with self.lora_enabled(False):
             out = self._transformer_body(
-                inputs_embeds=context_embeds,
+                inputs_embeds=sequence,
                 attention_mask=mask,
                 position_ids=positions,
-                past_key_values=cache,
                 use_cache=False,
                 return_dict=True,
             )
-        return out.last_hidden_state
+        return out.last_hidden_state[:, prefix.memory_length:]
 
     def forward(
         self, context_embeds, context_mask, question_embeds, question_mask,
         answer_embeds, answer_mask, labels, qa_context_indices=None,
         context_ids=None, loss_config=None, loss_only=False,
-        recon_batch=None, generator=None,
+        recon_batch=None, generator=None, question_prefix_embeds=None,
+        question_prefix_mask=None, answer_prefix_embeds=None, answer_prefix_mask=None,
     ):
         """Training path.
 
@@ -868,13 +779,16 @@ class ContextMemoryModel(nn.Module):
             output = self.forward_with_memory_prefix(
                 prefix, indices, question_embeds, question_mask, answer_embeds,
                 answer_mask, labels, loss_only=loss_only, max_logits_rows=max_logits_rows,
+                prompt_prefix_embeds=question_prefix_embeds,
+                prompt_prefix_mask=question_prefix_mask,
+                answer_prefix_embeds=answer_prefix_embeds,
+                answer_prefix_mask=answer_prefix_mask,
             )
         else:
-            output = MetaLoRAOutput(
+            output = ContextMemoryOutput(
                 logits=None,
                 labels=labels,
                 memory=prefix.memory,
-                layer_memory=prefix.layer_memory,
                 supervision_losses=labels.new_empty((0,), dtype=torch.float32),
                 supervision_mask=torch.zeros((0,), dtype=torch.bool, device=labels.device),
             )
@@ -909,20 +823,25 @@ class ContextMemoryModel(nn.Module):
     @torch.no_grad()
     def generate_answers_with_prefix(self, prefix, qa_context_indices, question_ids, question_mask,
                                      tokenizer, max_new_tokens=128, group_by_context=True,
-                                     max_rows_per_group=4, task_id=TASK_QA):
+                                     max_rows_per_group=4, task_id=TASK_QA,
+                                     question_prefix_ids=None, question_prefix_mask=None,
+                                     answer_prefix_ids=None, answer_prefix_mask=None):
         with self.lora_enabled(False):
             return self._generate_answers_with_prefix(
                 prefix, qa_context_indices, question_ids, question_mask,
                 tokenizer, max_new_tokens, group_by_context, max_rows_per_group,
-                task_id,
+                task_id, question_prefix_ids, question_prefix_mask,
+                answer_prefix_ids, answer_prefix_mask,
             )
 
     def _generate_answers_with_prefix(self, prefix, qa_context_indices, question_ids, question_mask,
                                       tokenizer, max_new_tokens=128, group_by_context=True,
-                                      max_rows_per_group=4, task_id=TASK_QA):
+                                      max_rows_per_group=4, task_id=TASK_QA,
+                                      question_prefix_ids=None, question_prefix_mask=None,
+                                      answer_prefix_ids=None, answer_prefix_mask=None):
         """Greedy decoding for many QA rows that share one context prefix.
 
-        Rows belonging to the same context share the same memory KV cache, so they are
+        Rows belonging to the same context share memory embeddings, so they are
         prefilled and decoded as one batch instead of one row at a time. Each row keeps
         its own position ids, so a row's real question tokens occupy exactly the same
         absolute positions they would have in the row-by-row path; question padding is
@@ -936,9 +855,18 @@ class ContextMemoryModel(nn.Module):
         """
         embedding = self.qwen.get_input_embeddings()
         device = question_ids.device
-        start = prefix.memory_length
         eos_id = getattr(tokenizer, "eos_token_id", None)
         n_rows = question_ids.size(0)
+        if question_prefix_ids is None:
+            question_prefix_ids = question_ids.new_empty((n_rows, 0))
+            question_prefix_mask = question_mask.new_empty((n_rows, 0))
+        if task_id == TASK_RECON:
+            if self.recon_user_token_ids.numel() == 0 or self.recon_answer_prefix_token_ids.numel() == 0:
+                raise RuntimeError("Recon requires user and assistant headers from the chat template")
+            question_prefix_ids = self.recon_user_token_ids.to(device)[None].expand(n_rows, -1)
+            question_prefix_mask = torch.ones_like(question_prefix_ids, dtype=torch.bool)
+            answer_prefix_ids = self.recon_answer_prefix_token_ids.to(device)[None].expand(n_rows, -1)
+            answer_prefix_mask = torch.ones_like(answer_prefix_ids, dtype=torch.bool)
 
         if group_by_context:
             grouped: dict[int, list[int]] = {}
@@ -964,6 +892,8 @@ class ContextMemoryModel(nn.Module):
                 row_index = torch.tensor(rows, dtype=torch.long, device=device)
                 row_ids = question_ids[row_index]
                 row_valid = question_mask[row_index].bool()
+                prefix_ids_row = question_prefix_ids[row_index]
+                prefix_valid_row = question_prefix_mask[row_index].bool()
                 valid = row_valid.sum(dim=1)                              # [count]
                 # Recon rows have no question tokens; keep the user segment exactly
                 # ``[memory, recon_task_embedding]`` instead of adding a masked pad.
@@ -977,6 +907,17 @@ class ContextMemoryModel(nn.Module):
                     q_ids[slot, width - real.numel():] = real
                     q_mask[slot, width - real.numel():] = True
                 question = embedding(q_ids).to(dtype=self.dtype)
+                prefix_width = int(prefix_valid_row.sum(dim=1).max())
+                prefix_ids = torch.full(
+                    (count, prefix_width), int(tokenizer.pad_token_id),
+                    dtype=prefix_ids_row.dtype, device=device,
+                )
+                prefix_mask = torch.zeros((count, prefix_width), dtype=torch.bool, device=device)
+                for slot in range(count):
+                    real = prefix_ids_row[slot][prefix_valid_row[slot]]
+                    prefix_ids[slot, prefix_width - real.numel():] = real
+                    prefix_mask[slot, prefix_width - real.numel():] = True
+                prefix_embeds = embedding(prefix_ids).to(dtype=self.dtype)
                 if task_id == TASK_RECON:
                     task = self.recon_task_embedding.to(dtype=self.dtype).view(1, 1, -1).expand(
                         count, -1, -1
@@ -985,47 +926,55 @@ class ContextMemoryModel(nn.Module):
                     task_mask = torch.ones((count, 1), dtype=torch.bool, device=device)
                     q_mask = torch.cat([task_mask, q_mask], dim=1)
 
-                cache = self._select_cache(
-                    prefix.memory_cache,
-                    qa_context_indices[row_index].to(device, dtype=torch.long),
-                    self.qwen.config,
-                )
-                readout = self._readout_embeddings(
+                readout = None if task_id == TASK_RECON else self._readout_embeddings(
                     prefix, question, q_mask,
                     qa_context_indices[row_index].to(device, dtype=torch.long),
+                    prefix_embeds, prefix_mask,
                 )
-                extra = 0 if readout is None else readout.size(1)
                 # One helper numbers the whole prefill block: the read-out slots land right
                 # after each row's real question tokens, exactly where a row-by-row decode
                 # would put them, and the first generated token is then at ``start + real``.
                 keep_question = readout is None or self.readout_keep_question_tokens
-                continuation_mask = q_mask if keep_question else q_mask[:, :0]
-                prefill_mask = (
-                    torch.cat([q_mask, q_mask.new_ones(count, extra)], dim=1)
-                    if readout is not None and keep_question else
-                    torch.ones((count, extra), dtype=torch.bool, device=device)
-                    if readout is not None else q_mask
-                )
+                memory = prefix.memory_embedding.index_select(
+                    0, qa_context_indices[row_index].to(device, dtype=torch.long)
+                ).to(dtype=self.dtype)
+                sequence_parts = [prefix_embeds, memory]
+                mask_parts = [prefix_mask, torch.ones(memory.shape[:2], dtype=torch.bool, device=device)]
+                if keep_question:
+                    sequence_parts.append(question)
+                    mask_parts.append(q_mask)
+                if readout is not None:
+                    sequence_parts.append(readout)
+                    mask_parts.append(torch.ones(readout.shape[:2], dtype=torch.bool, device=device))
+                if answer_prefix_ids is not None:
+                    header_ids_row = answer_prefix_ids[row_index]
+                    header_valid = answer_prefix_mask[row_index].bool()
+                    header_width = int(header_valid.sum(dim=1).max())
+                    header_ids = header_ids_row.new_full((count, header_width), int(tokenizer.pad_token_id))
+                    header_mask = header_valid.new_zeros((count, header_width))
+                    for slot in range(count):
+                        real = header_ids_row[slot][header_valid[slot]]
+                        header_ids[slot, header_width - real.numel():] = real
+                        header_mask[slot, header_width - real.numel():] = True
+                    sequence_parts.append(embedding(header_ids).to(dtype=self.dtype))
+                    mask_parts.append(header_mask)
+                prefill_mask = torch.cat(mask_parts, dim=1)
                 prefill_counts = prefill_mask.sum(dim=1)
-                sequence = (
-                    torch.cat([question, readout], dim=1)
-                    if readout is not None and keep_question else
-                    readout if readout is not None else question
+                sequence = torch.cat(sequence_parts, dim=1)
+                if sequence.size(1) > self.window_limit:
+                    raise ValueError("memory + prompt + readout + answer header exceeds the backbone window")
+                sequence_positions = compact_positions(prefill_mask, 0)
+                mask = build_causal_mask(prefill_mask, sequence.dtype)
+                output = self.qwen(
+                    inputs_embeds=sequence, attention_mask=mask,
+                    position_ids=sequence_positions, use_cache=True, return_dict=True,
+                    logits_to_keep=1,
                 )
-                sequence_positions = compact_positions(prefill_mask, start)
                 # Evaluation may run outside Accelerate's autocast context.  Keep the
                 # complete embedding sequence in the frozen backbone dtype before it
                 # enters Qwen/LoRA; otherwise a float32 readout or adapter branch can
                 # reach a bf16 linear layer and fail with ``mat1 and mat2`` dtype errors.
                 sequence = sequence.to(dtype=self.dtype)
-                empty = q_mask.new_zeros(count, 0)
-                mask = build_continuation_mask(
-                    continuation_mask,
-                    empty, prefix.memory_length, question.dtype,
-                    readout_length=extra,
-                )
-                output = self.qwen(inputs_embeds=sequence, attention_mask=mask, position_ids=sequence_positions,
-                                   past_key_values=cache, use_cache=True, return_dict=True)
                 cache = output.past_key_values
                 next_id = output.logits[:, -1].argmax(dim=-1)
                 finished = torch.zeros(count, dtype=torch.bool, device=device)
@@ -1038,14 +987,10 @@ class ContextMemoryModel(nn.Module):
                     dtype=torch.long, device=device,
                 )
                 lengths = torch.zeros(count, dtype=torch.long, device=device)
-                # Question padding must stay blocked for the incremental steps too: the cache
-                # layout is [memory, question (with padding), read-out, generated...] and a
-                # plain all-ones mask would expose the padding keys the prefill masked out.
+                # Padding in either chat block remains blocked as generation appends tokens.
                 # Rows without padding make the whole thing unnecessary -- which is the common
                 # evaluation case, because a batch of contexts without padding has none either.
-                cache_prefix_mask = torch.cat(
-                    [prefill_mask.new_ones(count, prefix.memory_length), prefill_mask], dim=1
-                )
+                cache_prefix_mask = prefill_mask
                 prefill_width = cache_prefix_mask.size(1)
                 needs_mask = not bool(cache_prefix_mask.all())
                 if needs_mask:
@@ -1068,7 +1013,7 @@ class ContextMemoryModel(nn.Module):
                     # outputs are ignored (only `active` rows are recorded) and positions are
                     # per-row, so they cannot disturb the rows still decoding.
                     token = embedding(next_id[:, None]).to(dtype=self.dtype)
-                    position_ids = (start + prefill_counts + step).unsqueeze(1)
+                    position_ids = (prefill_counts + step).unsqueeze(1)
                     attention_mask = (
                         step_mask[:, :prefill_width + step + 1] if needs_mask else None
                     )
@@ -1086,12 +1031,15 @@ class ContextMemoryModel(nn.Module):
     @torch.no_grad()
     def generate_answer_with_prefix(
         self, prefix, qa_context_indices, question_ids, question_mask,
-        tokenizer, max_new_tokens=128,
+        tokenizer, max_new_tokens=128, question_prefix_ids=None, question_prefix_mask=None,
+        answer_prefix_ids=None, answer_prefix_mask=None,
     ):
         """Row-by-row decoding. Kept for callers that want the original behaviour."""
         return self.generate_answers_with_prefix(
             prefix, qa_context_indices, question_ids, question_mask, tokenizer,
             max_new_tokens=max_new_tokens, group_by_context=False,
+            question_prefix_ids=question_prefix_ids, question_prefix_mask=question_prefix_mask,
+            answer_prefix_ids=answer_prefix_ids, answer_prefix_mask=answer_prefix_mask,
         )
 
     @torch.no_grad()
@@ -1101,18 +1049,223 @@ class ContextMemoryModel(nn.Module):
         indices = torch.arange(question_ids.size(0), device=question_ids.device)
         return self.generate_answer_with_prefix(prefix, indices, question_ids, question_mask, tokenizer, max_new_tokens)
 
+    @torch.no_grad()
+    def start_conversation(
+        self, context_embeds, context_mask, user_prefix_embeds, user_prefix_mask=None,
+    ):
+        """Create a single-session cache with the training ``[prefix, memory]`` layout."""
+        if not self.conversation_enabled:
+            raise RuntimeError("memory.conversation.enabled must be true")
+        if context_embeds.ndim != 3 or context_embeds.size(0) != 1:
+            raise ValueError("conversation context must have batch size 1")
+        if user_prefix_embeds.ndim != 3 or user_prefix_embeds.size(0) != 1:
+            raise ValueError("user_prefix_embeds must have batch size 1")
+        if user_prefix_mask is None:
+            user_prefix_mask = torch.ones(
+                user_prefix_embeds.shape[:2], dtype=torch.bool, device=user_prefix_embeds.device
+            )
+        if user_prefix_mask.shape != user_prefix_embeds.shape[:2]:
+            raise ValueError("user_prefix_mask must match user_prefix_embeds")
+        if user_prefix_mask.size(0) != 1 or not user_prefix_mask.all():
+            raise ValueError("conversation user prefix must be unpadded and contain one row")
+        prefix = self.encode_context_prefix(context_embeds, context_mask)
+        memory = prefix.memory_embedding.to(dtype=self.dtype)
+        user_prefix = user_prefix_embeds.to(device=memory.device, dtype=self.dtype)
+        user_prefix_mask = user_prefix_mask.to(device=memory.device, dtype=torch.bool)
+        if user_prefix.size(1) + memory.size(1) > self.window_limit:
+            raise ValueError("user prefix + memory exceeds the backbone window")
+        return self._initialize_conversation_cache(
+            prefix, user_prefix, user_prefix_mask, memory,
+        )
 
-def assistant_header_token_ids(tokenizer) -> tuple[int, ...]:
-    """Token ids of the assistant generation header, resolved from a tokenizer.
+    @torch.no_grad()
+    def _initialize_conversation_cache(self, prefix, user_prefix, user_prefix_mask, memory):
+        memory = memory.to(dtype=self.dtype)
+        mask = torch.cat([
+            user_prefix_mask,
+            torch.ones(memory.shape[:2], dtype=torch.bool, device=memory.device),
+        ], dim=1)
+        inputs = torch.cat([user_prefix, memory], dim=1)
+        positions = compact_positions(mask, 0)
+        with self.lora_enabled(False):
+            output = self.qwen(
+                inputs_embeds=inputs, attention_mask=mask,
+                position_ids=positions, use_cache=True, output_hidden_states=True,
+                return_dict=True, logits_to_keep=1,
+            )
+        memory_hidden = output.hidden_states[-1][:, user_prefix.size(1):]
+        return ConversationState(
+            user_prefix, user_prefix_mask, memory, memory_hidden,
+            output.past_key_values,
+            torch.empty(0, dtype=torch.long, device=memory.device),
+        )
 
-    ``<|im_start|>assistant\n`` is what a chat template emits before an answer, and the mean of
-    its pretrained input embeddings initialises the Recon marker. Resolving the ids here instead
-    of hardcoding them keeps a different Qwen family or a re-cut vocabulary from silently
-    initialising that marker from unrelated rows; an empty result (the header is not in the
-    vocabulary) leaves the task marker randomly initialized.
+    @torch.no_grad()
+    def append_conversation_turn(self, state, turn_ids, tokenizer, max_new_tokens=128):
+        """Append one rendered user turn, recompressing old memory/history at the limit.
+
+        ``turn_ids`` is a rendered single user turn ending in ``user_end + assistant_header``.
+        Only its user-body tokens are used as the question; the closing/header tokens are
+        appended after the question-conditioned readout, matching the training layout.
+        """
+        if not self.conversation_enabled:
+            raise RuntimeError("memory.conversation.enabled must be true")
+        if state.memory.ndim != 3 or state.memory.size(0) != 1:
+            raise ValueError("conversation state must have batch size 1")
+        if turn_ids.ndim == 1:
+            turn_ids = turn_ids.unsqueeze(0)
+        if turn_ids.ndim != 2 or turn_ids.size(0) != 1 or turn_ids.size(1) == 0:
+            raise ValueError("turn_ids must contain one non-empty rendered user turn")
+        turn_ids = turn_ids.to(state.memory.device, dtype=torch.long)
+        user_ids = list(tokenizer.encode("<|im_start|>user\n", add_special_tokens=False))
+        end_ids = list(tokenizer.encode("<|im_end|>", add_special_tokens=False))
+        assistant_ids = tokenizer.encode("<|im_start|>assistant\n", add_special_tokens=False)
+        if not user_ids or not end_ids or not assistant_ids:
+            raise ValueError("tokenizer must encode chat user/end markers and assistant header")
+        row = turn_ids[0].tolist()
+        if row[:len(user_ids)] != user_ids:
+            raise ValueError("rendered turn must start with a user header")
+        assistant_start = next(
+            (i for i in range(len(row) - len(assistant_ids), -1, -1)
+             if row[i:i + len(assistant_ids)] == list(assistant_ids)),
+            -1,
+        )
+        boundary = next(
+            (i for i in range(assistant_start - len(end_ids), -1, -1)
+             if row[i:i + len(end_ids)] == end_ids),
+            -1,
+        )
+        if assistant_start < 0 or boundary <= 0:
+            raise ValueError("rendered turn must contain a non-empty question and user end marker")
+        question_start = len(user_ids) if state.turn_count == 0 else 0
+        if boundary <= question_start:
+            raise ValueError("rendered turn must contain a non-empty question")
+        question_ids = turn_ids[:, question_start:boundary]
+        closing_ids = turn_ids[:, boundary:]
+        readout_length = self.readout_length if self.resampler is not None else 0
+        occupied = (
+            state.user_prefix.size(1) + state.memory.size(1)
+            + state.history_ids.numel() + turn_ids.size(1)
+        )
+        initial_window_need = (
+            state.past_key_values.get_seq_length() + question_ids.size(1)
+            + readout_length + closing_ids.size(1) + max(0, int(max_new_tokens))
+        )
+        if occupied >= self.recompress_threshold or initial_window_need > self.window_limit:
+            history_budget = self.max_recompress_tokens - state.memory.size(1)
+            history = state.history_ids[-history_budget:] if history_budget else state.history_ids[:0]
+            history_embeds = self.qwen.get_input_embeddings()(history)
+            compression_input = torch.cat([state.memory, history_embeds[None]], dim=1)
+            compression_mask = torch.ones(
+                compression_input.shape[:2], dtype=torch.bool, device=compression_input.device
+            )
+            compressed = self.encode_context_prefix(
+                compression_input, compression_mask, max_tokens=self.max_recompress_tokens
+            )
+            state.memory = compressed.memory_embedding
+            state.history_ids = state.history_ids.new_empty((0,))
+            refreshed = self._initialize_conversation_cache(
+                compressed, state.user_prefix, state.user_prefix_mask, state.memory,
+            )
+            state.memory_hidden = refreshed.memory_hidden
+            state.past_key_values = refreshed.past_key_values
+
+        embedding = self.qwen.get_input_embeddings()
+        question_embeds = embedding(question_ids).to(dtype=self.dtype)
+        cache_length = state.past_key_values.get_seq_length()
+        input_length = question_ids.size(1)
+        required_length = (
+            cache_length + input_length + readout_length + closing_ids.size(1)
+            + max(0, int(max_new_tokens))
+        )
+        if required_length > self.window_limit:
+            raise ValueError("conversation turn and generation budget exceed the backbone window")
+        attention_mask = torch.ones(
+            (1, cache_length + input_length), dtype=torch.bool, device=turn_ids.device
+        )
+        positions = torch.arange(cache_length, cache_length + input_length, device=turn_ids.device)[None]
+        with self.lora_enabled(False):
+            output = self.qwen(
+                inputs_embeds=question_embeds, attention_mask=attention_mask,
+                position_ids=positions, past_key_values=state.past_key_values,
+                use_cache=True, output_hidden_states=True, return_dict=True,
+                logits_to_keep=1,
+            )
+        state.past_key_values = output.past_key_values
+        question_hidden = output.hidden_states[-1]
+        if self.resampler is not None:
+            if self.readout_mode == "learned_prefix":
+                readout = self.resampler(question_embeds, torch.ones(
+                    question_embeds.shape[:2], dtype=torch.bool, device=question_embeds.device
+                ), None)
+            else:
+                if self.question_resampler_info_source == "embedding":
+                    readout_hidden = torch.cat([state.memory, question_embeds], dim=1)
+                else:
+                    readout_hidden = torch.cat([state.memory_hidden, question_hidden], dim=1)
+                readout_mask = torch.ones(
+                    readout_hidden.shape[:2], dtype=torch.bool, device=readout_hidden.device
+                )
+                readout = self.resampler(readout_hidden, readout_mask).to(dtype=self.dtype)
+            question_prefix = readout
+        else:
+            question_prefix = question_embeds[:, :0]
+        closing_embeds = embedding(closing_ids).to(dtype=self.dtype)
+        tail = torch.cat([question_prefix, closing_embeds], dim=1)
+        tail_length = tail.size(1)
+        attention_mask = torch.ones(
+            (1, cache_length + input_length + tail_length),
+            dtype=torch.bool, device=turn_ids.device,
+        )
+        positions = torch.arange(
+            cache_length + input_length, cache_length + input_length + tail_length,
+            device=turn_ids.device,
+        )[None]
+        with self.lora_enabled(False):
+            output = self.qwen(
+                inputs_embeds=tail, attention_mask=attention_mask,
+                position_ids=positions, past_key_values=state.past_key_values,
+                use_cache=True, return_dict=True, logits_to_keep=1,
+            )
+        state.past_key_values = output.past_key_values
+        next_id = output.logits[:, -1].argmax(dim=-1)
+        decode_cache_length = cache_length + input_length + tail_length
+        generated = []
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        for step in range(max(0, int(max_new_tokens))):
+            token_id = int(next_id.item())
+            generated.append(token_id)
+            token = embedding(next_id[:, None])
+            attention_mask = torch.ones(
+                (1, decode_cache_length + 1), dtype=torch.bool, device=turn_ids.device
+            )
+            position = torch.tensor([[decode_cache_length]], device=turn_ids.device)
+            with self.lora_enabled(False):
+                output = self.qwen(
+                    inputs_embeds=token, attention_mask=attention_mask,
+                    position_ids=position, past_key_values=state.past_key_values,
+                    use_cache=True, return_dict=True,
+                )
+            state.past_key_values = output.past_key_values
+            decode_cache_length += 1
+            if eos_id is not None and token_id == int(eos_id):
+                break
+            next_id = output.logits[:, -1].argmax(dim=-1)
+        response_ids = torch.tensor(generated, dtype=torch.long, device=turn_ids.device)
+        state.history_ids = torch.cat([state.history_ids, turn_ids[0], response_ids])
+        state.turn_count += 1
+        return response_ids
+
+
+def recon_task_token_ids(tokenizer) -> tuple[int, ...]:
+    """Token ids of the user-side Recon instruction, resolved from a tokenizer.
+
+    The mean embedding of ``Reconstruct the context.`` initialises the trainable marker.
+    Resolving ids with the active tokenizer avoids hardcoding vocabulary-specific rows; an empty
+    result leaves the marker randomly initialized.
     """
     try:
-        ids = tokenizer.encode("<|im_start|>assistant\n", add_special_tokens=False)
+        ids = tokenizer.encode("Reconstruct the context.", add_special_tokens=False)
     except (AttributeError, TypeError, ValueError):
         return ()
     return tuple(int(value) for value in (ids or ()))
@@ -1126,6 +1279,12 @@ def load_model(cfg):
     # One tokenizer, and a pad token even for checkpoints whose config has none.
     tok = AutoTokenizer.from_pretrained(cfg.model.name_or_path, local_files_only=True)
     tok.pad_token = tok.pad_token or tok.eos_token
+    from .data import split_chat_prompt
+    recon_prompt = tok.apply_chat_template(
+        [{"role": "user", "content": ""}], tokenize=False,
+        add_generation_prompt=True, enable_thinking=cfg.data.chat_template_enable_thinking,
+    )
+    recon_user, _, recon_answer = split_chat_prompt(recon_prompt)
     qwen=AutoModelForCausalLM.from_pretrained(
         cfg.model.name_or_path, dtype=dtype_from_name(cfg.model.torch_dtype),
         attn_implementation=cfg.model.attn_implementation, local_files_only=True,
@@ -1163,24 +1322,26 @@ def load_model(cfg):
         memory_resampler_hidden_size=cfg.memory.memory_resampler_hidden_size,
         memory_resampler_ffn_ratio=cfg.memory.memory_resampler_ffn_ratio,
         memory_resampler_use_self_attention=cfg.memory.memory_resampler_use_self_attention,
-        memory_resampler_output_mode=cfg.memory.memory_resampler_output_mode,
-        reader_memory_source=cfg.memory.reader_memory_source,
+        question_resampler_info_source=cfg.memory.question_resampler_info_source,
+        conversation_enabled=cfg.memory.conversation.enabled,
+        recompress_threshold=cfg.memory.conversation.recompress_threshold,
+        max_recompress_tokens=cfg.memory.conversation.max_recompress_tokens,
         readout_keep_question_tokens=cfg.memory.readout_keep_question_tokens,
-        task_init_token_ids=assistant_header_token_ids(tok),
+        task_init_token_ids=recon_task_token_ids(tok),
+        recon_user_token_ids=tuple(tok(recon_user, add_special_tokens=False).input_ids),
+        recon_answer_prefix_token_ids=tuple(tok(recon_answer, add_special_tokens=False).input_ids),
     )
     for name,p in model.named_parameters():
-        # Preserve module-level freezing (for example the inactive layer-0
-        # projection in ``layerwise`` resampler mode) while enforcing the global
-        # trainable-name policy.
+        # Preserve module-level freezing while enforcing the global trainable-name policy.
         p.requires_grad = p.requires_grad and is_trainable_parameter_name(name)
     return tok, model
 
 
 __all__ = [
-    "ContextMemoryModel", "MetaLoRAOutput",
+    "ContextMemoryModel", "ContextMemoryOutput", "ConversationState",
     "MetaLoRA", "ContextPrefix",
     "TiedUnembedding",
     "ContextMemoryResampler", "QuestionResampler",
-    "build_continuation_mask", "compact_positions",
+    "build_causal_mask", "compact_positions",
     "is_trainable_parameter_name", "load_model", "TASK_RECON", "TASK_QA",
 ]

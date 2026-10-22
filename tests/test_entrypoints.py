@@ -35,7 +35,7 @@ def test_checkpoint_preserves_architecture_and_rebases_machine(tmp_path):
     assert script('test').evaluation_config(checkpoint, preset, '4090').memory.memory_length == 32
 
 
-@pytest.mark.parametrize('mode', ['memory_question', 'memory_only', 'learned_prefix', 'off'])
+@pytest.mark.parametrize('mode', ['memory_question', 'learned_prefix', 'off'])
 @pytest.mark.parametrize('preset', [None, ROOT / 'configs/test.yaml'])
 def test_checkpoint_preserves_readout_mode(tmp_path, mode, preset):
     cfg = TrainConfig.from_file(ROOT / 'configs/train_baseline.yaml')

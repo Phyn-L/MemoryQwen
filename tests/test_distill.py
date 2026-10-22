@@ -29,6 +29,7 @@ def _tiny_model():
         Qwen3ForCausalLM(config), rank=2, alpha=4.0, memory_length=4,
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
         max_context_tokens=16, distillation=True,
+        recon_user_token_ids=(2,), recon_answer_prefix_token_ids=(3, 4),
     )
     for name, parameter in model.named_parameters():
         parameter.requires_grad = is_trainable_parameter_name(name)

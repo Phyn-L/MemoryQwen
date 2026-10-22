@@ -73,6 +73,7 @@ def _model(readout_length: int = 0) -> ContextMemoryModel:
                                 target_modules=["q_proj"],
         max_context_tokens=CONTEXT_LENGTH,
         trainable_dtype=torch.float32,
+        recon_user_token_ids=(2,), recon_answer_prefix_token_ids=(3, 4),
                 readout_length=readout_length,
     )
     model.eval()
@@ -150,13 +151,11 @@ def test_training_ignores_left_padding_when_numbering_the_question():
     prefix = _prefix(model)
     train = _train_positions(model, prefix)[0]
 
-    # QA has no task embedding; real question tokens ignore left padding.
-    assert train[0, :4].tolist() == [START, START, START, START + 1], train[0].tolist()
-    assert train[1, :4].tolist() == [START, START + 1, START + 2, START + 3], train[1].tolist()
-    # The answer starts right after the row's own question, not after the padded width.
-    assert train[0, 4].item() == START + 2, train[0].tolist()
-    assert train[1, 4].item() == START + 4, train[1].tolist()
-    assert train[0, 4:].tolist() == [START + 2, START + 3, START + 4]
+    # Full sequence is [memory, question, answer]; masked question padding has position 0.
+    assert train[0, 2:6].tolist() == [0, 0, 2, 3], train[0].tolist()
+    assert train[1, 2:6].tolist() == [2, 3, 4, 5], train[1].tolist()
+    assert train[0, 6:].tolist() == [4, 5, 6], train[0].tolist()
+    assert train[1, 6:].tolist() == [6, 7, 8], train[1].tolist()
 
 
 def test_the_qa_block_is_numbered_by_the_shared_helper():
@@ -171,16 +170,13 @@ def test_the_qa_block_is_numbered_by_the_shared_helper():
 
     model = _model(readout_length=1)
     prefix = _prefix(model, contexts=QUESTION_IDS.size(0))
-    blocks = torch.cat(
-        [
-            QUESTION_MASK,
-            QUESTION_MASK.new_ones(QUESTION_IDS.size(0), 1),
-            QUESTION_MASK.new_ones(QUESTION_IDS.size(0), ANSWER_LENGTH),
-        ],
-        dim=1,
-    )
-    expected = compact_positions(blocks, MEMORY_LENGTH)
-    got = model._qa_positions(prefix, QUESTION_MASK, ANSWER_LENGTH, 1, torch.device("cpu"))
+    blocks = torch.cat([
+        QUESTION_MASK.new_ones(QUESTION_IDS.size(0), MEMORY_LENGTH),
+        QUESTION_MASK,
+        QUESTION_MASK.new_ones(QUESTION_IDS.size(0), 1 + ANSWER_LENGTH),
+    ], dim=1)
+    expected = compact_positions(blocks, 0)
+    got = _train_positions(model, prefix)[0]
     torch.testing.assert_close(got, expected)
 
 
@@ -203,7 +199,6 @@ def test_context_encoding_is_independent_of_the_padding_side():
     left = model.encode_context_prefix(embedding(left_ids), left_mask)
     right = model.encode_context_prefix(embedding(right_ids), right_mask)
     torch.testing.assert_close(left.memory, right.memory)
-    torch.testing.assert_close(left.layer_memory, right.layer_memory)
 
 
 def test_generation_prefills_the_same_positions_as_training():
@@ -215,9 +210,9 @@ def test_generation_prefills_the_same_positions_as_training():
     generation = _generation_positions(model, prefix)
 
     prefill = generation[0]
-    assert prefill.shape == (2, 4)
-    assert torch.equal(prefill, train[:, :4]), (
-        f"generation prefilled {prefill.tolist()} but training supervised {train[:, :4].tolist()}"
+    assert prefill.shape == (2, 6)
+    assert torch.equal(prefill, train[:, :6]), (
+        f"generation prefilled {prefill.tolist()} but training supervised {train[:, :6].tolist()}"
     )
 
 
@@ -233,10 +228,52 @@ def test_the_first_generated_token_sits_where_training_supervised_it():
     assert len(generation) >= 2, "the generation path should decode at least one token"
     first_decoded = generation[1]
     assert first_decoded.shape == (2, 1)
-    assert first_decoded.flatten().tolist() == train[:, 4].tolist(), (
+    assert first_decoded.flatten().tolist() == train[:, 6].tolist(), (
         f"first decoded positions {first_decoded.flatten().tolist()} != supervised "
-        f"first answer positions {train[:, 4].tolist()}"
+        f"first answer positions {train[:, 6].tolist()}"
     )
+
+
+def test_readout_and_assistant_header_match_between_training_and_generation():
+    if not _requirements_available():
+        return
+    model = _model(readout_length=2)
+    prefix = _prefix(model)
+    embedding = model.qwen.get_input_embeddings()
+    user_ids = torch.tensor([[11, 12], [11, 12]])
+    header_ids = torch.tensor([[13, 14, 15], [13, 14, 15]])
+    answer_ids = torch.randint(2, VOCAB, (2, ANSWER_LENGTH))
+    captures = []
+    original = model.qwen.forward
+
+    def capture(*args, **kwargs):
+        captures.append((kwargs["inputs_embeds"].detach().clone(), kwargs["position_ids"].detach().clone()))
+        output = original(*args, **kwargs)
+        output.logits[..., _Tokenizer.eos_token_id] = -1e9
+        return output
+
+    model.qwen.forward = capture
+    model.forward_with_memory_prefix(
+        prefix, torch.zeros(2, dtype=torch.long), embedding(QUESTION_IDS), QUESTION_MASK,
+        embedding(answer_ids), torch.ones_like(answer_ids, dtype=torch.bool), answer_ids,
+        prompt_prefix_embeds=embedding(user_ids),
+        prompt_prefix_mask=torch.ones_like(user_ids, dtype=torch.bool),
+        answer_prefix_embeds=embedding(header_ids),
+        answer_prefix_mask=torch.ones_like(header_ids, dtype=torch.bool),
+    )
+    train_embeds, train_positions = captures.pop()
+    model.generate_answers_with_prefix(
+        prefix, torch.zeros(2, dtype=torch.long), QUESTION_IDS, QUESTION_MASK,
+        _Tokenizer(), max_new_tokens=1,
+        question_prefix_ids=user_ids,
+        question_prefix_mask=torch.ones_like(user_ids, dtype=torch.bool),
+        answer_prefix_ids=header_ids,
+        answer_prefix_mask=torch.ones_like(header_ids, dtype=torch.bool),
+    )
+    generation_embeds, generation_positions = captures[0]
+    prefill_length = generation_embeds.size(1)
+    torch.testing.assert_close(generation_embeds, train_embeds[:, :prefill_length])
+    torch.testing.assert_close(generation_positions, train_positions[:, :prefill_length])
 
 
 def test_the_readout_and_the_answer_follow_the_real_question_length():
@@ -246,15 +283,14 @@ def test_the_readout_and_the_answer_follow_the_real_question_length():
     prefix = _prefix(model)
     train = _train_positions(model, prefix)[0]
 
-    readout = train[:, 4:12]
-    assert readout[0].tolist() == list(range(START + 2, START + 10)), readout[0].tolist()
-    assert readout[1].tolist() == list(range(START + 4, START + 12)), readout[1].tolist()
-    assert train[0, 12].item() == START + 2 + 8
-    assert train[1, 12].item() == START + 4 + 8
-    assert train[0, 12:].tolist() == [START + 10, START + 11, START + 12]
+    readout = train[:, 6:14]
+    assert readout[0].tolist() == list(range(4, 12)), readout[0].tolist()
+    assert readout[1].tolist() == list(range(6, 14)), readout[1].tolist()
+    assert train[0, 14:].tolist() == [12, 13, 14]
+    assert train[1, 14:].tolist() == [14, 15, 16]
 
     generation = _generation_positions(model, prefix)
-    assert torch.equal(generation[0][:, :12], train[:, :12])
+    assert torch.equal(generation[0][:, :14], train[:, :14])
 
 
 if __name__ == "__main__":

@@ -35,6 +35,5 @@ conda run --no-capture-output -n "$CONDA_ENV" \
   --model-config "$MODEL_CONFIG" \
   --machine 4090 \
   --max-context-tokens 4096 \
-  --max-conversation-tokens 1024 \
   --max-answer-tokens 128 \
   --output "$OUTPUT"

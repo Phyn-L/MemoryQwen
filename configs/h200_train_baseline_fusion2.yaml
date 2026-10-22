@@ -7,7 +7,6 @@ memory:
   memory_resampler_heads: 4
   memory_resampler_hidden_size: 512
   memory_resampler_ffn_ratio: 4
-  memory_resampler_output_mode: layer0
 
   readout_mode: memory_question
   readout_length: 16

@@ -15,7 +15,12 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.data import ContextRecord, _messages_from_row, collate_context_records
+from src.data import (
+    ContextRecord,
+    _messages_from_row,
+    _user_prefix_text,
+    collate_context_records,
+)
 
 
 class _Batch:
@@ -134,6 +139,19 @@ def test_the_same_records_and_epoch_select_the_same_qa_turns():
     assert _selected(_collate(rows, epoch=0)) == _selected(_collate(rows, epoch=0))
 
 
+def test_memory_boundary_is_after_the_first_user_header():
+    rendered = (
+        "<|im_start|>system\nContext<|im_end|>\n"
+        "<|im_start|>user\nFirst question<|im_end|>\n"
+        "<|im_start|>assistant\nFirst answer<|im_end|>\n"
+        "<|im_start|>user\nSecond question<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    assert _user_prefix_text(rendered) == (
+        "<|im_start|>system\nContext<|im_end|>\n<|im_start|>user\n"
+    )
+
+
 def test_each_context_selects_independently_of_the_batch_it_travels_in():
     """Worker count changes the batch composition, so it must not change the selection."""
     rows = [_record(index) for index in range(4)]
@@ -173,6 +191,20 @@ def test_mix_emits_one_recon_row_and_qa_per_context():
     assert batch["qa_context_indices"].tolist() == [0, 0, 1, 1]
     assert batch["recon_context_indices"].tolist() == [0, 1]
     assert batch["context_ids"].size(0) == 2
+
+
+def test_single_turn_qa_prompt_and_answer_limits_are_applied():
+    messages = _messages_from_row({
+        "dataset": "squad",
+        "qa_pairs": [{"question": "question extra history", "answer": "answer " * 8}],
+    })
+    row = ContextRecord("ctx", messages, dataset="squad", independent_qa=True)
+    batch = collate_context_records(
+        [row], _WordTokenizer(), max_context_tokens=8, max_question_tokens=3,
+        max_answer_tokens=2, training=False, sample_qa=False,
+    )
+    assert batch["qa_input_mask"].sum().item() == 3
+    assert batch["qa_target_mask"].sum().item() == 3  # Two answer tokens + EOS.
 
 
 @pytest.mark.parametrize("training", [False, True])

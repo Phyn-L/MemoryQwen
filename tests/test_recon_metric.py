@@ -31,6 +31,7 @@ def _model() -> ContextMemoryModel:
     model = ContextMemoryModel(
         Qwen3ForCausalLM(config), rank=2, memory_length=4, target_modules=["q_proj"],
         memory_resampler_hidden_size=16, memory_resampler_heads=2,
+        recon_user_token_ids=(2,), recon_answer_prefix_token_ids=(3, 4),
     )
     return model.eval()
 
@@ -72,10 +73,12 @@ def test_the_metric_is_the_training_objective_scored_token_by_token():
     labels = ids.masked_fill(~mask, -100)
     embedding = model.qwen.get_input_embeddings()
     prefix = model.encode_context_prefix(embedding(ids), mask)
-    stats = model.recon_teacher_forced(prefix, embedding(ids), mask, labels)
-    losses = model.forward_recon_with_memory_prefix(
-        prefix, torch.arange(ids.size(0)), embedding(ids), mask, labels, loss_only=True,
-    ).supervision_losses
+    output = model.forward_recon_with_memory_prefix(
+        prefix, torch.arange(ids.size(0)), embedding(ids), mask, labels,
+        loss_only=True, return_stats=True,
+    )
+    stats = output.row_stats
+    losses = output.supervision_losses
 
     # Per row, the training loss *is* nll / tokens of the metric ...
     torch.testing.assert_close(losses, stats["nll"] / stats["tokens"].clamp_min(1))
@@ -99,6 +102,30 @@ def test_the_metric_reports_a_usable_accuracy_and_per_dataset_keys():
         assert 0.0 <= metrics[f"dataset/{dataset}/recon_token_accuracy"] <= 1.0
         assert metrics[f"dataset/{dataset}/recon_ce"] > 0.0
         assert metrics[f"dataset/{dataset}/contexts"] == 1
+
+
+def test_recon_evaluation_projects_each_scored_chunk_once(monkeypatch):
+    import torch.nn.functional as functional
+
+    model = _model()
+    batch = _batch()
+    ids, mask = batch["context_ids"], batch["context_mask"]
+    embedding = model.qwen.get_input_embeddings()
+    prefix = model.encode_context_prefix(embedding(ids), mask)
+    head_weight = model.qwen.get_output_embeddings().weight
+    calls = 0
+    original = functional.linear
+
+    def counted_linear(input, weight, bias=None):
+        nonlocal calls
+        calls += weight is head_weight
+        return original(input, weight, bias)
+
+    monkeypatch.setattr("src.losses.F.linear", counted_linear)
+    model.recon_teacher_forced(
+        prefix, embedding(ids), mask, ids.masked_fill(~mask, -100),
+    )
+    assert calls == 1
 
 
 def test_all_supplied_contexts_are_scored_without_a_separate_recon_budget():

@@ -274,7 +274,7 @@ class Evaluator:
                 embed(ids["context_ids"]), ids["context_mask"]
             )
             # One batched call for the whole context batch: rows that share a context
-            # share the same memory cache, so they are prefilled and decoded together
+            # share the same memory embeddings, so they are prefilled and decoded together
             # instead of one row at a time.  ``max_rows_per_group`` keeps the group
             # batch bounded by the same knob that used to bound the micro-batching.
             max_new_tokens = (
@@ -287,9 +287,15 @@ class Evaluator:
                 question_mask = ids["qa_input_mask"].new_empty(
                     (end_row - start_row, 0), dtype=torch.bool
                 )
+                question_prefix_ids = ids["qa_prefix_ids"].new_empty((end_row - start_row, 0))
+                question_prefix_mask = ids["qa_prefix_mask"].new_empty(
+                    (end_row - start_row, 0), dtype=torch.bool
+                )
             else:
                 question_ids = ids["qa_input_ids"][rows_slice]
                 question_mask = ids["qa_input_mask"][rows_slice]
+                question_prefix_ids = ids["qa_prefix_ids"][rows_slice]
+                question_prefix_mask = ids["qa_prefix_mask"][rows_slice]
             generated = model.generate_answers_with_prefix(
                 prefix,
                 q,
@@ -300,6 +306,10 @@ class Evaluator:
                 group_by_context=True,
                 max_rows_per_group=max(1, self.cfg.evaluation.qa_batch_size),
                 task_id=task_id,
+                question_prefix_ids=question_prefix_ids,
+                question_prefix_mask=question_prefix_mask,
+                answer_prefix_ids=ids["qa_answer_prefix_ids"][rows_slice],
+                answer_prefix_mask=ids["qa_answer_prefix_mask"][rows_slice],
             )
             for i, record in enumerate(records):
                 row = generated[i].tolist()

@@ -40,7 +40,6 @@ def _configure(path: str, source: Path, samples: int) -> TrainConfig:
     cfg.data.max_context_tokens = min(cfg.data.max_context_tokens, 256)
     cfg.data.max_input_tokens = min(cfg.data.max_input_tokens, 512)
     cfg.data.max_question_tokens = min(cfg.data.max_question_tokens, 96)
-    cfg.data.max_conversation_tokens = min(cfg.data.max_conversation_tokens, 128)
     cfg.data.max_answer_tokens = min(cfg.data.max_answer_tokens, 32)
     cfg.data.max_samples = samples
     cfg.data.train_max_samples = samples

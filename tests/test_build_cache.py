@@ -90,7 +90,6 @@ def _config(tmp_path: Path, **overrides) -> DataConfig:
         max_context_tokens=8,
         max_question_tokens=8,
         max_answer_tokens=4,
-        max_conversation_tokens=64,
         filter_long_context=True,
         filter_no_qa=True,
         train_datasets="all",
@@ -497,7 +496,7 @@ def test_the_filter_hands_back_the_lengths_it_measured(tmp_path):
         _row("one two three four five six seven eight nine ten eleven", ["q"], index=1),
         _row("another short one", ["q"], index=2),
     ]
-    options = filter_options(8, True, True, 64, 8, 4)
+    options = filter_options(8, True, True, 8, 4)
     lengths: list[int] = []
     accepted = filter_rows_batch(rows, _Tokenizer(), options, lengths)
     assert [row["id"] for row in accepted] == ["squad:train:0", "squad:train:2"]
@@ -509,7 +508,7 @@ def test_the_filter_hands_back_the_lengths_it_measured(tmp_path):
 
     # With the length rule off there is nothing to record.
     unknown: list[int] = []
-    filter_rows_batch(rows, _Tokenizer(), filter_options(8, False, True, 64, 8, 4), unknown)
+    filter_rows_batch(rows, _Tokenizer(), filter_options(8, False, True, 8, 4), unknown)
     assert unknown == [-1, -1, -1]
 
 
@@ -517,7 +516,7 @@ def test_parallel_and_serial_lengths_agree(tmp_path):
     from src.data import filter_options, filter_row_chunks
 
     rows = [_row(f"context {i} " + "word " * i, ["q"], index=i) for i in range(30)]
-    options = filter_options(64, True, True, 512, 64, 8)
+    options = filter_options(64, True, True, 64, 8)
 
     def run(num_workers):
         chunks = [rows[index:index + 7] for index in range(0, len(rows), 7)]

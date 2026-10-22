@@ -54,6 +54,7 @@ def main():
             context_layer_indices=(-1, -2), memory_resampler_hidden_size=32,
             readout_length=2, question_resampler_hidden_size=32,
             context_gradient_checkpointing=True,
+            recon_user_token_ids=(2,), recon_answer_prefix_token_ids=(3, 4),
         )
     else:
         _, model = load_model(cfg)
@@ -124,8 +125,7 @@ def main():
                 memory_length = model.context_resampler.num_memory
                 assert prefix.memory.shape == (1, memory_length, model.qwen_hidden_size)
                 assert torch.isfinite(prefix.memory).all()
-                assert all(layer.keys.size(-2) == layer.values.size(-2) == memory_length
-                           for layer in prefix.memory_cache.layers)
+                assert prefix.memory.shape[1] == memory_length
     if device.type == "cuda":
         torch.cuda.synchronize()
     report = {

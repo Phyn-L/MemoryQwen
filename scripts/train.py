@@ -630,7 +630,7 @@ def main() -> None:
             schedule.add_row("readout_length", str(memory.readout_length))
             schedule.add_row(
                 "replace_question_token",
-                str(not memory.readout_keep_question_tokens).lower(),
+                str(memory.readout_mode == "memory_question" and not memory.readout_keep_question_tokens).lower(),
             )
             schedule.add_row("layers", str(memory.question_resampler_layers))
             schedule.add_row("heads", str(memory.question_resampler_heads))
@@ -739,6 +739,10 @@ def main() -> None:
                     loss_only=True,
                     recon_batch=recon_batch,
                     generator=sampling_generator,
+                    question_prefix_embeds=embedding(ids["qa_prefix_ids"]),
+                    question_prefix_mask=ids["qa_prefix_mask"],
+                    answer_prefix_embeds=embedding(ids["qa_answer_prefix_ids"]),
+                    answer_prefix_mask=ids["qa_answer_prefix_mask"],
                 )
                 task_ids = torch.cat(
                     [
@@ -822,17 +826,11 @@ def main() -> None:
                         parameter
                         for name, parameter in named_parameters
                         if name.startswith("context_resampler.")
-                        and "layer_gates" not in name
                     )
                     metalora_grad_norm = _gradient_norm(
                         parameter
                         for name, parameter in named_parameters
                         if "lora_A" in name or "lora_B" in name
-                    )
-                    layer_gates_grad_norm = _gradient_norm(
-                        parameter
-                        for name, parameter in named_parameters
-                        if name == "context_resampler.layer_gates"
                     )
                     recon_task_embedding_grad_norm = (
                         base_model.recon_task_embedding.grad.detach().float().norm()
@@ -888,7 +886,6 @@ def main() -> None:
                         "grad_norm/total": float(step_grad_norm.detach()),
                         "grad_norm/resampler": float(resampler_grad_norm),
                         "grad_norm/metalora": float(metalora_grad_norm),
-                        "grad_norm/layer_gates": float(layer_gates_grad_norm),
                         "grad_norm/recon_task_embedding": float(
                             recon_task_embedding_grad_norm
                         ),

@@ -97,7 +97,7 @@ def test_the_loop_echoes_the_resolved_schedule():
         assert field in source, field
     assert '"question resampler"' in source
     assert 'if memory.readout_length > 0 and memory.readout_mode != "off"' in source
-    assert "str(not memory.readout_keep_question_tokens).lower()" in source
+    assert 'memory.readout_mode == "memory_question" and not memory.readout_keep_question_tokens' in source
 
 
 def test_the_allocator_cache_is_not_manually_flushed_after_an_evaluation():

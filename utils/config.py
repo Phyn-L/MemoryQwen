@@ -154,9 +154,17 @@ class ModelConfig:
 
 
 @dataclass
+class ConversationMemoryConfig:
+    enabled: bool = False
+    recompress_threshold: int = 2048
+    max_recompress_tokens: int = 2048
+
+
+@dataclass
 class MemoryConfig:
     memory_length: int = 8
-    # Per-question read-out over the cached (question-agnostic) memory: R learnable latents
+    conversation: ConversationMemoryConfig = field(default_factory=ConversationMemoryConfig)
+    # Per-question read-out over the question-agnostic memory: R learnable latents
     # cross-attend over the question and the memory and are inserted as R extra input
     # positions between the question and the answer. 0 = off (the historical behaviour).
     readout_mode: str = "memory_question"
@@ -175,9 +183,8 @@ class MemoryConfig:
     memory_resampler_hidden_size: int = 256
     memory_resampler_ffn_ratio: int = 2
     memory_resampler_use_self_attention: bool = True
-    memory_resampler_output_mode: str = "layer0"
     # Source exposed to the optional question-conditioned reader.
-    reader_memory_source: str = "memory_hidden"
+    question_resampler_info_source: str = "hidden"
 
 
 @dataclass
@@ -238,7 +245,6 @@ class DataConfig:
     recon_schedule_curve: str = "cosine"
     max_question_tokens: int = 96
     max_answer_tokens: int = 64
-    max_conversation_tokens: int = 768
     max_samples: int | None = None
     train_max_samples: int | None = None
     #: Deterministic cap on the validation contexts loaded (``None`` = all of them).
@@ -450,6 +456,8 @@ class TrainConfig:
         if isinstance(model_values.get("target_modules"), list):
             model_values["target_modules"] = tuple(model_values["target_modules"])
         memory_values = dict(values.get("memory", {}))
+        conversation_values = dict(memory_values.get("conversation", {}))
+        memory_values["conversation"] = ConversationMemoryConfig(**conversation_values)
         # ``off`` is a YAML 1.1 boolean, so a bare `readout_mode: off` arrives as False and
         # used to fail validation with "invalid memory.readout_mode". The documented value is
         # the string name; accept the boolean spelling too.
@@ -535,7 +543,6 @@ class TrainConfig:
                     )
         if (
             d.max_question_tokens <= 0
-            or d.max_conversation_tokens <= 0
             or d.max_answer_tokens <= 0
         ):
             raise ValueError(
@@ -553,6 +560,13 @@ class TrainConfig:
             )
         if self.model.lora_rank <= 0 or m.memory_length <= 0:
             raise ValueError("lora_rank and memory_length must be positive")
+        c = m.conversation
+        if c.recompress_threshold <= 0 or c.max_recompress_tokens <= 0:
+            raise ValueError("memory.conversation token limits must be positive")
+        if c.recompress_threshold < m.memory_length:
+            raise ValueError("memory.conversation.recompress_threshold must include memory slots")
+        if c.max_recompress_tokens < m.memory_length:
+            raise ValueError("memory.conversation.max_recompress_tokens must include memory slots")
         if not m.context_layer_indices:
             raise ValueError("memory.context_layer_indices must not be empty")
         if any(type(i) is not int for i in m.context_layer_indices):
@@ -567,18 +581,11 @@ class TrainConfig:
             raise ValueError(
                 "memory_resampler_hidden_size must be divisible by memory_resampler_heads"
             )
-        if m.memory_resampler_output_mode not in {"layer0", "layerwise"}:
-            raise ValueError(
-                "memory.memory_resampler_output_mode must be layer0 or layerwise"
-            )
-        if m.reader_memory_source not in {
-            "memory_hidden",
-            "memory_embedding",
-            "layer_mean",
-        }:
-            raise ValueError(
-                "memory.reader_memory_source must be memory_hidden, memory_embedding or layer_mean"
-            )
+        if m.readout_mode == "memory_question":
+            if m.question_resampler_info_source not in {"hidden", "embedding"}:
+                raise ValueError("memory.question_resampler_info_source must be hidden or embedding")
+            if not isinstance(m.readout_keep_question_tokens, bool):
+                raise ValueError("memory.readout_keep_question_tokens must be a boolean")
         if loss.distill_weight < 0:
             raise ValueError("loss.distill_weight must be non-negative")
         if loss.distill_temperature <= 0:
@@ -593,7 +600,6 @@ class TrainConfig:
             raise ValueError("loss.max_logits_rows must be positive")
         if m.readout_mode not in {
             "memory_question",
-            "memory_only",
             "learned_prefix",
             "off",
         }:
@@ -602,10 +608,7 @@ class TrainConfig:
             raise ValueError(
                 "memory.readout_length must be >= 0 (0 disables the read-out)"
             )
-        if m.readout_length > 0 and m.readout_mode in {
-            "memory_question",
-            "memory_only",
-        }:
+        if m.readout_length > 0 and m.readout_mode == "memory_question":
             if m.question_resampler_layers <= 0:
                 raise ValueError(
                     "memory.question_resampler_layers must be positive when the read-out is on"

@@ -1,4 +1,4 @@
-"""Per-question read-out over the cached, question-agnostic memory (C3).
+"""Per-question read-out over the question-agnostic memory (C3).
 
 The global memory slots are produced without knowing the question, so they have to keep
 everything that might be asked about; a single question typically needs a tiny fraction of a
@@ -8,8 +8,8 @@ inserted as ``R`` extra input positions between the question and the answer.
 
 Two properties make this cheap:
 
-* the memory stays question-agnostic and therefore cacheable -- only the ``R`` read-out
-  positions are recomputed per question, from ``M + Q`` keys;
+* the memory stays question-agnostic; only the ``R`` read-out positions are recomputed per
+  question, from ``M + Q`` keys;
 * the output lives in the backbone's *input-embedding* space, so the backbone computes the
   read-out positions' own keys and values. No per-layer prefix projection is needed, and the
   module adds ~4-8M trainable parameters instead of a second copy of the memory path.
@@ -94,8 +94,8 @@ class _ResamplerBlock(nn.Module):
 class QuestionResampler(nn.Module):
     """Resample the memory (and the question) into a few question-conditioned positions.
 
-    The frozen LLM encodes the concatenated memory and question; learnable latents
-    cross-attend to those final-layer states. They are projected down to the configured
+    Learnable latents cross-attend to concatenated memory and question representations.
+    The caller supplies input embeddings or final-layer LLM states. They are projected down to the configured
     bottleneck (256 by default), so the cross-attention blocks cost
     ~1M parameters instead of the ~34M a full-width block would need. The output projection
     uses the same MLP head as the context resampler.
@@ -106,11 +106,8 @@ class QuestionResampler(nn.Module):
                  question_resampler_hidden_size: int = 256,
                  question_resampler_ffn_ratio: int = 2,
                  question_resampler_use_self_attention: bool = True,
-                 dtype: torch.dtype | None = None, mode: str = "memory_question"):
+                 dtype: torch.dtype | None = None):
         super().__init__()
-        if mode not in {"memory_question", "memory_only"}:
-            raise ValueError(f"invalid resampler mode: {mode}")
-        self.mode = mode
         if question_resampler_length <= 0:
             raise ValueError("question_resampler_length must be positive")
         if question_resampler_hidden_size <= 0:
@@ -179,12 +176,8 @@ class ContextMemoryResampler(nn.Module):
     def __init__(self, hidden_size: int, num_memory: int, num_layers: int = 2,
                  num_heads: int = 4, width: int = 256,
                  ffn_ratio: int = 2, dtype: torch.dtype | None = None,
-                 backbone_layers: int | None = None,
-                 output_mode: str = "layer0",
                  use_self_attention: bool = True):
         super().__init__()
-        if output_mode not in {"layer0", "layerwise"}:
-            raise ValueError("output_mode must be 'layer0' or 'layerwise'")
         if num_memory <= 0:
             raise ValueError("num_memory must be positive")
         if num_heads <= 0 or num_layers <= 0 or ffn_ratio <= 0:
@@ -195,8 +188,6 @@ class ContextMemoryResampler(nn.Module):
         self.num_memory = int(num_memory)
         self.num_layers = int(num_layers)
         self.width = int(width)
-        self.backbone_layers = None if backbone_layers is None else int(backbone_layers)
-        self.output_mode = output_mode
         self.latents = nn.Parameter(torch.randn(num_memory, width) * 0.02)
         self.context_projection = nn.Linear(hidden_size, width)
         self.input_norm = nn.LayerNorm(width)
@@ -207,30 +198,6 @@ class ContextMemoryResampler(nn.Module):
         )
         self.output_norm = nn.LayerNorm(width)
         self.output_projection = SharedMemoryOutputProjection(width, hidden_size)
-        self.layerwise_output_projection = (
-            SharedMemoryOutputProjection(width, hidden_size)
-            if output_mode == "layerwise" else None
-        )
-        self.layer_embedding = None
-        self.layer_gates = None
-        if output_mode == "layerwise":
-            if self.backbone_layers is None:
-                raise ValueError("layerwise output requires backbone_layers")
-            if self.backbone_layers <= 0:
-                raise ValueError("backbone_layers must be positive")
-            self.layer_embedding = nn.Parameter(torch.zeros(self.backbone_layers, width))
-            self.layer_gates = nn.Parameter(torch.zeros(self.backbone_layers))
-            # The layerwise head replaces the shared layer-0 head. Keeping the
-            # inactive head trainable makes DDP report unused parameters every step.
-            for parameter in self.output_projection.parameters():
-                parameter.requires_grad = False
-        else:
-            for parameter in (
-                self.layerwise_output_projection.parameters()
-                if self.layerwise_output_projection is not None
-                else ()
-            ):
-                parameter.requires_grad = False
         if dtype is not None:
             self.to(dtype=dtype)
 
@@ -247,10 +214,7 @@ class ContextMemoryResampler(nn.Module):
             for block in self.blocks:
                 latents = block(latents, context, padding)
             latents = self.output_norm(latents)
-            if self.output_mode == "layer0":
-                return self.output_projection(latents)
-            conditioned = latents[:, None, :, :] + self.layer_embedding[None, :, None, :]
-            return self.layerwise_output_projection(conditioned)
+            return self.output_projection(latents)
 
 
 class LearnedPrefix(nn.Module):

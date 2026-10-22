@@ -38,6 +38,13 @@ class _Tokenizer:
     pad_token_id = 0
     eos_token_id = 1
 
+    def encode(self, text, add_special_tokens=False):
+        return {
+            "<|im_start|>user\n": [8, 9],
+            "<|im_end|>": [5],
+            "<|im_start|>assistant\n": [6, 7],
+        }[text]
+
     def decode(self, ids, skip_special_tokens=True):  # pragma: no cover - not asserted
         return "x"
 
@@ -49,7 +56,7 @@ def _requirements_available() -> bool:
     return True
 
 
-def _model() -> ContextMemoryModel:
+def _model(readout_length=0) -> ContextMemoryModel:
     torch.manual_seed(0)
     config = Qwen3Config(
         vocab_size=VOCAB, hidden_size=16, num_hidden_layers=2, num_attention_heads=2,
@@ -59,6 +66,8 @@ def _model() -> ContextMemoryModel:
         Qwen3ForCausalLM(config), rank=2, alpha=4.0, memory_length=MEMORY_LENGTH,
         target_modules=["q_proj"], max_context_tokens=CONTEXT_LENGTH,
         trainable_dtype=torch.float32,
+        recon_user_token_ids=(2,), recon_answer_prefix_token_ids=(3, 4),
+        readout_length=readout_length,
     )
     model.eval()
     return model
@@ -109,6 +118,141 @@ def test_generation_is_deterministic_and_respects_the_token_budget():
 
     # A zero budget produces no tokens at all rather than a decode step.
     assert _generate(model, prefix, max_new_tokens=0).shape == (2, 0)
+
+
+def test_generation_prefill_projects_only_the_last_position():
+    if not _requirements_available():
+        return
+    model = _model()
+    prefix = _prefix(model, contexts=1)
+    original = model.qwen.forward
+    calls = []
+
+    def capture(*args, **kwargs):
+        output = original(*args, **kwargs)
+        calls.append((kwargs.get("logits_to_keep"), output.logits.size(1)))
+        return output
+
+    model.qwen.forward = capture
+    try:
+        _generate(model, prefix, max_new_tokens=1, group_by_context=False)
+    finally:
+        model.qwen.forward = original
+
+    assert calls[0] == (1, 1)
+
+
+def test_conversation_appends_turns_and_recompresses_memory():
+    if not _requirements_available():
+        return
+    model = _model(readout_length=2)
+    model.conversation_enabled = True
+    model.recompress_threshold = MEMORY_LENGTH + 2 + 11
+    model.max_recompress_tokens = MEMORY_LENGTH + 4
+    embedding = model.qwen.get_input_embeddings()
+    context = embedding(torch.randint(0, VOCAB, (1, CONTEXT_LENGTH)))
+    user_prefix = embedding(torch.tensor([[8, 9]]))
+    state = model.start_conversation(
+        context, torch.ones(1, CONTEXT_LENGTH, dtype=torch.bool), user_prefix,
+    )
+    initial_cache = state.past_key_values.get_seq_length()
+    assert initial_cache == user_prefix.size(1) + MEMORY_LENGTH
+    turn = torch.tensor([[8, 9, 2, 3, 5, 10, 6, 7, 11, 12]])
+    tokenizer = _Tokenizer()
+    tokenizer.eos_token_id = None
+    qwen_forward = model.qwen.forward
+    seen_inputs = []
+
+    def capture(*args, **kwargs):
+        seen_inputs.append(kwargs["inputs_embeds"].detach().clone())
+        return qwen_forward(*args, **kwargs)
+
+    model.qwen.forward = capture
+    resampler_forward = model.resampler.forward
+    resampler_inputs = []
+
+    def capture_resampler(hidden, mask):
+        resampler_inputs.append(hidden.detach().clone())
+        return resampler_forward(hidden, mask)
+
+    model.resampler.forward = capture_resampler
+    first = model.append_conversation_turn(state, turn, tokenizer, max_new_tokens=1)
+    model.qwen.forward = qwen_forward
+    model.resampler.forward = resampler_forward
+    assert first.shape == (1,)
+    assert state.history_ids.numel() == turn.numel() + first.numel()
+    assert state.past_key_values.get_seq_length() > initial_cache
+    assert seen_inputs[0].size(1) == 2
+    assert seen_inputs[1].size(1) == 2 + 6
+    assert resampler_inputs[0].size(1) == MEMORY_LENGTH + 2
+    torch.testing.assert_close(resampler_inputs[0][:, :MEMORY_LENGTH], state.memory_hidden)
+    before = state.memory.clone()
+    second = model.append_conversation_turn(state, turn, tokenizer, max_new_tokens=1)
+    assert second.shape == (1,)
+    assert state.history_ids.numel() == turn.numel() + second.numel()
+    assert state.past_key_values.get_seq_length() == user_prefix.size(1) + MEMORY_LENGTH + 4 + 2 + 6 + second.numel()
+    assert not torch.equal(state.memory, before)
+
+
+def test_start_conversation_rejects_batched_context():
+    if not _requirements_available():
+        return
+    model = _model()
+    model.conversation_enabled = True
+    embedding = model.qwen.get_input_embeddings()
+    context = embedding(torch.randint(0, VOCAB, (2, CONTEXT_LENGTH)))
+    try:
+        model.start_conversation(
+            context, torch.ones(2, CONTEXT_LENGTH, dtype=torch.bool),
+            embedding(torch.tensor([[8, 9]])),
+        )
+    except ValueError as error:
+        assert "batch size 1" in str(error)
+    else:
+        raise AssertionError("start_conversation must reject batches larger than one")
+
+
+def test_append_conversation_turn_rejects_batched_turn():
+    if not _requirements_available():
+        return
+    model = _model()
+    model.conversation_enabled = True
+    embedding = model.qwen.get_input_embeddings()
+    state = model.start_conversation(
+        embedding(torch.randint(0, VOCAB, (1, CONTEXT_LENGTH))),
+        torch.ones(1, CONTEXT_LENGTH, dtype=torch.bool),
+        embedding(torch.tensor([[8, 9]])),
+    )
+    try:
+        model.append_conversation_turn(
+            state, torch.tensor([[8, 9, 2, 3, 5, 10, 6, 7, 11, 12], [8, 9, 2, 3, 5, 10, 6, 7, 11, 12]]), _Tokenizer(), 1,
+        )
+    except ValueError as error:
+        assert "batch size 1" in str(error) or "one non-empty" in str(error)
+    else:
+        raise AssertionError("append_conversation_turn must reject batches larger than one")
+
+
+def test_append_conversation_turn_checks_generation_window():
+    if not _requirements_available():
+        return
+    model = _model(readout_length=2)
+    model.conversation_enabled = True
+    embedding = model.qwen.get_input_embeddings()
+    state = model.start_conversation(
+        embedding(torch.randint(0, VOCAB, (1, CONTEXT_LENGTH))),
+        torch.ones(1, CONTEXT_LENGTH, dtype=torch.bool),
+        embedding(torch.tensor([[8, 9]])),
+    )
+    model.window_limit = state.past_key_values.get_seq_length() + 10
+    try:
+        model.append_conversation_turn(
+            state, torch.tensor([[8, 9, 2, 3, 5, 10, 6, 7, 11, 12]]), _Tokenizer(), max_new_tokens=100,
+        )
+    except ValueError as error:
+        assert "window" in str(error)
+    else:
+        raise AssertionError("append_conversation_turn must enforce the generation window")
 
 
 def test_the_decode_loop_never_calls_a_sampler(monkeypatch):

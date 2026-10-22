@@ -6,4 +6,4 @@ _base_:
 checkpoint:
   output_dir: outputs/ablation_reader_embedding
 memory:
-  reader_memory_source: memory_embedding  # 消融变量：reader 读取 resampler 原始输出
+  question_resampler_info_source: embedding  # 消融变量：reader 直接读取输入 embedding

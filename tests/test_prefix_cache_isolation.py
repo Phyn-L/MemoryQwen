@@ -1,11 +1,11 @@
-"""Reconstruction must not mutate a prefix reused by validation QA chunks."""
+"""Reconstruction must not mutate memory embeddings reused by validation QA chunks."""
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from src.model import ContextMemoryModel
 
 
-def test_reconstruction_preserves_prefix():
+def test_reconstruction_preserves_memory_embeddings():
     # Deliberately CPU: this micro-model gains nothing from a GPU, and picking one whenever
     # torch.cuda.is_available() made the test fail with "CUDA out of memory" on a shared box.
     device = torch.device('cpu')
@@ -15,7 +15,8 @@ def test_reconstruction_preserves_prefix():
                       num_hidden_layers=2, num_attention_heads=4,
                       num_key_value_heads=2, head_dim=8)
     model = ContextMemoryModel(Qwen3ForCausalLM(cfg).to(dtype=dtype), memory_length=4,
-                     rank=2,                       max_context_tokens=12).to(device)
+                     rank=2, max_context_tokens=12,
+                     recon_user_token_ids=(2,), recon_answer_prefix_token_ids=(3, 4)).to(device)
     embed = model.qwen.get_input_embeddings()
     context = torch.randint(2,128,(2,12),device=device)
     question = torch.randint(2,128,(4,5),device=device)
@@ -25,14 +26,11 @@ def test_reconstruction_preserves_prefix():
         model.train(training)
         with torch.set_grad_enabled(training):
             prefix = model.encode_context_prefix(embed(context), context.bool())
-            saved = [(layer.keys.clone(), layer.values.clone()) for layer in prefix.memory_cache.layers]
+            saved = prefix.memory_embedding.clone()
             baseline = model.forward_with_memory_prefix(prefix, indices, embed(question), question.bool(),
                                                     embed(answer), answer.bool(), answer)
             recon = model._distillation_student_hidden(prefix, embed(context), context.bool())
-            assert prefix.memory_cache.get_seq_length() == 4
-            for layer, (keys, values) in zip(prefix.memory_cache.layers, saved, strict=True):
-                torch.testing.assert_close(layer.keys, keys)
-                torch.testing.assert_close(layer.values, values)
+            torch.testing.assert_close(prefix.memory_embedding, saved)
             for _ in range(2):
                 output = model.forward_with_memory_prefix(prefix, indices, embed(question), question.bool(),
                                                       embed(answer), answer.bool(), answer)
@@ -42,4 +40,4 @@ def test_reconstruction_preserves_prefix():
                 assert model.context_resampler.latents.grad is not None
                 assert torch.isfinite(model.context_resampler.latents.grad).all()
                 assert model.context_resampler.latents.grad.abs().sum() > 0
-    print(f'cache isolation, repeated QA and backward passed on {device}, {dtype}')
+    print(f'memory embedding isolation, repeated QA and backward passed on {device}, {dtype}')

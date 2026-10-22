@@ -35,7 +35,6 @@ def configure(
     rows: int,
     max_context_tokens: int,
     max_question_tokens: int,
-    max_conversation_tokens: int,
     max_answer_tokens: int,
     machine: str,
 ) -> TrainConfig:
@@ -48,7 +47,6 @@ def configure(
     # Explicit stress-test budget: context / question / answer.
     cfg.data.max_context_tokens = max_context_tokens
     cfg.data.max_question_tokens = max_question_tokens
-    cfg.data.max_conversation_tokens = max_conversation_tokens
     cfg.data.max_answer_tokens = max_answer_tokens
     cfg.data.train_stage = "only_qa"
     cfg.loss.distill_weight = 0.0
@@ -101,7 +99,6 @@ def main() -> None:
     parser.add_argument("--machine", default="4090")
     parser.add_argument("--max-context-tokens", type=int, default=4096)
     parser.add_argument("--max-question-tokens", type=int, default=96)
-    parser.add_argument("--max-conversation-tokens", type=int, default=768)
     parser.add_argument("--max-answer-tokens", type=int, default=64)
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--worker-batch-size", type=int, default=None,
@@ -136,7 +133,6 @@ def main() -> None:
                     "--machine", args.machine,
                     "--max-context-tokens", str(args.max_context_tokens),
                     "--max-question-tokens", str(args.max_question_tokens),
-                    "--max-conversation-tokens", str(args.max_conversation_tokens),
                     "--max-answer-tokens", str(args.max_answer_tokens),
                     "--worker-batch-size", str(batch_size),
                     "--worker-output", str(worker_output),
@@ -171,7 +167,6 @@ def main() -> None:
                 "rows": args.rows,
                 "max_context_tokens": args.max_context_tokens,
                 "max_question_tokens": args.max_question_tokens,
-                "max_conversation_tokens": args.max_conversation_tokens,
                 "max_answer_tokens": args.max_answer_tokens,
                 "results": all_results,
                 "maximum_successful_batch_size": max(successful) if successful else None,
@@ -193,7 +188,6 @@ def main() -> None:
             args.rows,
             args.max_context_tokens,
             args.max_question_tokens,
-            args.max_conversation_tokens,
             args.max_answer_tokens,
             args.machine,
         )
@@ -215,8 +209,7 @@ def main() -> None:
         print(f"[{dataset_name}] model={cfg.model.name_or_path}")
         print(f"[{dataset_name}] sample_mode={args.sample_mode} rows={len(rows)}")
         print(f"[{dataset_name}] limits=context={cfg.data.max_context_tokens}, "
-              f"question={cfg.data.max_question_tokens}, answer={cfg.data.max_answer_tokens}, "
-              f"conversation={cfg.data.max_conversation_tokens}")
+              f"question={cfg.data.max_question_tokens}, answer={cfg.data.max_answer_tokens}")
         dataset_results = []
         for batch_size in batch_sizes:
             if batch_size > len(rows):
@@ -297,7 +290,6 @@ def main() -> None:
             "rows": args.rows,
             "max_context_tokens": args.max_context_tokens,
             "max_question_tokens": args.max_question_tokens,
-            "max_conversation_tokens": args.max_conversation_tokens,
             "max_answer_tokens": args.max_answer_tokens,
             "results": results,
         }, indent=2) + "\n")

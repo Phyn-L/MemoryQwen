@@ -1,6 +1,6 @@
 # MemoryQwen Agent 上手指南
 
-本文件是唯一的项目说明文档，按当前代码与 YAML 维护；根目录 `AGENTS.md` 单独保留为工作指令。更新日期：2026-10-17。不要新增重复说明文档，也不要把历史改造过程作为当前操作指南。
+本文件是唯一的项目说明文档，按当前代码与 YAML 维护；根目录 `AGENTS.md` 单独保留为工作指令。更新日期：2026-10-22。不要新增重复说明文档，也不要把历史改造过程作为当前操作指南。
 
 ## 环境与常用入口
 
@@ -55,13 +55,23 @@ DataLoader 的运行参数按用途分开配置：`data.loader.train_num_workers
 
 `build_1qa.py` 不做训练长度过滤和条数截断，只丢弃结构上无效的 context/QA；MS MARCO 只使用 `is_selected=1` 的 passage。context 不借用其他行文本。数据缺失划分或该划分无可用行时按 `test → validation → train` 回退，并记录实际来源。
 
+Conversation 数据有独立的 `memory.conversation` 重压缩配置；不再配置 `max_conversation_tokens`。`data.max_question_tokens` 仍用于普通 QA 问题长度过滤，同时当前 `src/data.py` 还会对满足条件的短单轮 prompt 调用 `_trim_prompt_parts`，因此不要把它描述为已全局删除。
+
 训练启动会补建缺失或过期的过滤缓存；只有指纹匹配才跳过 loader 再过滤。构建器和 loader 共用 `filter_rows_batch`，不要维护两套规则。sortish 优先复用长度 sidecar；当前长度测量保持串行。`train_max_samples`、`validation_max_samples` 是 loader 上限，不是缓存构建上限。
+
+训练/评测 QA 共用 `src/qa_prompt.py::format_question`。RACE 的 question 文本为 `question\nOptions:\n<option 1>\n<option 2>...`，回答目标是完整选项文本；该格式不追加 `Answer:`。ICL 评测由 `inference.prompt_mode` 选择 `instruct` 或 `raw`，默认 `instruct`。`instruct` 使用 system 指令和可选 demonstrations；`raw` 只在 user 消息中放 `context + 空行 + question`，不使用 system 指令和 demonstrations。两者默认都通过模型原生 chat template 渲染；raw 要求 `num_shots=0`。
 
 ## 模型、训练与评测
 
-长 context 经 Qwen 编码并由 context resampler 压缩成固定 memory，reader 从 memory 前缀回答问题或重建 context。Qwen 基础权重冻结，配置的手写 LoRA、resampler 和 `recon_task_embedding` 可训练。QA 使用冻结 Qwen token embedding 和 chat template，**没有 QA task embedding**。默认 backbone 为 BF16，可训练参数为 FP32；修改时注意 dtype 转换与梯度流。
+长 context 经 Qwen 编码并由 context resampler 压缩成固定长度的 memory embedding。context encoder 可以融合多个 backbone 层；多层融合前统一经过共享的 final norm，避免不同层的表示尺度直接混合。当前只保留单一 memory 输出，不再支持 layerwise memory 输出、逐层 projection、layer gates 或 decoder 注入 hook。
 
-`_transformer_body` 仅调用不带 LM head 的解码器主体；缓存该主体时不要注册重复 submodule。生成采用贪心解码。
+Qwen 基础权重冻结，配置的手写 LoRA、context/question resampler 和 `recon_task_embedding` 可训练。QA 使用冻结 Qwen token embedding 和 chat template，没有 QA task embedding。默认 backbone 为 BF16，可训练参数为 FP32；修改时注意 dtype 转换与梯度流。
+
+普通 QA 的输入布局为 `[user prefix] [memory] [question] [readout] [assistant header] [answer]`。`readout_mode` 支持 `memory_question`、`learned_prefix` 和 `off`：`memory_question` 使用 question resampler；`question_resampler_info_source` 为 `hidden` 时输入 memory/question 的 backbone 最后一层 hidden，为 `embedding` 时直接拼接 memory embedding/question token embedding。`learned_prefix` 只使用可学习 prefix，`off` 不创建 question resampler；这两个模式会忽略 `question_resampler_info_source` 和 `readout_keep_question_tokens`。后者只在 `memory_question` 下控制回答序列是否保留原始 question token。Recon 使用接近 QA 的 user-side memory/task 布局，再在 assistant turn 中重建 context。
+
+`_transformer_body` 仅调用不带 LM head 的解码器主体。生成 prefill 使用 `logits_to_keep=1`，避免物化不需要的全量词表 logits；生成采用贪心解码。
+
+多轮 conversation API 由 `memory.conversation` 控制，默认关闭。`start_conversation` 对 context/resampler 运行一次，并用 `[user prefix, memory]` 初始化 decoder cache；`append_conversation_turn` 追加渲染后的 user turn、readout 和 assistant header，再生成回答。达到 `recompress_threshold` 或窗口预算不足时，只使用旧 memory 与已完成历史 token 重压缩，不重新读取原始 context；重压缩后重建 cache。当前 API 只支持 batch size 1。
 
 有效 batch 为 `training.batch_size × gradient_accumulation_steps × world_size`。训练步、调度、评测间隔均按优化器步计。读取数据、训练、QA/Recon 评测使用 Rich 进度显示；训练条包含学习率，启动日志打印模型参数摘要和 checkpoint 间隔。
 
@@ -88,30 +98,4 @@ training:
 
 当前 `every_n_layers=N` 是**稀疏单层开关间隔**：只有 `index % N == 0` 的层使用 checkpoint；不是连续 N 层分段。N=1 表示逐层 checkpoint。PyTorch 连续分段只留在基准脚本中，不进入训练路径。
 
-2026-10-16 实测记录：RTX 4090、Qwen3-1.7B（28 层）、BF16 backbone / FP32 trainable，batch=2、context=1536、memory=64、question/answer 各 32 token、无 padding、联合 QA+Recon loss。峰值为 `torch.cuda.max_memory_allocated`；耗时为 5 次前后向中位数，不含 optimizer、数据和分布式同步。结果只适用于该工作负载。
-
-
-| 实现                             | N | 峰值 allocated | 秒/前后向 |
-| -------------------------------- | -: | -------------: | --------: |
-| Transformers native sparse layer | 1 |      12.00 GiB |     0.960 |
-| Transformers native sparse layer | 2 |      17.97 GiB |     0.900 |
-| Transformers native sparse layer | 4 |      20.93 GiB |     0.873 |
-| Transformers native sparse layer | 6 |      21.78 GiB |     0.864 |
-| PyTorch contiguous segments      | 1 |      11.99 GiB |     0.962 |
-| PyTorch contiguous segments      | 2 |      11.83 GiB |     0.965 |
-| PyTorch contiguous segments      | 4 |      11.74 GiB |     0.965 |
-| PyTorch contiguous segments      | 6 |      11.71 GiB |     0.968 |
-
-该实验中，稀疏单层 N 越大显存越高；连续分段相对原生 N=1 最多省约 2.4%，没有速度收益，因此训练保留原生实现。
-
-```bash
-PYTHONPATH=. python scripts/benchmark_context_checkpointing.py \
-  --config configs/train_baseline.yaml --device cuda:0 \
-  --batch-size 2 --sequence-length 1536 --intervals 1 2 4 6 \
-  --warmup 1 --iterations 5 \
-  --output outputs/benchmarks/context_checkpointing_joint_20261016.jsonl
-```
-
-已有 CPU 测试对比无 checkpoint 路径的 loss 和所有可训练参数梯度，覆盖多个间隔、padding、LoRA、Dropout 和联合目标。BF16 CUDA 路径报告误差，不要求逐位一致。CPU 测试通过不代表完整多卡训练或显存测量通过；修改模型路径后按需补 GPU 验证。
-
-本次整理验证（2026-10-17，`shine`）：297 tests passed，`ruff check .` 与 `git diff --check` 通过；未重新运行 GPU 基准或完整训练。
+已有 CPU 测试对比无 checkpoint 路径的 loss 和所有可训练参数梯度，覆盖多个间隔、padding、LoRA、Dropout 和联合目标。BF16 CUDA 路径允许数值误差；CPU 测试通过不代表完整多卡训练或显存测量通过。修改模型路径后按需补 GPU 验证。

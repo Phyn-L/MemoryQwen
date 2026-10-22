@@ -13,7 +13,7 @@ MACHINE=${MACHINE:-4090}
 NUM_PROCESSES=${NUM_PROCESSES:-}
 DRY_RUN=0
 
-RUNS=(01_memory_question 02_memory_only 03_learned_prefix 04_off)
+RUNS=(01_memory_question 02_learned_prefix 03_off)
 
 usage() {
   echo "Usage: $0 [--base-config PATH] [--output-root PATH] [--machine NAME] [--num-processes N] [--dry-run]"
@@ -81,9 +81,8 @@ base.setdefault("loss", {}).update(
 base.setdefault("training", {})["deterministic"] = True
 runs = {
     "01_memory_question": {"readout_mode": "memory_question"},
-    "02_memory_only": {"readout_mode": "memory_only"},
-    "03_learned_prefix": {"readout_mode": "learned_prefix"},
-    "04_off": {"readout_mode": "off"},
+    "02_learned_prefix": {"readout_mode": "learned_prefix"},
+    "03_off": {"readout_mode": "off"},
 }
 
 for name, overrides in runs.items():

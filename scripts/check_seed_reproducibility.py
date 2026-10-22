@@ -27,7 +27,8 @@ def worker(args):
     backbone = Qwen3ForCausalLM(config).to(dtype=getattr(torch, args.dtype))
     model = ContextMemoryModel(backbone, rank=4, alpha=8, memory_length=8,
                      max_context_tokens=64, distillation=True,
-                     dropout=0.1).to(args.device).train()
+                     dropout=0.1, recon_user_token_ids=(2,),
+                     recon_answer_prefix_token_ids=(3, 4)).to(args.device).train()
     for name, p in model.named_parameters():
         p.requires_grad_(is_trainable_parameter_name(name))
     params = [p for p in model.parameters() if p.requires_grad]

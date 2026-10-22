@@ -3,6 +3,10 @@ _base_:
 - harness.yaml
 - models/qwen3-1.7b.yaml
 memory:
+  conversation:
+    enabled: false
+    recompress_threshold: 2048
+    max_recompress_tokens: 2048
   # Fixed-length context writer
   memory_length: 64  # 写入固定 memory 的 slot 数
   context_layer_indices: [-1]  # 用于构造 context 表示的 Transformer 层索引
@@ -11,13 +15,12 @@ memory:
   memory_resampler_hidden_size: 512  # memory resampler 隐藏维度
   memory_resampler_ffn_ratio: 4  # memory resampler 前馈层扩展倍数
   memory_resampler_use_self_attention: true
-  memory_resampler_output_mode: layer0  # memory resampler 输出模式
-  reader_memory_source: memory_hidden  # reader 使用的 memory 表示来源
 
   # Question-conditioned readout
   readout_mode: memory_question
   readout_length: 16
-  readout_keep_question_tokens: true  # readout 开启时，answer 是否继续保留原始 question token
+  question_resampler_info_source: hidden  # 仅 memory_question 使用
+  readout_keep_question_tokens: true  # 仅 memory_question 使用
   question_resampler_hidden_size: 512  # question resampler 隐藏维度
   question_resampler_layers: 2  # question resampler 层数
   question_resampler_heads: 4  # question resampler 注意力头数

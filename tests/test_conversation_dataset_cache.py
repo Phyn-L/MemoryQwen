@@ -136,7 +136,6 @@ def test_question_and_answer_lengths_are_filtered_before_caching(tmp_path: Path)
         max_context_tokens=4,
         max_input_tokens=8,
         max_question_tokens=3,
-        max_conversation_tokens=8,
         max_answer_tokens=3,
         tokenizer_filter_batch_size=2,
     )
@@ -168,7 +167,6 @@ def test_the_serial_and_parallel_filters_keep_the_same_rows(tmp_path: Path):
             tokenizer=_Tokenizer(),
             max_context_tokens=4,
             max_input_tokens=8,
-            max_conversation_tokens=16,
             allow_empty=True,
             num_workers=workers,
         )

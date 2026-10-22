@@ -1,4 +1,4 @@
-"""Question-conditioned read-out over the cached memory (C3).
+"""Question-conditioned read-out over memory embeddings (C3).
 
 Run with either ``python tests/test_readout.py`` or ``pytest tests``.
 
@@ -169,6 +169,7 @@ def _model(readout_length=0, readout_mode="memory_question"):
         readout_length=readout_length, question_resampler_layers=2,
         question_resampler_heads=4, question_resampler_ffn_ratio=2,
         readout_mode=readout_mode,
+        recon_user_token_ids=(2,), recon_answer_prefix_token_ids=(3, 4),
     )
     for name, parameter in model.named_parameters():
         parameter.requires_grad = is_trainable_parameter_name(name)
@@ -189,12 +190,18 @@ def _batch(vocab=64, B=2, L=10, Q=4, A=5):
 
 def _forward(model, batch, **kwargs):
     embedding = model.qwen.get_input_embeddings()
+    user_ids = torch.tensor([[2, 3]] * batch["context_ids"].size(0))
+    header_ids = torch.tensor([[4, 5]] * batch["context_ids"].size(0))
     return model(
         embedding(batch["context_ids"]), batch["context_mask"],
         embedding(batch["question_ids"]), batch["question_mask"],
         embedding(batch["answer_ids"]), batch["answer_mask"], batch["answer_ids"],
         torch.arange(batch["context_ids"].size(0)),
         context_ids=batch["context_ids"],
+        question_prefix_embeds=embedding(user_ids),
+        question_prefix_mask=torch.ones_like(user_ids, dtype=torch.bool),
+        answer_prefix_embeds=embedding(header_ids),
+        answer_prefix_mask=torch.ones_like(header_ids, dtype=torch.bool),
         **kwargs,
     )
 
@@ -206,8 +213,8 @@ def test_readout_off_keeps_the_historical_model():
     model = _model(readout_length=0)
     assert model.resampler is None
     output = _forward(model, _batch())
-    assert output.logits.shape[:2] == (2, 4 + 5), "QA has no task embedding"
-    assert output.labels.shape == (2, 9)
+    assert output.logits.shape[:2] == (2, 2 + 4 + 4 + 2 + 5), "QA includes memory and chat headers"
+    assert output.labels.shape == (2, 17)
     # the resampler name is still wired into the trainable-parameter rule
     assert is_trainable_parameter_name("resampler.latents")
 
@@ -220,10 +227,10 @@ def test_readout_is_conditioned_and_trains_the_resampler():
     assert model.resampler is not None
     batch = _batch()
     output = _forward(model, batch)
-    assert output.logits.shape[:2] == (2, 4 + 3 + 5)
-    assert output.labels.shape == (2, 12)
-    assert bool((output.labels[:, :7] == -100).all())
-    assert torch.equal(output.labels[:, 7:], batch["answer_ids"])
+    assert output.logits.shape[:2] == (2, 2 + 4 + 4 + 3 + 2 + 5)
+    assert output.labels.shape == (2, 20)
+    assert bool((output.labels[:, :15] == -100).all())
+    assert torch.equal(output.labels[:, 15:], batch["answer_ids"])
     loss = output.logits.float().logsumexp(-1).mean()      # any differentiable scalar
     loss.backward()
     grads = [p.grad for p in model.resampler.parameters()]
@@ -288,25 +295,16 @@ def test_generation_without_readout_still_works():
 
 
 
-def test_memory_only_input_dependency():
-    module, hidden, mask = _resampler(mode="memory_only")
-    hidden.requires_grad_()
-    out = module(hidden, mask)
-    assert not torch.allclose(out, module(hidden + torch.randn_like(hidden), mask))
-    out.square().sum().backward()
-    assert hidden.grad is not None and hidden.grad.abs().sum() > 0
-
-
 def test_new_modes_forward_gradient_and_generation():
-    for mode in ("memory_only", "learned_prefix", "off"):
+    for mode in ("learned_prefix", "off"):
         model = _model(3, mode)
         batch = _batch()
         output = _forward(model, batch)
         extra = 0 if mode == "off" else 3
-        assert output.logits.shape[1] == 9 + extra
-        assert torch.equal(output.labels[:, 4 + extra:], batch["answer_ids"])
+        assert output.logits.shape[1] == 17 + extra
+        assert torch.equal(output.labels[:, 12 + extra:], batch["answer_ids"])
         if extra:
-            assert (output.labels[:, 4:7] == -100).all()
+            assert (output.labels[:, 12:15] == -100).all()
         # The training path is the only loss path now: per-row means over the memory-prefixed
         # forward, with no [rows, tokens, vocab] logits materialised.
         graded = _forward(model, batch, loss_only=True)
@@ -341,6 +339,10 @@ def test_new_modes_forward_gradient_and_generation():
             tokens = model.generate_answers_with_prefix(
                 prefix, torch.arange(2), batch["question_ids"], batch["question_mask"],
                 Tokenizer(), max_new_tokens=3,
+                question_prefix_ids=torch.tensor([[2, 3]] * 2),
+                question_prefix_mask=torch.ones(2, 2, dtype=torch.bool),
+                answer_prefix_ids=torch.tensor([[4, 5]] * 2),
+                answer_prefix_mask=torch.ones(2, 2, dtype=torch.bool),
             )
             assert tokens.shape == (2, 3)
 
@@ -350,9 +352,9 @@ def test_readout_can_remove_question_from_answer_input():
     model.readout_keep_question_tokens = False
     batch = _batch()
     output = _forward(model, batch)
-    assert output.logits.shape[1] == 3 + 5
-    assert torch.equal(output.labels[:, 3:], batch["answer_ids"])
-    assert (output.labels[:, :3] == -100).all()
+    assert output.logits.shape[1] == 2 + 4 + 3 + 2 + 5
+    assert torch.equal(output.labels[:, 11:], batch["answer_ids"])
+    assert (output.labels[:, :11] == -100).all()
     model.eval()
     embedding = model.qwen.get_input_embeddings()
     with torch.no_grad():
@@ -363,13 +365,17 @@ def test_readout_can_remove_question_from_answer_input():
         generated = model.generate_answers_with_prefix(
             prefix, torch.arange(2), batch["question_ids"], batch["question_mask"],
             Tokenizer(), max_new_tokens=3,
+            question_prefix_ids=torch.tensor([[2, 3]] * 2),
+            question_prefix_mask=torch.ones(2, 2, dtype=torch.bool),
+            answer_prefix_ids=torch.tensor([[4, 5]] * 2),
+            answer_prefix_mask=torch.ones(2, 2, dtype=torch.bool),
         )
     assert generated.shape == (2, 3)
 
 
 def test_readout_mode_config_validation():
     from utils.config import TrainConfig
-    for mode in ("memory_question", "memory_only", "learned_prefix", "off"):
+    for mode in ("memory_question", "learned_prefix", "off"):
         cfg = TrainConfig()
         cfg.memory.readout_mode = mode
         cfg.memory.readout_length = 3
@@ -378,6 +384,23 @@ def test_readout_mode_config_validation():
     import pytest
     with pytest.raises(ValueError, match="readout_mode"):
         cfg.validate()
+
+
+def test_question_resampler_options_are_ignored_outside_memory_question():
+    from utils.config import TrainConfig
+    cfg = TrainConfig()
+    cfg.memory.readout_mode = "learned_prefix"
+    cfg.memory.question_resampler_info_source = "invalid-but-ignored"
+    cfg.memory.readout_keep_question_tokens = False
+    cfg.validate()
+    assert cfg.memory.question_resampler_info_source == "invalid-but-ignored"
+    model = ContextMemoryModel(
+        _tiny_qwen3(), readout_mode="learned_prefix", readout_length=3,
+        question_resampler_info_source="invalid-but-ignored",
+        readout_keep_question_tokens=False,
+    )
+    assert model.readout_keep_question_tokens is True
+    assert model.question_resampler_info_source is None
 
 
 if __name__ == "__main__":

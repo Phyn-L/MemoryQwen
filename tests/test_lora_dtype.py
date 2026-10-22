@@ -109,6 +109,7 @@ def _fake_metaloRA():
                                 target_modules=["q_proj"],
         max_context_tokens=8,
         trainable_dtype=torch.float32,
+        recon_user_token_ids=(2,), recon_answer_prefix_token_ids=(3, 4),
             )
 
 

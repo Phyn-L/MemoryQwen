@@ -9,7 +9,6 @@ memory:
   memory_resampler_heads: 8
   memory_resampler_hidden_size: 1024
   memory_resampler_ffn_ratio: 4
-  memory_resampler_output_mode: layer0
 training:
   batch_size: 4
   gradient_accumulation_steps: 1

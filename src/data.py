@@ -45,7 +45,6 @@ def filter_rows_batch(rows, tokenizer, options, lengths_out: list[int] | None = 
         max_context_tokens,
         filter_long_context,
         filter_no_conversation,
-        max_conversation_tokens,
         max_question_tokens,
         max_answer_tokens,
     ) = options
@@ -71,12 +70,7 @@ def filter_rows_batch(rows, tokenizer, options, lengths_out: list[int] | None = 
                                        truncation=True, max_length=max_context_tokens + 1).input_ids)
                 if not 0 < length <= max_context_tokens:
                     continue
-            questions = [
-                render_conversation(tokenizer, t.messages)
-                if getattr(tokenizer, "apply_chat_template", None)
-                else t.question
-                for t in turns
-            ]
+            questions = [t.question for t in turns]
             qids = tokenizer(
                 questions, add_special_tokens=False, truncation=True,
                 max_length=max_question_tokens + 1,
@@ -90,11 +84,6 @@ def filter_rows_batch(rows, tokenizer, options, lengths_out: list[int] | None = 
                 or not 0 < len(a) <= max_answer_tokens
                 for q, a in zip(qids, aids, strict=True)
             ) and not raw.get("qa_pairs"):
-                continue
-            if (
-                sum(map(len, qids)) + sum(map(len, aids)) > max_conversation_tokens
-                and not raw.get("qa_pairs")
-            ):
                 continue
         accepted.append(raw)
         if lengths_out is not None:
@@ -118,7 +107,7 @@ def _filter_row_batch_in_worker(rows):
 
 def filter_options(
     max_context_tokens, filter_long_context, filter_no_conversation,
-    max_conversation_tokens, max_question_tokens, max_answer_tokens,
+    max_question_tokens, max_answer_tokens,
 ):
     """The rule set :func:`filter_rows_batch` expects, in one place.
 
@@ -127,7 +116,7 @@ def filter_options(
     """
     return (
         max_context_tokens, filter_long_context, filter_no_conversation,
-        max_conversation_tokens, max_question_tokens, max_answer_tokens,
+        max_question_tokens, max_answer_tokens,
     )
 
 
@@ -495,7 +484,7 @@ def read_context_lengths(dataset, tokenizer):
 class ConversationDataset(Dataset):
     """Materialized conversation dataset backed by a filtered JSONL cache."""
 
-    CACHE_VERSION = 4
+    CACHE_VERSION = 5
     #: Files at least this large get a "Reading <file>" progress bar. The rows are parsed in
     #: this process before training starts, which for the built cache is ~18 s on a 1.6 GB
     #: train.jsonl; without the bar that gap looks like a hang between the `[data]` line and
@@ -508,7 +497,7 @@ class ConversationDataset(Dataset):
                  max_input_tokens=40960, max_samples=None, filter_long_context=True,
                  filter_no_conversation=True, cache_dir: str | Path | None = None,
                  allow_empty=False, tokenizer_filter_batch_size=2048,
-                 max_conversation_tokens=768, max_question_tokens=96,
+                 max_question_tokens=96,
                  max_answer_tokens=64, num_workers=0, pre_filtered: bool = False):
         """``pre_filtered`` says the file was already built with *these* filter options.
 
@@ -535,7 +524,6 @@ class ConversationDataset(Dataset):
             'mtime_ns': self.source_path.stat().st_mtime_ns,
             'max_context_tokens': max_context_tokens,
             'max_input_tokens': max_input_tokens,
-            'max_conversation_tokens': max_conversation_tokens,
             'max_question_tokens': max_question_tokens,
             'max_answer_tokens': max_answer_tokens,
             'max_samples': max_samples,
@@ -556,7 +544,7 @@ class ConversationDataset(Dataset):
             self._rows = self._filter_rows(
                 tokenizer, max_context_tokens, max_samples, filter_long_context,
                 filter_no_conversation, tokenizer_filter_batch_size,
-                max_conversation_tokens, max_question_tokens, max_answer_tokens,
+                max_question_tokens, max_answer_tokens,
                 num_workers)
             if cache_path:
                 self._write_rows(cache_path, self._rows)
@@ -631,7 +619,7 @@ class ConversationDataset(Dataset):
 
     def _filter_rows(self, tokenizer, max_context_tokens, max_samples,
                      filter_long_context, filter_no_conversation, batch_size,
-                     max_conversation_tokens, max_question_tokens, max_answer_tokens,
+                     max_question_tokens, max_answer_tokens,
                      num_workers):
         """Read the JSONL once and keep the rows that pass ``filter_rows_batch``.
 
@@ -641,7 +629,7 @@ class ConversationDataset(Dataset):
         """
         options = filter_options(
             max_context_tokens, filter_long_context, filter_no_conversation,
-            max_conversation_tokens, max_question_tokens, max_answer_tokens,
+            max_question_tokens, max_answer_tokens,
         )
         chunk_size = max(32, batch_size)
         rows = []
@@ -856,6 +844,40 @@ def _encode(tokenizer, texts, max_length, padding_side=None):
         tokenizer.padding_side = previous
 
 
+def _user_prefix_text(text):
+    """Return the rendered conversation prefix through its first user header."""
+    marker = "<|im_start|>user\n"
+    boundary = text.find(marker)
+    if boundary < 0:
+        return ""
+    boundary += len(marker)
+    return text[:boundary]
+
+
+def split_chat_prompt(text):
+    """Split memory insertion prefix, complete chat history, and generation header."""
+    prefix = _user_prefix_text(text)
+    boundary = text.rfind("<|im_end|>")
+    if boundary < 0:
+        return prefix, text[len(prefix):], ""
+    return prefix, text[len(prefix):boundary], text[boundary:]
+
+
+def _trim_prompt_parts(prefix_ids, suffix_ids, max_length, tokenizer):
+    """Cap a single-turn prompt while retaining the user header and latest question text."""
+    if len(prefix_ids) + len(suffix_ids) <= max_length:
+        return prefix_ids, suffix_ids
+    header_ids = tokenizer("<|im_start|>user\n", add_special_tokens=False).input_ids
+    if not prefix_ids:
+        return [], suffix_ids[-max_length:]
+    if not header_ids or prefix_ids[-len(header_ids):] != header_ids:
+        raise ValueError("tokenized QA prefix does not end at the user header")
+    suffix_budget = max(0, max_length - len(header_ids))
+    suffix_ids = suffix_ids[-suffix_budget:] if suffix_budget else []
+    prefix_budget = max_length - len(suffix_ids)
+    return prefix_ids[-prefix_budget:], suffix_ids
+
+
 def _turn_rng(record, epoch):
     """Deterministic RNG for the QA turns of one context in one epoch.
 
@@ -971,58 +993,104 @@ def collate_context_records(
         rendered.append(text)
     # The template already contains role markers and the assistant generation marker.
     qa_rendered = [text for text, task in zip(rendered, task_ids, strict=True) if task == 1]
+    qa_turns = [turn for turn, task in zip(selected, task_ids, strict=True) if task == 1]
+    prefix_rows, suffix_rows, header_rows = [], [], []
     if qa_rendered:
-        previous_truncation = tokenizer.truncation_side
-        tokenizer.truncation_side = "left"
+        prefix_texts = [_user_prefix_text(text) for text in qa_rendered]
+        body_texts = ["".join(split_chat_prompt(text)[:2]) for text in qa_rendered]
+        all_encoded = tokenizer(qa_rendered, add_special_tokens=False, padding=True)
+        prefix_encoded = tokenizer(prefix_texts, add_special_tokens=False, padding=True)
+        body_encoded = tokenizer(body_texts, add_special_tokens=False, padding=True)
+        all_ids = [
+            [value for value, keep in zip(ids, mask, strict=True) if keep]
+            for ids, mask in zip(all_encoded.input_ids, all_encoded.attention_mask, strict=True)
+        ]
+        encoded_prefixes = [
+            [value for value, keep in zip(ids, mask, strict=True) if keep]
+            for ids, mask in zip(
+                prefix_encoded.input_ids, prefix_encoded.attention_mask, strict=True
+            )
+        ]
+        encoded_bodies = [
+            [value for value, keep in zip(ids, mask, strict=True) if keep]
+            for ids, mask in zip(body_encoded.input_ids, body_encoded.attention_mask, strict=True)
+        ]
+    else:
+        all_ids, encoded_prefixes, encoded_bodies = [], [], []
+    for row_index, (ids, prefix, body) in enumerate(
+        zip(all_ids, encoded_prefixes, encoded_bodies, strict=True)
+    ):
+        ids, prefix = list(ids), list(prefix)
+        if ids[:len(prefix)] != prefix:
+            raise ValueError("chat tokenizer does not preserve the user-header token boundary")
+        if ids[:len(body)] != body:
+            raise ValueError("chat tokenizer does not preserve the user-end token boundary")
+        suffix = ids[len(prefix):len(body)]
+        turn = qa_turns[row_index]
+        single_turn_qa = len(turn.messages) <= 2 and turn.dataset != "race"
+        if single_turn_qa:
+            prefix, suffix = _trim_prompt_parts(
+                prefix, suffix, max_question_tokens, tokenizer
+            )
+        prefix_rows.append(prefix)
+        suffix_rows.append(suffix)
+        header_rows.append(ids[len(body):])
+    if qa_rendered:
+        previous_padding = tokenizer.padding_side
+        tokenizer.padding_side = question_padding_side
         try:
-            qa_encoded = _encode(
-                tokenizer,
-                qa_rendered,
-                max_question_tokens,
-                padding_side=question_padding_side,
+            prefix_encoded = tokenizer.pad(
+                {"input_ids": prefix_rows}, padding=True, return_tensors="pt",
+            )
+            suffix_encoded = tokenizer.pad(
+                {"input_ids": suffix_rows}, padding=True, return_tensors="pt",
+            )
+            header_encoded = tokenizer.pad(
+                {"input_ids": header_rows}, padding=True, return_tensors="pt",
             )
         finally:
-            tokenizer.truncation_side = previous_truncation
-        qa_turns = [turn for turn, task in zip(selected, task_ids, strict=True) if task == 1]
-        if any(turn.dataset == "race" for turn in qa_turns):
-            # RACE must retain every option; keep the configured cap for other datasets.
-            token_rows = [
-                tokenizer(text, add_special_tokens=False).input_ids
-                if turn.dataset == "race" else ids[mask.bool()].tolist()
-                for text, turn, ids, mask in zip(
-                    qa_rendered, qa_turns, qa_encoded.input_ids,
-                    qa_encoded.attention_mask, strict=True,
-                )
-            ]
-            previous_padding = tokenizer.padding_side
-            tokenizer.padding_side = question_padding_side
-            try:
-                qa_encoded = tokenizer.pad(
-                    {"input_ids": token_rows}, padding=True, return_tensors="pt",
-                )
-            finally:
-                tokenizer.padding_side = previous_padding
-        q = torch.zeros((len(selected), qa_encoded.input_ids.size(1)), dtype=qa_encoded.input_ids.dtype)
-        q_mask = torch.zeros((len(selected), qa_encoded.attention_mask.size(1)), dtype=torch.bool)
+            tokenizer.padding_side = previous_padding
+        q_prefix = torch.zeros(
+            (len(selected), prefix_encoded.input_ids.size(1)),
+            dtype=prefix_encoded.input_ids.dtype,
+        )
+        q_prefix_mask = torch.zeros_like(q_prefix, dtype=torch.bool)
+        q = torch.zeros(
+            (len(selected), suffix_encoded.input_ids.size(1)),
+            dtype=suffix_encoded.input_ids.dtype,
+        )
+        q_mask = torch.zeros_like(q, dtype=torch.bool)
+        q_header = torch.zeros(
+            (len(selected), header_encoded.input_ids.size(1)), dtype=q.dtype,
+        )
+        q_header_mask = torch.zeros_like(q_header, dtype=torch.bool)
         qa_rows = torch.tensor([task == 1 for task in task_ids])
-        q[qa_rows] = qa_encoded.input_ids
-        q_mask[qa_rows] = qa_encoded.attention_mask.bool()
+        q_prefix[qa_rows] = prefix_encoded.input_ids
+        q_prefix_mask[qa_rows] = prefix_encoded.attention_mask.bool()
+        q[qa_rows] = suffix_encoded.input_ids
+        q_mask[qa_rows] = suffix_encoded.attention_mask.bool()
+        q_header[qa_rows] = header_encoded.input_ids
+        q_header_mask[qa_rows] = header_encoded.attention_mask.bool()
     else:
+        q_prefix = torch.empty((len(selected), 0), dtype=c.input_ids.dtype)
+        q_prefix_mask = torch.empty((len(selected), 0), dtype=torch.bool)
         q = torch.empty((len(selected), 0), dtype=c.input_ids.dtype)
         q_mask = torch.empty((len(selected), 0), dtype=torch.bool)
+        q_header = torch.empty((len(selected), 0), dtype=c.input_ids.dtype)
+        q_header_mask = torch.empty((len(selected), 0), dtype=torch.bool)
 
     # Every supervision target is tokenized exactly once, here. Both task views below only
     # re-pad subsets of this list -- re-tokenizing per task was pure duplicated work and a
     # second place for the truncation limits to drift.
-    target_rows = [
-        tokenizer(
+    target_rows = []
+    for turn, task in zip(selected, task_ids, strict=True):
+        cap_qa_answer = task == 1 and len(turn.messages) <= 2 and turn.dataset != "race"
+        target_rows.append(tokenizer(
             turn.answer,
-            truncation=turn.dataset != "race" or task == 0,
+            truncation=task == 0 or cap_qa_answer,
             max_length=max_context_tokens if task == 0 else max_answer_tokens,
             add_special_tokens=False,
-        ).input_ids
-        for turn, task in zip(selected, task_ids, strict=True)
-    ]
+        ).input_ids)
 
     task_tensor = torch.tensor(task_ids, dtype=torch.long)
 
@@ -1038,6 +1106,10 @@ def collate_context_records(
             return {
                 "input_ids": q.new_empty((0, q.size(1) if task_id == 1 else 0)),
                 "input_mask": q_mask.new_empty((0, q_mask.size(1) if task_id == 1 else 0)),
+                "prefix_ids": q_prefix.new_empty((0, q_prefix.size(1) if task_id == 1 else 0)),
+                "prefix_mask": q_prefix_mask.new_empty((0, q_prefix_mask.size(1) if task_id == 1 else 0)),
+                "answer_prefix_ids": q_header.new_empty((0, q_header.size(1))),
+                "answer_prefix_mask": q_header_mask.new_empty((0, q_header_mask.size(1))),
                 "target_ids": q.new_empty((0, 0)),
                 "target_mask": q_mask.new_empty((0, 0)),
                 "labels": q.new_empty((0, 0)),
@@ -1075,7 +1147,16 @@ def collate_context_records(
             "input_mask": (
                 q_mask[indices] if task_id == 1 else q_mask.new_empty((indices.numel(), 0))
             ),
+            "prefix_ids": (
+                q_prefix[indices] if task_id == 1 else q_prefix.new_empty((indices.numel(), 0))
+            ),
+            "prefix_mask": (
+                q_prefix_mask[indices]
+                if task_id == 1 else q_prefix_mask.new_empty((indices.numel(), 0))
+            ),
             "target_ids": target.input_ids,
+            "answer_prefix_ids": q_header[indices],
+            "answer_prefix_mask": q_header_mask[indices],
             "target_mask": target.attention_mask.bool(),
             "labels": target_labels,
             "context_indices": torch.tensor(
@@ -1091,6 +1172,10 @@ def collate_context_records(
         "context_mask": c.attention_mask.bool(),
         "qa_input_ids": qa["input_ids"],
         "qa_input_mask": qa["input_mask"],
+        "qa_prefix_ids": qa["prefix_ids"],
+        "qa_prefix_mask": qa["prefix_mask"],
+        "qa_answer_prefix_ids": qa["answer_prefix_ids"],
+        "qa_answer_prefix_mask": qa["answer_prefix_mask"],
         "qa_target_ids": qa["target_ids"],
         "qa_target_mask": qa["target_mask"],
         "qa_labels": qa["labels"],

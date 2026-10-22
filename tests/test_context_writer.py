@@ -1,4 +1,4 @@
-"""Encoder -> learned-query writer -> short Qwen KV contracts."""
+"""Encoder -> learned-query writer -> resampled memory embedding contracts."""
 import copy
 
 import pytest
@@ -22,6 +22,7 @@ def tiny_model(vocab_size=64, num_hidden_layers=3, **kwargs):
         memory_resampler_hidden_size=16,
         memory_resampler_heads=2, question_resampler_hidden_size=16,
         question_resampler_heads=2,
+        recon_user_token_ids=(2,), recon_answer_prefix_token_ids=(3, 4),
     )
     options.update(kwargs)
     return ContextMemoryModel(Qwen3ForCausalLM(config), **options)
@@ -34,7 +35,7 @@ def encode(model, length=17, batch=2):
     )
 
 
-def test_exactly_one_context_and_one_short_memory_forward():
+def test_context_encoding_produces_memory_without_a_separate_backbone_pass():
     model = tiny_model().eval()
     calls = []
     hook = model._transformer_body.register_forward_pre_hook(
@@ -42,16 +43,13 @@ def test_exactly_one_context_and_one_short_memory_forward():
     )
     prefix = encode(model, length=64)
     hook.remove()
-    assert [c["inputs_embeds"].shape[1] for c in calls] == [64, 4]
+    assert [c["inputs_embeds"].shape[1] for c in calls] == [64]
     assert calls[0]["use_cache"] is False
     assert calls[0]["output_hidden_states"] is False
     assert calls[0]["attention_mask"] is None
     assert prefix.memory.shape == prefix.memory_embedding.shape == (2, 4, 32)
-    assert prefix.layer_memory.shape == (2, 3, 4, 32)
     assert prefix.context_hidden is None
     assert not hasattr(prefix, "context_target")
-    assert all(layer.keys.shape[-2] == layer.values.shape[-2] == 4
-               for layer in prefix.memory_cache.layers)
 
 
 def test_layer_mixture_matches_explicit_hidden_states():
@@ -66,11 +64,29 @@ def test_layer_mixture_matches_explicit_hidden_states():
     hooks_before = [set(layer._forward_hooks) for layer in model._transformer_body.layers]
     actual, final = model._encode_context_hidden(embeds, mask, positions)
     weights = model.context_layer_logits.softmax(0)
-    torch.testing.assert_close(actual, weights[0] * expected[-1] + weights[1] * expected[1])
+    torch.testing.assert_close(
+        actual, weights[0] * expected[-1] + weights[1] * model._transformer_body.norm(expected[1])
+    )
     torch.testing.assert_close(final, expected[-1])
     actual.square().mean().backward()
     assert model.context_layer_logits.grad.abs().sum() > 0
     assert [set(layer._forward_hooks) for layer in model._transformer_body.layers] == hooks_before
+
+
+def test_single_final_layer_fusion_matches_the_original_final_hidden_state():
+    model = tiny_model(context_layer_indices=(-1,)).eval()
+    embeds = model.qwen.get_input_embeddings()(torch.randint(0, 64, (2, 17)))
+    mask = torch.ones(2, 17, dtype=torch.bool)
+    positions = torch.arange(17)[None].expand(2, -1)
+    expected = model._transformer_body(
+        inputs_embeds=embeds, position_ids=positions, use_cache=False,
+        return_dict=True,
+    ).last_hidden_state
+
+    actual, final = model._encode_context_hidden(embeds, mask, positions)
+
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(final, expected)
 
 
 def test_padding_content_cannot_change_memory():
@@ -86,10 +102,10 @@ def test_padding_content_cannot_change_memory():
     torch.testing.assert_close(before.memory, after.memory)
 
 
-@pytest.mark.parametrize("source", ["memory_hidden", "memory_embedding", "layer_mean"])
+@pytest.mark.parametrize("source", ["hidden", "embedding"])
 def test_qa_gradients_reach_writer_lora_layer_weights_and_reader(source):
     model = tiny_model(
-        context_layer_indices=(-1, -2), reader_memory_source=source, readout_length=2,
+        context_layer_indices=(-1, -2), question_resampler_info_source=source, readout_length=2,
     )
     prefix = encode(model)
     question = model.qwen.get_input_embeddings()(torch.randint(0, 64, (2, 3)))
@@ -108,7 +124,25 @@ def test_qa_gradients_reach_writer_lora_layer_weights_and_reader(source):
     assert all(p.grad is None for p in model.parameters() if not p.requires_grad)
 
 
-def test_context_checkpointing_preserves_cache_outputs_and_gradients():
+def test_embedding_reader_resamples_memory_and_question_embeddings_directly():
+    model = tiny_model(question_resampler_info_source="embedding", readout_length=2)
+    prefix = encode(model)
+    question = model.qwen.get_input_embeddings()(torch.randint(0, 64, (1, 3)))
+    captured = []
+    hook = model.resampler.register_forward_pre_hook(
+        lambda _module, args: captured.append(args[0].detach().clone())
+    )
+    model.forward_with_memory_prefix(
+        prefix, torch.tensor([0]), question, torch.ones(1, 3, dtype=torch.bool),
+        model.qwen.get_input_embeddings()(torch.randint(0, 64, (1, 2))),
+        torch.ones(1, 2, dtype=torch.bool), torch.ones(1, 2, dtype=torch.long),
+    )
+    hook.remove()
+    expected = torch.cat([prefix.memory_embedding[:1], question], dim=1)
+    torch.testing.assert_close(captured[0], expected)
+
+
+def test_context_checkpointing_preserves_memory_outputs_and_gradients():
     plain = tiny_model(context_layer_indices=(-1, 0)).train()
     checked = copy.deepcopy(plain)
     checked.context_gradient_checkpointing = True
@@ -117,7 +151,7 @@ def test_context_checkpointing_preserves_cache_outputs_and_gradients():
     for model in (plain, checked):
         prefix = model.encode_context_prefix(embeds, mask)
         prefix.memory.square().mean().backward()
-        assert prefix.memory_cache.get_seq_length() == 4
+        assert prefix.memory.shape[1] == 4
         assert not any(layer.gradient_checkpointing for layer in model._transformer_body.layers)
     for (name, p), (_, q) in zip(
         plain.named_parameters(), checked.named_parameters(), strict=True
@@ -155,9 +189,7 @@ def test_context_checkpointing_uses_transformers_selected_layers(interval, monke
         encode(model).memory.square().mean().backward()
     finally:
         handle.remove()
-    assert observed == [
-        [index % interval == 0 for index in range(7)], [False] * 7,
-    ]
+    assert observed == [[index % interval == 0 for index in range(7)]]
     assert options == [{
         "gradient_checkpointing_kwargs": {"use_reentrant": False, "preserve_rng_state": True},
         "every_n_layers": interval,
@@ -386,16 +418,16 @@ def test_qa_has_no_task_embedding_and_recon_uses_one_embedding():
         prefix, torch.zeros(1, dtype=torch.long), answer, torch.ones(1, 2, dtype=torch.bool),
         torch.ones(1, 2, dtype=torch.long),
     )
-    assert recon.logits.shape[:2] == (1, 1 + 2)
-    assert qa.logits.shape[:2] == (1, 2 + 2)
-    assert recon.labels.shape == (1, 3)
-    assert qa.labels.shape == (1, 4)
+    assert recon.logits.shape[:2] == (1, 1 + 4 + 1 + 2 + 2)
+    assert qa.logits.shape[:2] == (1, 4 + 2 + 2)
+    assert recon.labels.shape == (1, 1 + 4 + 1 + 2 + 2)
+    assert qa.labels.shape == (1, 4 + 2 + 2)
     recon.logits.float().square().mean().backward()
     assert model.recon_task_embedding.grad is not None
     assert model.recon_task_embedding.grad.abs().sum() > 0
 
 
-def test_recon_reader_inserts_only_recon_embedding():
+def test_recon_reader_inserts_memory_then_recon_embedding():
     model = tiny_model().eval()
     prefix = encode(model, length=9, batch=2)
     embedding = model.qwen.get_input_embeddings()
@@ -404,7 +436,7 @@ def test_recon_reader_inserts_only_recon_embedding():
     original = model.qwen.forward
 
     def capture(*args, **kwargs):
-        seen.append(kwargs["inputs_embeds"][:, 0].detach())
+        seen.append(kwargs["inputs_embeds"].detach())
         return original(*args, **kwargs)
 
     model.qwen.forward = capture
@@ -413,28 +445,34 @@ def test_recon_reader_inserts_only_recon_embedding():
         torch.ones(2, 2, dtype=torch.long),
     )
     assert len(seen) == 1
-    torch.testing.assert_close(seen[0], model.recon_task_embedding.to(model.dtype).expand(2, -1))
+    torch.testing.assert_close(seen[0][:, 0], embedding(torch.tensor(2)).expand(2, -1))
+    torch.testing.assert_close(
+        seen[0][:, 1 + prefix.memory_length],
+        model.recon_task_embedding.to(model.dtype).expand(2, -1),
+    )
+    torch.testing.assert_close(seen[0][:, 1 + prefix.memory_length + 1], embedding(torch.tensor(3)).expand(2, -1))
+    torch.testing.assert_close(seen[0][:, 1 + prefix.memory_length + 2], embedding(torch.tensor(4)).expand(2, -1))
 
 
-# ``<|im_start|>`` / ``assistant`` / ``\n`` in Qwen3's vocabulary.
-QWEN3_ASSISTANT_HEADER_IDS = (151644, 77091, 198)
+# Token ids returned for ``Reconstruct the context.`` by the test tokenizer.
+RECON_TASK_TOKEN_IDS = (11, 22, 33)
 
 
-def test_recon_task_embedding_is_initialised_from_assistant_header_mean():
-    model = tiny_model(vocab_size=151936, task_init_token_ids=QWEN3_ASSISTANT_HEADER_IDS)
+def test_recon_task_embedding_is_initialised_from_user_instruction_mean():
+    model = tiny_model(task_init_token_ids=RECON_TASK_TOKEN_IDS)
     embedding = model.qwen.get_input_embeddings().weight.detach()
-    expected = embedding[list(QWEN3_ASSISTANT_HEADER_IDS)].mean(dim=0)
+    expected = embedding[list(RECON_TASK_TOKEN_IDS)].mean(dim=0)
     assert model.recon_task_embedding.shape == (model.qwen_hidden_size,)
     assert model.recon_task_embedding.dtype == torch.float32
     assert model.recon_task_embedding.requires_grad
     torch.testing.assert_close(model.recon_task_embedding.detach(), expected.to(torch.float32))
-    # The marker is a copy of the pretrained header mean, not a view of the embedding.
+    # The marker is a copy of the instruction mean, not a view of the embedding.
     assert model.recon_task_embedding.data_ptr() != embedding.data_ptr()
 
 
 def test_the_recon_marker_uses_the_ids_the_caller_resolves():
     """``load_model`` passes the ids from the run's own tokenizer; those rows are used."""
-    model = tiny_model(vocab_size=151936, task_init_token_ids=(3, 4))
+    model = tiny_model(task_init_token_ids=(3, 4))
     embedding = model.qwen.get_input_embeddings().weight.detach()
     assert model.task_init_token_ids == (3, 4)
     torch.testing.assert_close(
@@ -443,42 +481,42 @@ def test_the_recon_marker_uses_the_ids_the_caller_resolves():
     )
 
 
-def test_an_unusable_header_id_uses_random_initialization():
-    model = tiny_model(vocab_size=151936, task_init_token_ids=(5, 10_000_000))
+def test_an_unusable_recon_phrase_id_uses_random_initialization():
+    model = tiny_model(task_init_token_ids=(5, 10_000_000))
     assert model.task_init_token_ids == ()
 
 
-def test_the_header_ids_are_resolved_from_the_tokenizer():
-    from src.model import assistant_header_token_ids
+def test_recon_phrase_ids_are_resolved_from_the_tokenizer():
+    from src.model import recon_task_token_ids
 
     class _Tokenizer:
         def encode(self, text, add_special_tokens=False):
-            assert text == "<|im_start|>assistant\n"
+            assert text == "Reconstruct the context."
             return [11, 22, 33]
 
     class _Empty:
         def encode(self, text, add_special_tokens=False):
             return []
 
-    assert assistant_header_token_ids(_Tokenizer()) == (11, 22, 33)
-    assert assistant_header_token_ids(_Empty()) == ()
-    assert assistant_header_token_ids(object()) == ()
+    assert recon_task_token_ids(_Tokenizer()) == (11, 22, 33)
+    assert recon_task_token_ids(_Empty()) == ()
+    assert recon_task_token_ids(object()) == ()
 
 
-def test_recon_task_embedding_is_random_for_backbones_without_the_header_ids():
-    """The guard is `max(id) < vocab`: one row short of the header must stay random."""
-    header_max = max(QWEN3_ASSISTANT_HEADER_IDS)
-    model = tiny_model(vocab_size=header_max)
+def test_recon_task_embedding_is_random_for_backbones_without_the_phrase_ids():
+    """The guard is `max(id) < vocab`: missing phrase rows leave the marker random."""
+    phrase_max = max(RECON_TASK_TOKEN_IDS)
+    model = tiny_model(vocab_size=phrase_max)
     assert model.recon_task_embedding.shape == (model.qwen_hidden_size,)
     assert model.recon_task_embedding.requires_grad
     assert model.recon_task_embedding.dtype == torch.float32
     assert 0.005 < model.recon_task_embedding.std().item() < 0.05
 
-    covered = tiny_model(vocab_size=header_max + 1, task_init_token_ids=QWEN3_ASSISTANT_HEADER_IDS)
+    covered = tiny_model(vocab_size=phrase_max + 1, task_init_token_ids=RECON_TASK_TOKEN_IDS)
     embedding = covered.qwen.get_input_embeddings().weight.detach()
     torch.testing.assert_close(
         covered.recon_task_embedding.detach(),
-        embedding[list(QWEN3_ASSISTANT_HEADER_IDS)].mean(dim=0).to(torch.float32),
+        embedding[list(RECON_TASK_TOKEN_IDS)].mean(dim=0).to(torch.float32),
     )
 
 
@@ -498,26 +536,11 @@ def test_context_resampler_self_attention_can_be_disabled():
     assert all(block.cross_attention is not None for block in model.context_resampler.blocks)
 
 
-def test_layerwise_memory_embeddings_and_gates_are_used():
-    model = tiny_model(memory_resampler_output_mode="layerwise").eval()
-    prefix = encode(model, length=9, batch=1)
-    depth = model.qwen.config.num_hidden_layers
-    assert prefix.layer_memory_embedding.shape == (1, depth, model.context_resampler.num_memory,
-                                                   model.qwen_hidden_size)
-    assert prefix.memory_embedding.shape == (1, model.context_resampler.num_memory,
-                                             model.qwen_hidden_size)
-    assert model.context_resampler.layer_gates.shape == (depth,)
-
-
-def test_layer0_memory_embedding_uses_qwen_forward_for_all_layers():
+def test_memory_embedding_is_a_single_sequence():
     model = tiny_model().eval()
     prefix = encode(model, length=9, batch=1)
     assert prefix.memory_embedding.shape == (1, model.context_resampler.num_memory,
                                              model.qwen_hidden_size)
-    assert prefix.layer_memory_embedding is None
-    assert model.context_resampler.output_mode == "layer0"
-    assert model.context_resampler.layer_embedding is None
-    assert prefix.memory_cache.get_seq_length() == model.context_resampler.num_memory
 
 
 def test_invalid_config_is_rejected_before_loading_tokenizer(monkeypatch):
@@ -572,7 +595,7 @@ def test_the_training_context_cap_is_stored_and_enforced():
 
 def test_writer_config_roundtrip():
     config = TrainConfig.from_dict({"memory": {
-        "context_layer_indices": [-1, -3], "reader_memory_source": "memory_embedding",
+        "context_layer_indices": [-1, -3], "question_resampler_info_source": "embedding",
     }, "data": {"max_context_tokens": 40960}})
     config.validate()
     assert TrainConfig.from_dict(config.to_dict()).to_dict() == config.to_dict()

@@ -3,7 +3,7 @@
 ``scripts/data/build_1qa.py`` writes raw, unfiltered splits (``meta/meta_<split>.json``: one
 line per context with every QA pair). This module applies the *config's* filter rules --
 ``data.limits.{max_context_tokens,max_question_tokens,max_answer_tokens}``,
-``data.max_conversation_tokens``, ``filter_long_context``, ``filter_no_qa`` and the
+``filter_long_context``, ``filter_no_qa`` and the
 ``train_datasets``/``validation_datasets`` selection -- and writes ``cache/train.jsonl`` and
 ``cache/validation.jsonl`` plus ``cache/build.json`` (the fingerprint used to detect staleness).
 
@@ -112,7 +112,7 @@ def fingerprint_payload(data_config, split: str, source: Path, tokenizer) -> dic
     """
     stat = source.stat()
     return {
-        "version": 1,
+        "version": 2,
         "split": split,
         "source": str(source.resolve()),
         "source_size": stat.st_size,
@@ -124,7 +124,6 @@ def fingerprint_payload(data_config, split: str, source: Path, tokenizer) -> dic
                 data_config.max_context_tokens,
                 data_config.filter_long_context,
                 data_config.filter_no_qa,
-                data_config.max_conversation_tokens,
                 data_config.max_question_tokens,
                 data_config.max_answer_tokens,
             )
@@ -156,7 +155,6 @@ def filter_split(
         data_config.max_context_tokens,
         data_config.filter_long_context,
         data_config.filter_no_qa,
-        data_config.max_conversation_tokens,
         data_config.max_question_tokens,
         data_config.max_answer_tokens,
     )

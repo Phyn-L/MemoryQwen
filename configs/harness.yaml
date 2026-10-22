@@ -18,7 +18,6 @@ data:
     max_input_tokens: 40960
     max_question_tokens: 96
     max_answer_tokens: 64
-    max_conversation_tokens: 768
   loader:
     train_num_workers: 4
     train_pin_memory: true
@@ -32,7 +31,7 @@ data:
     # 训练阶段：two_stage、only_qa、only_recon 或 mix
     train_stage: mix
     recon_schedule: [1, 0.1]
-    qa_schedule: [0.1, 1]
+    qa_schedule: [0.5, 1]
     recon_schedule_curve: cosine
     max_qa_sample_per_context: 8
     # sortish bucket 相对 batch size 的倍数
