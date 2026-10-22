@@ -8,13 +8,16 @@ memory:
   memory_resampler_hidden_size: 512
   memory_resampler_ffn_ratio: 4
 
+  # Question-conditioned readout
   readout_mode: memory_question
   readout_length: 16
-  readout_keep_question_tokens: false
+  question_resampler_info_source: hidden
+  readout_keep_question_tokens: true
   question_resampler_hidden_size: 512
   question_resampler_layers: 4
   question_resampler_heads: 4
   question_resampler_ffn_ratio: 2
+  question_resampler_use_self_attention: true
 training:
   batch_size: 8
   gradient_accumulation_steps: 1
@@ -25,8 +28,8 @@ data:
     train_persistent_workers: false
   task:
     train_stage: mix
-    recon_schedule: [0.5, 0.090909]
-    qa_schedule: [0.5, 0.909091]
+    recon_schedule: [1.0, 0.1]
+    qa_schedule: [0.3, 1.0]
     recon_schedule_curve: cosine
 evaluation:
   autoregressive_every: 2500  # 自回归验证与 checkpoint 的训练步间隔

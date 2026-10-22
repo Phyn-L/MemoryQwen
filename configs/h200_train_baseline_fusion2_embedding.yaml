@@ -1,4 +1,3 @@
-# 实验层：h200（8xH200）上的 baseline。只写与 harness/train_baseline 不同的部分。
 _base_:
 - train_baseline.yaml
 memory:
@@ -9,13 +8,16 @@ memory:
   memory_resampler_hidden_size: 512
   memory_resampler_ffn_ratio: 4
 
+  # Question-conditioned readout
   readout_mode: memory_question
-  readout_length: 16  # 问题条件化 readout token 数，0 表示关闭
-  readout_keep_question_tokens: true  # readout 开启时保留 question token
-  question_resampler_hidden_size: 512  # question resampler 隐藏维度
-  question_resampler_layers: 4  # question resampler 层数
-  question_resampler_heads: 4  # question resampler 注意力头数
-  question_resampler_ffn_ratio: 2  # question resampler FFN 扩展倍数
+  readout_length: 16
+  question_resampler_info_source: embedding
+  readout_keep_question_tokens: true
+  question_resampler_hidden_size: 512
+  question_resampler_layers: 4
+  question_resampler_heads: 4
+  question_resampler_ffn_ratio: 2
+  question_resampler_use_self_attention: true
 training:
   batch_size: 8
   gradient_accumulation_steps: 1
