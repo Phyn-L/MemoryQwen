@@ -134,7 +134,22 @@ def _row_statistics(hidden, labels, head, max_logits_rows, with_correct):
                 chunk_rows = rows_of_token[start:stop]
                 if not bool(chunk_labels.ne(-100).any()):
                     continue
-                if torch.is_grad_enabled() and chunk_hidden.requires_grad:
+                if with_correct and not (
+                    torch.is_grad_enabled() and chunk_hidden.requires_grad
+                ):
+                    logits = F.linear(chunk_hidden, weight).float()
+                    token_loss = F.cross_entropy(
+                        logits, chunk_labels, ignore_index=-100, reduction="none"
+                    )
+                    partial = token_loss.new_zeros(row_count)
+                    partial.index_add_(
+                        0, chunk_rows,
+                        token_loss.masked_fill(chunk_labels.eq(-100), 0.0),
+                    )
+                    prediction = logits.argmax(dim=-1)
+                    hit = prediction.eq(chunk_labels) & chunk_labels.ne(-100)
+                    correct.index_add_(0, chunk_rows, hit.float())
+                elif torch.is_grad_enabled() and chunk_hidden.requires_grad:
                     partial = torch.utils.checkpoint.checkpoint(
                         _chunk_row_cross_entropy,
                         chunk_hidden,
@@ -149,7 +164,7 @@ def _row_statistics(hidden, labels, head, max_logits_rows, with_correct):
                         chunk_hidden, chunk_labels, weight, chunk_rows, row_count
                     )
                 nll = nll + partial.float()
-                if with_correct:
+                if with_correct and torch.is_grad_enabled() and chunk_hidden.requires_grad:
                     prediction = F.linear(chunk_hidden, weight).argmax(dim=-1)
                     hit = prediction.eq(chunk_labels) & chunk_labels.ne(-100)
                     correct.index_add_(0, chunk_rows, hit.float())

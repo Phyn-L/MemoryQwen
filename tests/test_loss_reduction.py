@@ -153,3 +153,20 @@ def test_teacher_forced_row_stats_match_a_manual_computation():
     torch.testing.assert_close(stats["tokens"], labels.ne(-100).sum(dim=1).float())
     correct = logits.argmax(-1).eq(labels).masked_fill(labels.eq(-100), False)
     torch.testing.assert_close(stats["correct"], correct.sum(dim=1).float())
+
+
+def test_teacher_forced_stats_project_once_per_chunk(monkeypatch):
+    import torch.nn.functional as functional
+
+    head = _Head()
+    hidden, labels = _pair(rows=2, tokens=3)
+    calls = []
+    original = functional.linear
+
+    def counted_linear(input, weight, bias=None):
+        calls.append(weight)
+        return original(input, weight, bias)
+
+    monkeypatch.setattr("src.losses.F.linear", counted_linear)
+    teacher_forced_row_stats(hidden, labels, head, max_logits_rows=2)
+    assert len(calls) == 3
