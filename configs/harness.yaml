@@ -14,7 +14,7 @@ data:
     root: ${DATA_ROOT:-contexts}  # 数据根目录（含 1qa/meta/ 和 1qa/cache/）
   # 输入长度上限：训练与验证共用这一处配置
   limits:
-    max_context_tokens: 2048
+    max_context_tokens: 1536
     max_input_tokens: 40960
     max_question_tokens: 96
     max_answer_tokens: 64
