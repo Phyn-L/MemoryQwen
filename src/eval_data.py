@@ -34,7 +34,7 @@ DATASETS: dict[str, str] = {
     "2wikimultihopqa": "2wikimultihopqa",
 }
 
-#: The subset both shipped suites compare by default: the five datasets with a full
+#: The subset both shipped suites compare by default: the datasets with a full
 #: validation split in ``1qa-clean-splits.manifest.json``.
 DEFAULT_DATASETS: tuple[str, ...] = (
     "squad",
@@ -42,6 +42,8 @@ DEFAULT_DATASETS: tuple[str, ...] = (
     "msmarcov2.1",
     "hotpotqa(distractor)",
     "race",
+    "musique",
+    "2wikimultihopqa",
 )
 
 

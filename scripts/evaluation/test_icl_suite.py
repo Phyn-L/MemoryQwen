@@ -458,7 +458,7 @@ def suite_main(argv=None):
     parser.add_argument('--output-dir')
     parser.add_argument('--bs', type=int, default=2)
     parser.add_argument('--max-input-tokens', type=int, default=8192)
-    parser.add_argument('--max-context-tokens', type=int, default=1024,
+    parser.add_argument('--max-context-tokens', type=int, default=2048,
                         help='Drop examples whose full context exceeds this tokenizer length')
     parser.add_argument('--max-new-tokens', type=int, default=32)
     parser.add_argument('--max-samples', type=int)

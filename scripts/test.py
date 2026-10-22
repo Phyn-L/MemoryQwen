@@ -146,6 +146,9 @@ def main():
     if args.no_filter_long_context:
         cfg.data.filter_long_context = False
     cfg.validate()
+    # Evaluation answers must fit the decoder budget; training keeps its own answer limit.
+    cfg.data.max_answer_tokens = cfg.evaluation.max_new_tokens
+    cfg.data.filter_qa_pair_answers = True
     checkpoint_path = Path(args.checkpoint).resolve()
     cfg.checkpoint.output_dir = str(checkpoint_path.parent)
     if not cfg.logging.swanlab_run_name:

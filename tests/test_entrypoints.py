@@ -23,7 +23,7 @@ def script(name):
 
 
 def test_checkpoint_preserves_architecture_and_rebases_machine(tmp_path):
-    cfg = TrainConfig.from_file(ROOT / 'configs/ablations/memory_length.yaml', machine='4090')
+    cfg = TrainConfig.from_file(ROOT / 'configs/train_baseline.yaml', machine='4090')
     checkpoint = tmp_path / 'last.pt'
     torch.save({'config': cfg.to_dict()}, checkpoint)
     actual = script('test').evaluation_config(checkpoint, machine='h200')
@@ -32,7 +32,7 @@ def test_checkpoint_preserves_architecture_and_rebases_machine(tmp_path):
     assert actual.model.name_or_path.startswith(MACHINES['h200']['MODEL_ROOT'])
     assert actual.data.root == MACHINES['h200']['DATA_ROOT']
     preset = ROOT / 'configs/test.yaml'
-    assert script('test').evaluation_config(checkpoint, preset, '4090').memory.memory_length == 32
+    assert script('test').evaluation_config(checkpoint, preset, '4090').memory == cfg.memory
 
 
 @pytest.mark.parametrize('mode', ['memory_question', 'learned_prefix', 'off'])
@@ -133,9 +133,8 @@ def test_launch_uses_current_interpreter_and_gpu_count(monkeypatch):
 
 
 def test_presets_are_valid():
-    for p in [ROOT / 'configs/train_baseline.yaml', *ROOT.glob('configs/ablations/*.yaml')]:
-        cfg = TrainConfig.from_file(p)
-        cfg.validate()
+    cfg = TrainConfig.from_file(ROOT / 'configs/train_baseline.yaml')
+    cfg.validate()
     for p in ROOT.glob('configs/icl_zeroshot.yaml'):
         assert load_icl_defaults(p)['batch_size'] > 0
 

@@ -115,6 +115,7 @@ def make_context_dataset(
         tokenizer_filter_batch_size=cfg.data.tokenizer_filter_batch_size,
         max_question_tokens=cfg.data.max_question_tokens,
         max_answer_tokens=cfg.data.max_answer_tokens,
+        filter_qa_pair_answers=cfg.data.filter_qa_pair_answers,
         allow_empty=allow_empty,
         num_workers=num_workers,
         pre_filtered=pre_filtered,

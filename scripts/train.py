@@ -619,23 +619,36 @@ def main() -> None:
         schedule.add_row("context resampler", "")
         schedule.add_row("memory_length", str(memory.memory_length))
         schedule.add_row("context_layer_indices", str(list(memory.context_layer_indices)))
-        schedule.add_row("layers", str(memory.memory_resampler_layers))
-        schedule.add_row("heads", str(memory.memory_resampler_heads))
-        schedule.add_row("hidden", str(memory.memory_resampler_hidden_size))
-        schedule.add_row("ffn_ratio", str(memory.memory_resampler_ffn_ratio))
+        schedule.add_row("memory_resampler_layers", str(memory.memory_resampler_layers))
+        schedule.add_row("memory_resampler_heads", str(memory.memory_resampler_heads))
+        schedule.add_row("memory_resampler_hidden_size", str(memory.memory_resampler_hidden_size))
+        schedule.add_row("memory_resampler_ffn_ratio", str(memory.memory_resampler_ffn_ratio))
+        schedule.add_row(
+            "memory_resampler_use_self_attention",
+            str(memory.memory_resampler_use_self_attention).lower(),
+        )
 
         if memory.readout_length > 0 and memory.readout_mode != "off":
             schedule.add_section()
             schedule.add_row("question resampler", "")
+            schedule.add_row("readout_mode", memory.readout_mode)
             schedule.add_row("readout_length", str(memory.readout_length))
+            schedule.add_row("question_resampler_info_source", memory.question_resampler_info_source)
             schedule.add_row(
-                "replace_question_token",
-                str(memory.readout_mode == "memory_question" and not memory.readout_keep_question_tokens).lower(),
+                "readout_keep_question_tokens",
+                str(memory.readout_keep_question_tokens).lower(),
             )
-            schedule.add_row("layers", str(memory.question_resampler_layers))
-            schedule.add_row("heads", str(memory.question_resampler_heads))
-            schedule.add_row("hidden", str(memory.question_resampler_hidden_size))
-            schedule.add_row("ffn_ratio", str(memory.question_resampler_ffn_ratio))
+            schedule.add_row(
+                "question_resampler_layers",
+                str(memory.question_resampler_layers),
+            )
+            schedule.add_row("question_resampler_heads", str(memory.question_resampler_heads))
+            schedule.add_row("question_resampler_hidden_size", str(memory.question_resampler_hidden_size))
+            schedule.add_row("question_resampler_ffn_ratio", str(memory.question_resampler_ffn_ratio))
+            schedule.add_row(
+                "question_resampler_use_self_attention",
+                str(memory.question_resampler_use_self_attention).lower(),
+            )
         CONSOLE.print(table_panel(schedule))
 
     model.train()

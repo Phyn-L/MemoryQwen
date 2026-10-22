@@ -92,12 +92,24 @@ def test_the_loop_echoes_the_resolved_schedule():
         '"context resampler"',
         '"memory_length"',
         '"context_layer_indices"',
-        '"replace_question_token"',
+        '"memory_resampler_layers"',
+        '"memory_resampler_heads"',
+        '"memory_resampler_hidden_size"',
+        '"memory_resampler_ffn_ratio"',
+        '"memory_resampler_use_self_attention"',
+        '"readout_mode"',
+        '"readout_length"',
+        '"question_resampler_info_source"',
+        '"readout_keep_question_tokens"',
+        '"question_resampler_layers"',
+        '"question_resampler_heads"',
+        '"question_resampler_hidden_size"',
+        '"question_resampler_ffn_ratio"',
+        '"question_resampler_use_self_attention"',
     ):
         assert field in source, field
     assert '"question resampler"' in source
     assert 'if memory.readout_length > 0 and memory.readout_mode != "off"' in source
-    assert 'memory.readout_mode == "memory_question" and not memory.readout_keep_question_tokens' in source
 
 
 def test_the_allocator_cache_is_not_manually_flushed_after_an_evaluation():

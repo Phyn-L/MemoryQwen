@@ -8,8 +8,8 @@ memory:
     recompress_threshold: 2048
     max_recompress_tokens: 2048
   # Fixed-length context writer
-  memory_length: 64  # 写入固定 memory 的 slot 数
-  context_layer_indices: [-1]  # 用于构造 context 表示的 Transformer 层索引
+  memory_length: 128  # 写入固定 memory 的 slot 数
+  context_layer_indices: [-1,-2,-3,-4]  # 用于构造 context 表示的 Transformer 层索引
   memory_resampler_layers: 4  # memory resampler 层数
   memory_resampler_heads: 4  # memory resampler 注意力头数
   memory_resampler_hidden_size: 512  # memory resampler 隐藏维度

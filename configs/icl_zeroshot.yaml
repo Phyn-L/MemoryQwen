@@ -9,7 +9,7 @@ data:
   demo_split: train  # few-shot 示例的数据划分
   max_samples: null  # 最大评估样本数，null 表示不限制
   max_contexts: null  # 最大 context 数，null 表示不限制
-  max_context_tokens: null  # 覆盖 context token 上限
+  max_context_tokens: 2048  # 覆盖 context token 上限
 inference:
   prompt_mode: instruct  # instruct: 原有提示；raw: user 仅含 context + 空行 + question
   use_chat_template: true  # raw / instruct 均保留模型原生 chat template

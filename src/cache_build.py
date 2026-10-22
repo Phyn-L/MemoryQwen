@@ -126,6 +126,7 @@ def fingerprint_payload(data_config, split: str, source: Path, tokenizer) -> dic
                 data_config.filter_no_qa,
                 data_config.max_question_tokens,
                 data_config.max_answer_tokens,
+                data_config.filter_qa_pair_answers,
             )
         ),
     }
@@ -157,6 +158,7 @@ def filter_split(
         data_config.filter_no_qa,
         data_config.max_question_tokens,
         data_config.max_answer_tokens,
+        data_config.filter_qa_pair_answers,
     )
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     temporary = cache_path.with_suffix(cache_path.suffix + ".tmp")

@@ -123,7 +123,7 @@ def main(argv=None):
         help="Evaluation split; default picks the fixed test split, else the sampled subset",
     )
     parser.add_argument("--memory-bs", type=int, default=16)
-    parser.add_argument("--max-context-tokens", type=int, default=1024)
+    parser.add_argument("--max-context-tokens", type=int, default=2048)
     parser.add_argument(
         "--max-samples",
         type=int,

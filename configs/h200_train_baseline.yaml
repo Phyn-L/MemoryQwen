@@ -3,7 +3,7 @@ _base_:
 - train_baseline.yaml
 memory:
   memory_length: 128
-  context_layer_indices: [-1]
+  context_layer_indices: [-1,-2,-3,-4]
   memory_resampler_layers: 4
   memory_resampler_heads: 4
   memory_resampler_hidden_size: 512

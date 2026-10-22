@@ -28,8 +28,8 @@ data:
     eval_prefetch_factor: 2
     eval_persistent_workers: true
   task:
-    # 训练阶段：two_stage、only_qa、only_recon 或 mix
-    train_stage: mix
+    
+    train_stage: mix # two_stage、only_qa、only_recon 或 mix
     recon_schedule: [1, 0.1]
     qa_schedule: [0.5, 1]
     recon_schedule_curve: cosine
@@ -39,7 +39,7 @@ data:
     train_datasets: all
     train_max_samples: null
     # 验证集：每数据集抽至多 N 个 context，每个 context 最多取 max_qa_sample_per_context 条 QA。
-    validation_datasets: [squad, msmarcov1.1, msmarcov2.1, hotpotqa(distractor), race]
+    validation_datasets: [squad, msmarcov1.1, msmarcov2.1, hotpotqa(distractor), race, musique, 2wikimultihopqa]
     validation_max_samples: null
 loss:
   qa_weight: 1.0

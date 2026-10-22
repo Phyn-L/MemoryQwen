@@ -22,7 +22,7 @@ class ICLData:
     root: str = '${DATA_ROOT:-contexts}'
     max_samples: int | None = None
     max_contexts: int | None = None
-    max_context_tokens: int | None = None
+    max_context_tokens: int | None = 2048
 
 
 @dataclass

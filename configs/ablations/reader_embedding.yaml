@@ -1,9 +1,0 @@
-# 消融配置：本文件只声明一个科学变量，其余 harness 设置继承
-# `_ablation_common.yaml`（它再继承 `../train_baseline.yaml`）。
-_base_:
-- ../train_baseline.yaml
-- _ablation_common.yaml
-checkpoint:
-  output_dir: outputs/ablation_reader_embedding
-memory:
-  question_resampler_info_source: embedding  # 消融变量：reader 直接读取输入 embedding

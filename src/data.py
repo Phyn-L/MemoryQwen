@@ -47,6 +47,7 @@ def filter_rows_batch(rows, tokenizer, options, lengths_out: list[int] | None = 
         filter_no_conversation,
         max_question_tokens,
         max_answer_tokens,
+        filter_qa_pair_answers,
     ) = options
     accepted = []
     for raw in rows:
@@ -83,7 +84,7 @@ def filter_rows_batch(rows, tokenizer, options, lengths_out: list[int] | None = 
                 not 0 < len(q) <= max_question_tokens
                 or not 0 < len(a) <= max_answer_tokens
                 for q, a in zip(qids, aids, strict=True)
-            ) and not raw.get("qa_pairs"):
+            ) and (filter_qa_pair_answers or not raw.get("qa_pairs")):
                 continue
         accepted.append(raw)
         if lengths_out is not None:
@@ -107,7 +108,7 @@ def _filter_row_batch_in_worker(rows):
 
 def filter_options(
     max_context_tokens, filter_long_context, filter_no_conversation,
-    max_question_tokens, max_answer_tokens,
+    max_question_tokens, max_answer_tokens, filter_qa_pair_answers=False,
 ):
     """The rule set :func:`filter_rows_batch` expects, in one place.
 
@@ -117,6 +118,7 @@ def filter_options(
     return (
         max_context_tokens, filter_long_context, filter_no_conversation,
         max_question_tokens, max_answer_tokens,
+        filter_qa_pair_answers,
     )
 
 
@@ -498,7 +500,8 @@ class ConversationDataset(Dataset):
                  filter_no_conversation=True, cache_dir: str | Path | None = None,
                  allow_empty=False, tokenizer_filter_batch_size=2048,
                  max_question_tokens=96,
-                 max_answer_tokens=64, num_workers=0, pre_filtered: bool = False):
+                 max_answer_tokens=64, filter_qa_pair_answers=False,
+                 num_workers=0, pre_filtered: bool = False):
         """``pre_filtered`` says the file was already built with *these* filter options.
 
         It is set by ``pipeline.make_context_dataset`` for ``cache/train.jsonl`` /
@@ -526,6 +529,7 @@ class ConversationDataset(Dataset):
             'max_input_tokens': max_input_tokens,
             'max_question_tokens': max_question_tokens,
             'max_answer_tokens': max_answer_tokens,
+            'filter_qa_pair_answers': filter_qa_pair_answers,
             'max_samples': max_samples,
             'filter_long_context': filter_long_context,
             'filter_no_conversation': filter_no_conversation,
@@ -544,7 +548,7 @@ class ConversationDataset(Dataset):
             self._rows = self._filter_rows(
                 tokenizer, max_context_tokens, max_samples, filter_long_context,
                 filter_no_conversation, tokenizer_filter_batch_size,
-                max_question_tokens, max_answer_tokens,
+                max_question_tokens, max_answer_tokens, filter_qa_pair_answers,
                 num_workers)
             if cache_path:
                 self._write_rows(cache_path, self._rows)
@@ -620,6 +624,7 @@ class ConversationDataset(Dataset):
     def _filter_rows(self, tokenizer, max_context_tokens, max_samples,
                      filter_long_context, filter_no_conversation, batch_size,
                      max_question_tokens, max_answer_tokens,
+                     filter_qa_pair_answers,
                      num_workers):
         """Read the JSONL once and keep the rows that pass ``filter_rows_batch``.
 
@@ -629,7 +634,7 @@ class ConversationDataset(Dataset):
         """
         options = filter_options(
             max_context_tokens, filter_long_context, filter_no_conversation,
-            max_question_tokens, max_answer_tokens,
+            max_question_tokens, max_answer_tokens, filter_qa_pair_answers,
         )
         chunk_size = max(32, batch_size)
         rows = []

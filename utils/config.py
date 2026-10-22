@@ -256,6 +256,7 @@ class DataConfig:
     preprocess_cache_dir: str | None = None
     filter_long_context: bool = True
     filter_no_qa: bool = True
+    filter_qa_pair_answers: bool = False
     tokenizer_filter_batch_size: int = 2048
     sortish_bucket_multiplier: int = 50
     cache_sortish_lengths: bool = True

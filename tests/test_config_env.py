@@ -120,7 +120,6 @@ TRAINING_CONFIGS = [
     path
     for path in (
         sorted((REPO / "configs").glob("*.yaml"))
-        + sorted((REPO / "configs" / "ablations").glob("*.yaml"))
     )
     if path.name not in {"test.yaml", "icl_zeroshot.yaml", *BASE_ONLY}
     and not path.name.startswith("_")

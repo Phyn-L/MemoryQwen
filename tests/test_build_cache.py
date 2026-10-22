@@ -512,6 +512,19 @@ def test_the_filter_hands_back_the_lengths_it_measured(tmp_path):
     assert unknown == [-1, -1, -1]
 
 
+def test_answer_length_filter_for_qa_pairs_is_evaluation_only():
+    from src.data import filter_options, filter_rows_batch
+
+    row = _row("short context", ["q"], index=0)
+    row["qa_pairs"][0]["answer"] = "one two three five"
+    row["qa_pairs"][0]["answers"] = [row["qa_pairs"][0]["answer"]]
+    options = filter_options(8, True, True, 8, 3)
+    assert filter_rows_batch([row], _Tokenizer(), options) == [row]
+    assert filter_rows_batch(
+        [row], _Tokenizer(), (*options[:-1], True)
+    ) == []
+
+
 def test_parallel_and_serial_lengths_agree(tmp_path):
     from src.data import filter_options, filter_row_chunks
 
