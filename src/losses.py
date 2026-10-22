@@ -1,4 +1,4 @@
-"""Objectives: per-task cross entropy, teacher-forced reconstruction stats, KL distillation.
+"""Objectives: per-task cross entropy and teacher-forced reconstruction statistics.
 
 The whole batch is projected through the vocabulary head in one *flattened* pass (chunked by
 ``loss.max_logits_rows``) and each row is normalised by its own active-token count, so
@@ -13,52 +13,6 @@ import torch
 import torch.nn.functional as F
 
 from .dtypes import no_autocast
-
-
-def sample_positions(mask, count, generator=None):
-    """Sample up to ``count`` True positions of ``mask`` ``[B, S]`` per row.
-
-    Returns ``[B, P]`` indices and a ``[B, P]`` keep-mask; rows with fewer than ``count``
-    valid positions get ``-1`` in the unused slots.
-
-    ``-1`` rather than "repeat index 0": a repeated 0 is indistinguishable from a row that
-    legitimately sampled position 0, so a caller that forgot the keep-mask would score the
-    same token ``count - valid`` extra times (a context shorter than the budget would be
-    trained mostly on its own first token). The losses translate a negative position into
-    ``ignore_index``, which makes that mistake impossible.
-
-    ``generator`` is threaded through so a caller can make the sampling *reproducible*: the
-    training loop reseeds one generator with ``seed + step`` per optimizer step, which is
-    what turns this from "a random subset" into "a recomputable subset" (and what keeps a
-    resumed run identical to an uninterrupted one). Without it the global RNG is used and
-    the choice is neither reproducible nor resumable.
-    """
-    mask = mask.bool()
-    if mask.ndim != 2:
-        raise ValueError("sample_positions expects a [B, S] mask")
-    device = mask.device
-    scores = torch.rand(
-        mask.shape, device=device, dtype=torch.float32, generator=generator
-    ).masked_fill(~mask, float("-inf"))
-    budget = max(1, min(int(count), mask.size(1)))
-    positions = scores.topk(budget, dim=1).indices
-    keep = mask.gather(1, positions)
-    return positions.masked_fill(~keep, -1), keep
-
-
-def _gather_positions(hidden, labels, mask, positions):
-    """Select the sampled positions of an aligned ``(hidden, labels)`` pair."""
-    # See sample_positions: -1 means "this sampled slot could not be filled" and must not be
-    # scored, which the gathered mask alone cannot express (a duplicate would point at a
-    # position that is itself valid).
-    valid = positions >= 0
-    safe = positions.clamp_min(0)
-    index = safe.unsqueeze(-1).expand(-1, -1, hidden.size(-1))
-    return (
-        hidden.gather(1, index),
-        labels.gather(1, safe),
-        mask.gather(1, safe) & valid,
-    )
 
 
 def _resolve_mask(labels, mask):
@@ -172,14 +126,13 @@ def _row_statistics(hidden, labels, head, max_logits_rows, with_correct):
 
 
 def sequence_lm_loss(
-    hidden, labels, head, mask=None, positions=None, max_logits_rows=256,
+    hidden, labels, head, mask=None, max_logits_rows=256,
 ):
     """Per-row mean next-token cross entropy over a whole sequence.
 
     ``hidden`` is ``[B, S, H]``: the backbone's own last hidden state for a sequence whose
     keys/values were prefixed by the memory. ``hidden[i]`` scores ``labels[i]`` **directly**
-    -- this function does *not* shift, so the caller shifts once and any ``positions`` it
-    passes index the same aligned pair that is scored.
+    -- this function does *not* shift, so the caller shifts once.
 
     Returns ``(row_losses, row_mask)``: the per-row mean over that row's active tokens (0 for
     a row with none) and a boolean ``[B]`` mask telling the caller which rows contributed.
@@ -190,8 +143,6 @@ def sequence_lm_loss(
             f"labels {tuple(labels.shape[:2])} do not match hidden {tuple(hidden.shape[:2])}"
         )
     mask = _resolve_mask(labels, mask)
-    if positions is not None:
-        hidden, labels, mask = _gather_positions(hidden, labels, mask, positions)
     labels = labels.masked_fill(~mask, -100)
     nll, _, tokens = _row_statistics(
         hidden, labels, head, max_logits_rows, with_correct=False

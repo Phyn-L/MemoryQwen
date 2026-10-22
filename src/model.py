@@ -20,7 +20,6 @@ class ContextMemoryOutput:
     supervision_mask: torch.Tensor | None = None
     # Per-row (nll, correct, tokens) of the teacher-forced reconstruction, when requested.
     row_stats: dict | None = None
-    objective_terms: dict | None = None
 
 
 
@@ -29,8 +28,6 @@ class ContextPrefix:
     memory: torch.Tensor
     context_length: int
     memory_length: int
-    # Last-layer states of context rows, retained only when distillation is enabled.
-    context_hidden: torch.Tensor | None = None
     memory_embedding: torch.Tensor | None = None
 
 
@@ -84,32 +81,6 @@ def is_trainable_parameter_name(name: str) -> bool:
         or name.startswith(("context_resampler.", "context_layer_logits"))
         or name == "recon_task_embedding"
     )
-
-
-class TiedUnembedding(nn.Module):
-    """Zero-parameter unembedding: score with the backbone's own (tied) embedding.
-
-    ``tie_word_embeddings`` makes the language-model head the input embedding matrix.
-    Distillation reuses that frozen unembedding and introduces no trainable parameters.
-    """
-
-    def __init__(self, embedding_getter):
-        super().__init__()
-        if embedding_getter is None:
-            raise ValueError("TiedUnembedding needs an embedding getter")
-        self._embedding_getter = embedding_getter
-
-    @property
-    def compute_dtype(self) -> torch.dtype:
-        return self._embedding_getter().dtype
-
-    def materialized_weight(self) -> torch.Tensor:
-        return self._embedding_getter()
-
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        with no_autocast(hidden.device):
-            return F.linear(hidden, self.materialized_weight())
-
 
 
 class MetaLoRA(nn.Module):
@@ -175,7 +146,7 @@ class ContextMemoryModel(nn.Module):
     def __init__(
         self, qwen: nn.Module, rank=8, alpha=16.0, memory_length=8,
         target_modules=None, dropout=0.0, max_context_tokens=None,
-        trainable_dtype=torch.float32, distillation=False,
+        trainable_dtype=torch.float32,
         task_init_token_ids: tuple[int, ...] | None = None,
         readout_length=0, question_resampler_layers=2, question_resampler_heads=4,
         question_resampler_hidden_size=256, question_resampler_ffn_ratio=2,
@@ -275,13 +246,6 @@ class ContextMemoryModel(nn.Module):
         # backbone dtype. It must not drag the trainable modules back to bfloat16,
         # so the trainable dtype is restored immediately afterwards.
         #
-        # Distillation reuses a memory-prefixed context pass and the frozen tied
-        # unembedding; it carries no trainable parameters of its own.
-        self.distillation = bool(distillation)
-        self.distill_head = (
-            TiedUnembedding(lambda: self.qwen.get_input_embeddings().weight)
-            if self.distillation else None
-        )
         # Per-question read-out over the question-agnostic memory. Zero means
         # the historical behaviour: the answer attends only to the memory and the question.
         if readout_mode not in {"memory_question", "learned_prefix", "off"}:
@@ -520,14 +484,13 @@ class ContextMemoryModel(nn.Module):
         # and a left-padded batch number the same real tokens the same way.
         positions = compact_positions(context_mask, 0)
         with self.lora_enabled(True):
-            context_hidden, context_last_hidden = self._encode_context_hidden(
+        context_hidden, _ = self._encode_context_hidden(
                 context_embeds, context_mask, positions,
             )
         memory_embedding = self.context_resampler(context_hidden, context_mask).to(dtype=self.dtype)
         return ContextPrefix(
             memory_embedding,
             context_embeds.size(1), memory_embedding.size(1),
-            context_hidden=context_last_hidden if self.distillation else None,
             memory_embedding=memory_embedding,
         )
 
@@ -731,43 +694,14 @@ class ContextMemoryModel(nn.Module):
         )
         return output.row_stats
 
-    def _distillation_student_hidden(self, prefix, context_embeds, context_mask):
-        """Run context tokens after the resampled memory embeddings for distillation."""
-        context_embeds = context_embeds.to(dtype=self.dtype)
-        context_mask = context_mask.bool()
-        if prefix.memory_length + context_embeds.size(1) > self.window_limit:
-            raise ValueError("distillation needs memory_length + context_length within the backbone window")
-        memory = prefix.memory_embedding.to(dtype=self.dtype)
-        mask = torch.cat([
-            context_mask.new_ones(context_mask.size(0), prefix.memory_length), context_mask,
-        ], dim=1)
-        positions = compact_positions(mask, 0)
-        sequence = torch.cat([memory, context_embeds], dim=1)
-        indices = torch.arange(context_embeds.size(0), device=context_embeds.device)
-        with self.lora_enabled(False):
-            out = self._transformer_body(
-                inputs_embeds=sequence,
-                attention_mask=mask,
-                position_ids=positions,
-                use_cache=False,
-                return_dict=True,
-            )
-        return out.last_hidden_state[:, prefix.memory_length:]
-
     def forward(
         self, context_embeds, context_mask, question_embeds, question_mask,
         answer_embeds, answer_mask, labels, qa_context_indices=None,
-        context_ids=None, loss_config=None, loss_only=False,
-        recon_batch=None, generator=None, question_prefix_embeds=None,
+        loss_config=None, loss_only=False,
+        recon_batch=None, question_prefix_embeds=None,
         question_prefix_mask=None, answer_prefix_embeds=None, answer_prefix_mask=None,
     ):
-        """Training path.
-
-        ``context_ids`` supplies targets for the optional distillation objective.
-        ``loss_config`` is the objective's config section: it decides which auxiliary terms run
-        and how many vocabulary rows are projected per chunk. ``generator`` makes the
-        distillation position sampling recomputable (see ``losses.sample_positions``).
-        """
+        """Training path for QA and teacher-forced reconstruction."""
         prefix = self.encode_context_prefix(context_embeds, context_mask)
         max_logits_rows = getattr(loss_config, "max_logits_rows", 256)
         indices = (
@@ -812,12 +746,6 @@ class ContextMemoryModel(nn.Module):
             else:
                 output.logits = [output.logits, recon_output.logits]
                 output.labels = [output.labels, recon_output.labels]
-        if loss_config is not None:
-            from .losses import memory_objectives
-            output.objective_terms = memory_objectives(
-                self, prefix, context_ids, context_mask, loss_config, generator=generator,
-            )
-            return output
         return output
 
     @torch.no_grad()
@@ -1289,16 +1217,6 @@ def load_model(cfg):
         cfg.model.name_or_path, dtype=dtype_from_name(cfg.model.torch_dtype),
         attn_implementation=cfg.model.attn_implementation, local_files_only=True,
     )
-    if cfg.loss.distill_weight > 0:
-        window = int(qwen.config.max_position_embeddings)
-        effective_context_tokens = min(
-            cfg.data.max_context_tokens, cfg.data.max_input_tokens,
-        )
-        if cfg.memory.memory_length + effective_context_tokens > window:
-            raise ValueError(
-                "distillation requires "
-                f"memory_length + effective input context length <= backbone window ({window})"
-            )
     qwen.config.use_cache=False
     model=ContextMemoryModel(
         qwen, rank=cfg.model.lora_rank, alpha=cfg.model.lora_alpha,
@@ -1308,7 +1226,6 @@ def load_model(cfg):
         trainable_dtype=dtype_from_name(cfg.model.trainable_dtype),
         context_gradient_checkpointing=cfg.model.context_gradient_checkpointing,
         gradient_checkpoint_every_n_layers=cfg.training.gradient_checkpoint_every_n_layers,
-        distillation=cfg.loss.distill_weight > 0,
         readout_length=cfg.memory.readout_length,
         readout_mode=cfg.memory.readout_mode,
         question_resampler_layers=cfg.memory.question_resampler_layers,
