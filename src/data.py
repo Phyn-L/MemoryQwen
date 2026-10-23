@@ -873,11 +873,19 @@ def _trim_prompt_parts(prefix_ids, suffix_ids, max_length, tokenizer):
     if len(prefix_ids) + len(suffix_ids) <= max_length:
         return prefix_ids, suffix_ids
     header_ids = tokenizer("<|im_start|>user\n", add_special_tokens=False).input_ids
+    header_ids = list(header_ids)
     if not prefix_ids:
         return [], suffix_ids[-max_length:]
-    if not header_ids or prefix_ids[-len(header_ids):] != header_ids:
-        raise ValueError("tokenized QA prefix does not end at the user header")
-    suffix_budget = max(0, max_length - len(header_ids))
+    # The final header newline may merge with the first question characters, so the
+    # independently tokenized prefix can end at a proper prefix of ``header_ids``.
+    # Validate only the part that is present and reserve the full logical header span.
+    matched = max(
+        (size for size in range(1, min(len(prefix_ids), len(header_ids)) + 1)
+         if prefix_ids[-size:] == header_ids[:size]),
+        default=0,
+    )
+    logical_header_length = len(header_ids) if matched else 0
+    suffix_budget = max(0, max_length - logical_header_length)
     suffix_ids = suffix_ids[-suffix_budget:] if suffix_budget else []
     prefix_budget = max_length - len(suffix_ids)
     return prefix_ids[-prefix_budget:], suffix_ids
@@ -999,13 +1007,31 @@ def collate_context_records(
     # The template already contains role markers and the assistant generation marker.
     qa_rendered = [text for text, task in zip(rendered, task_ids, strict=True) if task == 1]
     qa_turns = [turn for turn, task in zip(selected, task_ids, strict=True) if task == 1]
-    prefix_rows, suffix_rows, header_rows = [], [], []
+    prefix_rows, suffix_rows, header_rows, readout_starts = [], [], [], []
     if qa_rendered:
+        current_prefix_texts = []
+        for turn, text in zip(qa_turns, qa_rendered, strict=True):
+            sentinel = "__MEMORYQWEN_CURRENT_USER_BOUNDARY__"
+            while sentinel in text:
+                sentinel += "_"
+            payload = [{"role": item.role, "content": item.content} for item in turn.messages]
+            current_user = max(i for i, item in enumerate(payload) if item["role"] == "user")
+            payload[current_user]["content"] = sentinel
+            marked = tokenizer.apply_chat_template(
+                payload, tokenize=False, add_generation_prompt=True,
+                enable_thinking=chat_template_enable_thinking,
+            )
+            current_prefix_texts.append(marked[:marked.index(sentinel)])
         prefix_texts = [_user_prefix_text(text) for text in qa_rendered]
         body_texts = ["".join(split_chat_prompt(text)[:2]) for text in qa_rendered]
         all_encoded = tokenizer(qa_rendered, add_special_tokens=False, padding=True)
         prefix_encoded = tokenizer(prefix_texts, add_special_tokens=False, padding=True)
         body_encoded = tokenizer(body_texts, add_special_tokens=False, padding=True)
+        current_encoded = tokenizer(current_prefix_texts, add_special_tokens=False, padding=True)
+        current_prefixes = [
+            [value for value, keep in zip(ids, mask, strict=True) if keep]
+            for ids, mask in zip(current_encoded.input_ids, current_encoded.attention_mask, strict=True)
+        ]
         all_ids = [
             [value for value, keep in zip(ids, mask, strict=True) if keep]
             for ids, mask in zip(all_encoded.input_ids, all_encoded.attention_mask, strict=True)
@@ -1021,16 +1047,26 @@ def collate_context_records(
             for ids, mask in zip(body_encoded.input_ids, body_encoded.attention_mask, strict=True)
         ]
     else:
-        all_ids, encoded_prefixes, encoded_bodies = [], [], []
-    for row_index, (ids, prefix, body) in enumerate(
-        zip(all_ids, encoded_prefixes, encoded_bodies, strict=True)
+        all_ids, encoded_prefixes, encoded_bodies, current_prefixes = [], [], [], []
+    for row_index, (ids, prefix, body, current_prefix) in enumerate(
+        zip(all_ids, encoded_prefixes, encoded_bodies, current_prefixes, strict=True)
     ):
         ids, prefix = list(ids), list(prefix)
-        if ids[:len(prefix)] != prefix:
-            raise ValueError("chat tokenizer does not preserve the user-header token boundary")
+        # A header-final newline can merge with leading question whitespace. Keep the
+        # shared token in the question body instead of losing part of the question.
+        prefix_length = next(
+            (i for i, (actual, expected) in enumerate(zip(ids, prefix, strict=False)) if actual != expected),
+            len(prefix),
+        )
+        prefix = ids[:prefix_length]
         if ids[:len(body)] != body:
             raise ValueError("chat tokenizer does not preserve the user-end token boundary")
         suffix = ids[len(prefix):len(body)]
+        current_start = next(
+            (i for i, (actual, expected) in enumerate(zip(ids, current_prefix, strict=False))
+             if actual != expected),
+            len(current_prefix),
+        )
         turn = qa_turns[row_index]
         single_turn_qa = len(turn.messages) <= 2 and turn.dataset != "race"
         if single_turn_qa:
@@ -1040,6 +1076,7 @@ def collate_context_records(
         prefix_rows.append(prefix)
         suffix_rows.append(suffix)
         header_rows.append(ids[len(body):])
+        readout_starts.append(0 if single_turn_qa else max(0, current_start - len(prefix)))
     if qa_rendered:
         previous_padding = tokenizer.padding_side
         tokenizer.padding_side = question_padding_side
@@ -1170,6 +1207,11 @@ def collate_context_records(
         }
 
     qa = pack(1)
+    # The answer reader keeps history; the question resampler sees only the latest user body.
+    readout_mask = torch.zeros_like(qa["input_mask"])
+    for index, start in enumerate(readout_starts):
+        valid_indices = qa["input_mask"][index].nonzero(as_tuple=True)[0]
+        readout_mask[index, valid_indices[start:]] = True
     # One batch schema for training and evaluation: the evaluator and ``scripts/test.py``
     # read the same names, and the Recon half is simply absent from an evaluation batch.
     batch = {
@@ -1177,6 +1219,7 @@ def collate_context_records(
         "context_mask": c.attention_mask.bool(),
         "qa_input_ids": qa["input_ids"],
         "qa_input_mask": qa["input_mask"],
+        "qa_readout_mask": readout_mask,
         "qa_prefix_ids": qa["prefix_ids"],
         "qa_prefix_mask": qa["prefix_mask"],
         "qa_answer_prefix_ids": qa["answer_prefix_ids"],

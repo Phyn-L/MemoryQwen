@@ -252,6 +252,7 @@ def test_evaluator_scores_every_dataset_without_a_combined_cap():
             "context_mask": torch.ones(len(rows), 1, dtype=torch.bool),
             "qa_input_ids": torch.ones(len(turns), 1, dtype=torch.long),
             "qa_input_mask": torch.ones(len(turns), 1, dtype=torch.bool),
+            "qa_readout_mask": torch.ones(len(turns), 1, dtype=torch.bool),
             "qa_prefix_ids": torch.ones(len(turns), 1, dtype=torch.long),
             "qa_prefix_mask": torch.ones(len(turns), 1, dtype=torch.bool),
             "qa_answer_prefix_ids": torch.ones(len(turns), 1, dtype=torch.long),

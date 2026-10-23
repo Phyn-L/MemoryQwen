@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "qwen-metalora-memory"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["torch>=2.2", "transformers>=5.16.1,<6", "pyyaml>=6.0", "tqdm>=4.66", "datasets>=2.20"]
+dependencies = ["torch>=2.2", "transformers==5.16.1", "pyyaml>=6.0", "tqdm>=4.66", "datasets>=2.20"]
 
 [project.optional-dependencies]
 train = ["accelerate>=0.30", "rich>=13", "swanlab>=0.10.2,<0.11", "peft>=0.12"]

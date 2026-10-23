@@ -262,6 +262,13 @@ def test_readout_and_assistant_header_match_between_training_and_generation():
         answer_prefix_mask=torch.ones_like(header_ids, dtype=torch.bool),
     )
     train_embeds, train_positions = captures.pop()
+    torch.testing.assert_close(
+        train_embeds[:, :MEMORY_LENGTH], prefix.memory_embedding.expand(2, -1, -1)
+    )
+    torch.testing.assert_close(train_embeds[:, MEMORY_LENGTH:MEMORY_LENGTH + 2], embedding(user_ids))
+    torch.testing.assert_close(
+        train_embeds[:, MEMORY_LENGTH + 2:MEMORY_LENGTH + 6], embedding(QUESTION_IDS)
+    )
     model.generate_answers_with_prefix(
         prefix, torch.zeros(2, dtype=torch.long), QUESTION_IDS, QUESTION_MASK,
         _Tokenizer(), max_new_tokens=1,

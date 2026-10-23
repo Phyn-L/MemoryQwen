@@ -1,0 +1,4 @@
+# file: /data/lz/MemoryQwen/utils/ddp.py
+# hypothesis_version: 6.151.9
+
+['RANK', 'gloo', 'nccl', 'torch']

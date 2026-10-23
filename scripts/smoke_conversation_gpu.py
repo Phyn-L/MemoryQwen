@@ -67,7 +67,14 @@ def _run_one(name: str, cfg: TrainConfig, tokenizer, model, device: torch.device
 
     # Show the exact rendered prompt once, which also verifies that the native
     # Qwen chat template was used for the structured messages.
-    prompt = tokenizer.decode(ids["qa_input_ids"][0], skip_special_tokens=False)
+    prompt_ids = torch.cat([
+        ids[key][0, ids[mask][0]] for key, mask in (
+            ("qa_prefix_ids", "qa_prefix_mask"),
+            ("qa_input_ids", "qa_input_mask"),
+            ("qa_answer_prefix_ids", "qa_answer_prefix_mask"),
+        )
+    ])
+    prompt = tokenizer.decode(prompt_ids, skip_special_tokens=False)
     print(
         f"[{name}] rows={len(dataset)} turns={len(records[0].messages)} "
         f"context_tokens={int(ids['context_mask'][0].sum())} "
@@ -86,6 +93,11 @@ def _run_one(name: str, cfg: TrainConfig, tokenizer, model, device: torch.device
         ids["qa_target_mask"],
         ids["qa_labels"],
         ids["qa_context_indices"],
+        question_prefix_embeds=embedding(ids["qa_prefix_ids"]),
+        question_prefix_mask=ids["qa_prefix_mask"],
+        answer_prefix_embeds=embedding(ids["qa_answer_prefix_ids"]),
+        answer_prefix_mask=ids["qa_answer_prefix_mask"],
+        question_readout_mask=ids["qa_readout_mask"],
         loss_only=True,
     )
     if output.supervision_losses is None or not torch.isfinite(output.supervision_losses).all():

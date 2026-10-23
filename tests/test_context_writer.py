@@ -427,7 +427,7 @@ def test_qa_has_no_task_embedding_and_recon_uses_one_embedding():
     assert model.recon_task_embedding.grad.abs().sum() > 0
 
 
-def test_recon_reader_inserts_memory_then_recon_embedding():
+def test_recon_reader_uses_memory_then_complete_user_and_assistant_turns():
     model = tiny_model().eval()
     prefix = encode(model, length=9, batch=2)
     embedding = model.qwen.get_input_embeddings()
@@ -445,7 +445,10 @@ def test_recon_reader_inserts_memory_then_recon_embedding():
         torch.ones(2, 2, dtype=torch.long),
     )
     assert len(seen) == 1
-    torch.testing.assert_close(seen[0][:, 0], embedding(torch.tensor(2)).expand(2, -1))
+    torch.testing.assert_close(seen[0][:, :prefix.memory_length], prefix.memory_embedding)
+    torch.testing.assert_close(
+        seen[0][:, prefix.memory_length], embedding(torch.tensor(2)).expand(2, -1),
+    )
     torch.testing.assert_close(
         seen[0][:, 1 + prefix.memory_length],
         model.recon_task_embedding.to(model.dtype).expand(2, -1),

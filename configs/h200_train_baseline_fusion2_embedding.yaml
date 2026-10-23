@@ -28,8 +28,8 @@ data:
     train_persistent_workers: false
   task:
     train_stage: mix
-    recon_schedule: [1.0, 0.1]
-    qa_schedule: [0.5, 1.0]
+    recon_schedule: [1.0, 0.5]
+    qa_schedule: [0.8, 1.0]
     recon_schedule_curve: cosine
 evaluation:
   autoregressive_every: 2500  # 自回归验证与 checkpoint 的训练步间隔

@@ -18,9 +18,23 @@ import torch
 from src.data import (
     ContextRecord,
     _messages_from_row,
+    _trim_prompt_parts,
     _user_prefix_text,
     collate_context_records,
 )
+
+
+def test_trim_prompt_accepts_a_header_newline_merged_with_question():
+    class _MergedHeaderTokenizer:
+        def __call__(self, text, add_special_tokens=False):
+            assert text == "<|im_start|>user\n"
+            return type("Encoded", (), {"input_ids": [20, 21, 22]})()
+
+    prefix, suffix = _trim_prompt_parts(
+        [20, 21], list(range(30, 42)), 8, _MergedHeaderTokenizer()
+    )
+    assert prefix == [20, 21]
+    assert suffix == [34, 35, 36, 37, 38, 39, 40, 41][-(8 - 3):]
 
 
 class _Batch:
@@ -52,6 +66,7 @@ class _WordTokenizer:
             start=2,
         )
     }
+    VOCAB.update({"<|im_start|>user": 20, "<|im_start|>assistant": 21, "<|im_end|>": 22})
 
     def __init__(self):
         self.calls = []
@@ -91,6 +106,11 @@ class _WordTokenizer:
         return self._pad([list(row) for row in encoded["input_ids"]])
 
     def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, **kwargs):
+        if sum(item["role"] == "user" for item in messages) > 1:
+            return "".join(
+                f"<|im_start|>{item['role']}\n{item['content']} <|im_end|>\n"
+                for item in messages
+            ) + "<|im_start|>assistant\n"
         return " ".join(str(item["content"]) for item in messages)
 
 
@@ -235,3 +255,43 @@ def test_race_keeps_all_options_and_full_target_beyond_token_limits(training):
     assert batch["records"][0].answer == answer.strip()
     assert tokenizer.padding_side == "right"
     assert tokenizer.truncation_side == "right"
+
+
+@pytest.mark.parametrize("padding_side", ["left", "right"])
+def test_current_question_span_uses_body_boundary_not_standalone_token_count(padding_side):
+    class StandaloneMismatchTokenizer(_WordTokenizer):
+        def _ids(self, text):
+            if str(text).strip() == "question extra":
+                return [99]  # Isolated tokenization has a different length from the body suffix.
+            return super()._ids(text)
+
+    tokenizer = StandaloneMismatchTokenizer()
+    record = ContextRecord("ctx", (
+        {"role": "user", "content": "history question"},
+        {"role": "assistant", "content": "answer"},
+        {"role": "user", "content": "\n  question extra"},
+        {"role": "assistant", "content": "answer"},
+    ))
+    batch = collate_context_records(
+        [record], tokenizer, training=False, sample_qa=False,
+        question_padding_side=padding_side,
+    )
+    actual = batch["qa_input_ids"][-1, batch["qa_readout_mask"][-1]].tolist()
+    assert actual == [tokenizer.VOCAB["question"], tokenizer.VOCAB["extra"]]
+    assert not (batch["qa_readout_mask"] & ~batch["qa_input_mask"]).any()
+
+
+@pytest.mark.parametrize("question", [
+    "question <|im_start|>user\n extra",
+    "question __MEMORYQWEN_CURRENT_USER_BOUNDARY__ extra",
+])
+def test_current_question_span_preserves_literal_markers_in_content(question):
+    tokenizer = _WordTokenizer()
+    record = ContextRecord("ctx", (
+        {"role": "user", "content": "history question"},
+        {"role": "assistant", "content": "answer"},
+        {"role": "user", "content": question},
+        {"role": "assistant", "content": "answer"},
+    ))
+    batch = collate_context_records([record], tokenizer, training=False, sample_qa=False)
+    assert batch["qa_input_ids"][-1, batch["qa_readout_mask"][-1]].tolist() == tokenizer._ids(question)

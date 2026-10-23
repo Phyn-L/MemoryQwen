@@ -345,6 +345,29 @@ def test_new_modes_forward_gradient_and_generation():
             assert tokens.shape == (2, 3)
 
 
+def test_hidden_readout_backbone_input_excludes_user_prefix():
+    model = _model(readout_length=3).eval()
+    batch = _batch()
+    calls = []
+    resampler_lengths = []
+    hook = model._transformer_body.register_forward_pre_hook(
+        lambda _module, _args, kwargs: calls.append(kwargs["inputs_embeds"].shape[1]),
+        with_kwargs=True,
+    )
+    resampler_hook = model.resampler.register_forward_pre_hook(
+        lambda _module, args: resampler_lengths.append(args[0].shape[1])
+    )
+    _forward(model, batch)
+    hook.remove()
+    resampler_hook.remove()
+
+    # Question hidden is encoded without the user header or memory; memory hidden is separately cached.
+    assert calls[0] == batch["context_ids"].size(1)
+    assert calls[1] == batch["question_ids"].size(1)
+    assert calls[-1] == 4 + 2 + batch["question_ids"].size(1) + 3 + 2 + 5
+    assert resampler_lengths == [4 + batch["question_ids"].size(1)]
+
+
 def test_readout_can_remove_question_from_answer_input():
     model = _model(3)
     model.readout_keep_question_tokens = False

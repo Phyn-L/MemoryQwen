@@ -310,6 +310,9 @@ class Evaluator:
                 question_prefix_mask=question_prefix_mask,
                 answer_prefix_ids=ids["qa_answer_prefix_ids"][rows_slice],
                 answer_prefix_mask=ids["qa_answer_prefix_mask"][rows_slice],
+                question_readout_mask=(
+                    ids["qa_readout_mask"][rows_slice] if task_id == TASK_QA else None
+                ),
             )
             for i, record in enumerate(records):
                 row = generated[i].tolist()

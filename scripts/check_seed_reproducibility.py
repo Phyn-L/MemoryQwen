@@ -48,6 +48,7 @@ def worker(args):
                     embedding(question), torch.ones_like(question, dtype=torch.bool),
                     embedding(answer), torch.ones_like(answer, dtype=torch.bool), answer,
                     torch.arange(2, device=args.device),
+                    question_readout_mask=torch.ones_like(question, dtype=torch.bool),
                     loss_config=objective, loss_only=True)
         supervised, _ = supervision_objectives(
             out.supervision_losses,

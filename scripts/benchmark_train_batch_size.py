@@ -230,6 +230,11 @@ def main() -> None:
                     ids["qa_target_mask"],
                     ids["qa_labels"],
                     ids["qa_context_indices"],
+                    question_prefix_embeds=embedding(ids["qa_prefix_ids"]),
+                    question_prefix_mask=ids["qa_prefix_mask"],
+                    answer_prefix_embeds=embedding(ids["qa_answer_prefix_ids"]),
+                    answer_prefix_mask=ids["qa_answer_prefix_mask"],
+                    question_readout_mask=ids["qa_readout_mask"],
                     loss_only=True,
                 )
                 loss = output.supervision_losses.mean()

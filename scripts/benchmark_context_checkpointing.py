@@ -120,6 +120,7 @@ def run_case(model, args, backend, interval, reference):
             qa = model.forward_with_memory_prefix(
                 prefix, indices, embedding(question), question_mask,
                 embedding(answer), answer_mask, answer, loss_only=True,
+                question_readout_mask=question_mask,
             )
             recon = model.forward_recon_with_memory_prefix(
                 prefix, indices, embedding(ids), mask, ids, loss_only=True,

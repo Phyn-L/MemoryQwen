@@ -21,13 +21,13 @@
 
 | 路径                                                           | 职责                                                           |
 | -------------------------------------------------------------- | -------------------------------------------------------------- |
-| `configs/`                                                     | 共享 harness、模型定义、实验预设和消融                         |
+| `configs/`                                                     | 共享 harness、模型定义和训练配置预设                           |
 | `src/model.py`                                                 | Qwen memory 模型、context 编码、QA/Recon、生成与 checkpointing |
 | `src/resampler.py`                                             | Context memory 压缩与 question readout                         |
 | `src/data.py`、`src/cache_build.py`                            | 数据加载、单一过滤实现、缓存指纹与长度 sidecar                 |
 | `src/eval_data.py`                                             | 评测数据集名称与划分路径的唯一解析入口                         |
 | `src/pipeline.py`、`src/evaluator.py`                          | loader、评测抽样、多卡评测与指标汇总                           |
-| `src/losses.py`                                                | QA、Recon、蒸馏等训练目标                                      |
+| `src/losses.py`                                                | QA、Recon 训练目标与评估统计                                   |
 | `utils/config.py`、`utils/machines.py`                         | YAML 继承、环境变量展开、配置校验、机器路径                    |
 | `utils/checkpoint.py`                                          | checkpoint 保存、加载与 best 更新                              |
 | `scripts/train.py`、`scripts/test.py`                          | 训练与单 checkpoint 评测入口                                   |
@@ -36,7 +36,7 @@
 
 ## 配置与数据链路
 
-配置通过 `_base_` 深度合并：`harness.yaml` 放共享训练、数据、目标权重和评测设置，`models/` 放权重、dtype、LoRA 设置，实验预设的 `memory:` 放架构。目标权重在 `loss:`。读取配置使用 `TrainConfig.from_file`，不要直接用 `yaml.safe_load` 代替配置解析。`--machine` 通过 `utils/machines.py` 提供模型与数据路径。
+配置通过 `_base_` 深度合并：`harness.yaml` 放共享训练、数据、目标权重和评测设置，`models/` 放权重、dtype、LoRA 设置，训练配置预设的 `memory:` 放架构。消融配置已删除。目标权重在 `loss:`。读取配置使用 `TrainConfig.from_file`，不要直接用 `yaml.safe_load` 代替配置解析。`--machine` 通过 `utils/machines.py` 提供模型与数据路径。
 
 DataLoader 的运行参数按用途分开配置：`data.loader.train_num_workers`、`train_prefetch_factor`、`train_persistent_workers`、`train_pin_memory` 控制训练；`eval_num_workers`、`eval_prefetch_factor`、`eval_persistent_workers`、`eval_pin_memory` 同时控制普通评估、QA 评估和 Recon 评估。训练将 pinned batch 以 `non_blocking=True` 复制到 GPU。
 
@@ -55,7 +55,7 @@ DataLoader 的运行参数按用途分开配置：`data.loader.train_num_workers
 
 `build_1qa.py` 不做训练长度过滤和条数截断，只丢弃结构上无效的 context/QA；MS MARCO 只使用 `is_selected=1` 的 passage。context 不借用其他行文本。数据缺失划分或该划分无可用行时按 `test → validation → train` 回退，并记录实际来源。
 
-Conversation 数据有独立的 `memory.conversation` 重压缩配置；不再配置 `max_conversation_tokens`。`data.max_question_tokens` 仍用于普通 QA 问题长度过滤，同时当前 `src/data.py` 还会对满足条件的短单轮 prompt 调用 `_trim_prompt_parts`，因此不要把它描述为已全局删除。
+Conversation 数据有独立的 `memory.conversation` 重压缩配置；不再配置 `max_conversation_tokens`。`data.max_question_tokens` 仍用于普通 QA 问题长度过滤，同时当前 `src/data.py` 还会对满足条件的短单轮 prompt 调用 `_trim_prompt_parts`，因此不要把它描述为已全局删除。`data.filter_qa_pair_answers` 默认关闭；开启后，来自 `qa_pairs` 的数据行只要有任一 QA 的问题或答案超出配置 token 长度、或为空，就会整行过滤。关闭时这类 QA-pair 行不会因问题/答案长度检查被过滤，后续 collate 仍按长度配置截断。
 
 训练启动会补建缺失或过期的过滤缓存；只有指纹匹配才跳过 loader 再过滤。构建器和 loader 共用 `filter_rows_batch`，不要维护两套规则。sortish 优先复用长度 sidecar；当前长度测量保持串行。`train_max_samples`、`validation_max_samples` 是 loader 上限，不是缓存构建上限。
 
@@ -63,15 +63,15 @@ Conversation 数据有独立的 `memory.conversation` 重压缩配置；不再�
 
 ## 模型、训练与评测
 
-长 context 经 Qwen 编码并由 context resampler 压缩成固定长度的 memory embedding。context encoder 可以融合多个 backbone 层；多层融合前统一经过共享的 final norm，避免不同层的表示尺度直接混合。当前只保留单一 memory 输出，不再支持 layerwise memory 输出、逐层 projection、layer gates 或 decoder 注入 hook。
+长 context 单独经 Qwen 编码并由 context resampler 压缩成固定长度的 memory embedding；memory resampler 的输入不包含 user prefix。context encoder 可以融合多个 backbone 层；多层融合前统一经过共享的 final norm，避免不同层的表示尺度直接混合。当前只保留单一 memory 输出，不再支持 layerwise memory 输出、逐层 projection、layer gates 或 decoder 注入 hook。
 
 Qwen 基础权重冻结，配置的手写 LoRA、context/question resampler 和 `recon_task_embedding` 可训练。QA 使用冻结 Qwen token embedding 和 chat template，没有 QA task embedding。默认 backbone 为 BF16，可训练参数为 FP32；修改时注意 dtype 转换与梯度流。
 
-普通 QA 的输入布局为 `[user prefix] [memory] [question] [readout] [assistant header] [answer]`。`readout_mode` 支持 `memory_question`、`learned_prefix` 和 `off`：`memory_question` 使用 question resampler；`question_resampler_info_source` 为 `hidden` 时输入 memory/question 的 backbone 最后一层 hidden，为 `embedding` 时直接拼接 memory embedding/question token embedding。`learned_prefix` 只使用可学习 prefix，`off` 不创建 question resampler；这两个模式会忽略 `question_resampler_info_source` 和 `readout_keep_question_tokens`。后者只在 `memory_question` 下控制回答序列是否保留原始 question token。Recon 使用接近 QA 的 user-side memory/task 布局，再在 assistant turn 中重建 context。
+训练、QA 推理与 conversation 的完整单轮布局为 `[memory] <|im_start|>user\n [question] [readout] <|im_end|>\n<|im_start|>assistant\n [answer]`。memory 是纯 causal prefix；user header 在 memory 之后，question resampler 不读取 user header。`question_resampler_info_source: hidden` 时，context 与纯 question token 在同一个 padded batch 编码调用中各占独立行，question 行可缓存并与 context resampler 生成的 memory hidden 一起送入 question resampler。context、question 和 memory hidden 均由 LoRA-on 编码器生成；decoder memory KV 则由 LoRA-off 原始 LLM 单独生成，推理与 conversation 复用这份 KV。Conversation 初始化只缓存 memory KV/hidden；每轮 readout 只使用该轮 user body 和 memory，不读取此前 turn 的原始 hidden。Chat template 实际在 `<|im_end|>` 与下一条 `<|im_start|>` 之间输出换行符。`question_resampler_info_source: embedding` 时直接使用 `[memory embedding, question embedding]`，仍不读取 user header。`learned_prefix` 只使用可学习 prefix，`off` 不创建 question resampler；`readout_keep_question_tokens` 控制回答序列是否保留原始 question token。Recon 布局为 `[memory] <|im_start|>user\n [task] <|im_end|>\n<|im_start|>assistant\n [context]`，context 只作为 assistant 侧的监督目标。
 
 `_transformer_body` 仅调用不带 LM head 的解码器主体。生成 prefill 使用 `logits_to_keep=1`，避免物化不需要的全量词表 logits；生成采用贪心解码。
 
-多轮 conversation API 由 `memory.conversation` 控制，默认关闭。`start_conversation` 对 context/resampler 运行一次，并用 `[user prefix, memory]` 初始化 decoder cache；`append_conversation_turn` 追加渲染后的 user turn、readout 和 assistant header，再生成回答。达到 `recompress_threshold` 或窗口预算不足时，只使用旧 memory 与已完成历史 token 重压缩，不重新读取原始 context；重压缩后重建 cache。当前 API 只支持 batch size 1。
+多轮 conversation API 由 `memory.conversation` 控制，默认关闭。`start_conversation` 对 context/resampler 运行一次，并只用 `[memory]` 初始化 decoder cache；`append_conversation_turn` 追加本轮 user header/body、当前 readout、`<|im_end|>\n<|im_start|>assistant\n` 与回答。达到 `recompress_threshold` 或窗口预算不足时，只使用旧 memory 与已完成历史 token 重压缩，不重新读取原始 context；重压缩后重建 cache。每轮完成后按原生历史模板重放本轮 user/assistant 对，移除 generation-only 空 think 块与旧 readout，并重算受其影响的本轮 KV；此前历史与 memory KV 保留。当前 API 只支持 batch size 1。
 
 有效 batch 为 `training.batch_size × gradient_accumulation_steps × world_size`。训练步、调度、评测间隔均按优化器步计。读取数据、训练、QA/Recon 评测使用 Rich 进度显示；训练条包含学习率，启动日志打印模型参数摘要和 checkpoint 间隔。
 
