@@ -116,9 +116,10 @@ def main() -> None:
         console.print(f"[bold]Evaluating seed={seed}[/bold] ({manifest_path})")
         command = [
             torchrun, "--standalone", f"--nproc-per-node={args.gpus}",
-            str(Path(__file__).with_name("test.py")),
+            "-m", "scripts.test",
             "--checkpoint", str(checkpoint), "--split", "test",
             "--data-file", str(data_file), "--max-context-tokens", str(manifest["max_context_tokens"]),
+            "--max-contexts-per-dataset", str(manifest["max_contexts"]),
             "--batch-size", str(args.context_batch_size), "--qa-batch-size", str(args.qa_batch_size),
             "--max-new-tokens", str(args.max_new_tokens), "--report-file", str(report_file),
         ]

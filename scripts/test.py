@@ -69,6 +69,11 @@ def main():
         "scripts/evaluation/test_all_suite.py to score one dataset at a time.",
     )
     parser.add_argument("--max-samples", type=int)
+    parser.add_argument(
+        "--max-contexts-per-dataset",
+        type=int,
+        help="Maximum contexts evaluated per dataset (overrides the checkpoint config).",
+    )
     parser.add_argument("--max-context-tokens", type=int)
     parser.add_argument(
         "--batch-size",
@@ -134,6 +139,7 @@ def main():
         ("--batch-size", args.batch_size),
         ("--qa-batch-size", args.qa_batch_size),
         ("--max-new-tokens", args.max_new_tokens),
+        ("--max-contexts-per-dataset", args.max_contexts_per_dataset),
     ):
         if value is not None and value < 1:
             raise SystemExit(f"{name} must be >= 1, got {value}")
@@ -143,6 +149,8 @@ def main():
         cfg.evaluation.qa_batch_size = args.qa_batch_size
     if args.max_new_tokens is not None:
         cfg.evaluation.max_new_tokens = args.max_new_tokens
+    if args.max_contexts_per_dataset is not None:
+        cfg.evaluation.max_eval_contexts_per_dataset = args.max_contexts_per_dataset
     if args.no_filter_long_context:
         cfg.data.filter_long_context = False
     cfg.validate()
