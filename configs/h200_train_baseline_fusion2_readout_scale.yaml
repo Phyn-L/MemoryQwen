@@ -11,7 +11,7 @@ memory:
   # Question-conditioned readout
   readout_mode: memory_question
   readout_length: 32
-  question_resampler_info_source: hidden
+  question_resampler_info_source: embedding
   readout_keep_question_tokens: true
   question_resampler_hidden_size: 512
   question_resampler_layers: 4
@@ -21,7 +21,7 @@ memory:
 training:
   batch_size: 4
   gradient_accumulation_steps: 2
-  gradient_checkpoint_every_n_layers: 0
+  gradient_checkpoint_every_n_layers: 2
 data:
   loader:
     train_num_workers: 4
