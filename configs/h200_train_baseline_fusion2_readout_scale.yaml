@@ -11,7 +11,7 @@ memory:
   # Question-conditioned readout
   readout_mode: memory_question
   readout_length: 32
-  question_resampler_info_source: embedding
+  question_resampler_info_source: hidden
   readout_keep_question_tokens: true
   question_resampler_hidden_size: 512
   question_resampler_layers: 4
