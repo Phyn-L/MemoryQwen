@@ -28,7 +28,6 @@ data:
     eval_prefetch_factor: 2
     eval_persistent_workers: true
   task:
-    
     train_stage: mix # two_stage、only_qa、only_recon 或 mix
     recon_schedule: [1, 0.1]
     qa_schedule: [0.5, 1]
