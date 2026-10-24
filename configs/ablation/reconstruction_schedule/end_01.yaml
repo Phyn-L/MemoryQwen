@@ -1,0 +1,10 @@
+_base_:
+- ../h200_train_baseline.yaml
+
+data:
+  task:
+    recon_schedule: [1.0, 0.1]
+
+logging:
+  swanlab_project: MemoryQwen_Ablation
+  swanlab_run_name: reconstruction_schedule_end01
