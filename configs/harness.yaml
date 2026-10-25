@@ -3,7 +3,7 @@
 training:
   batch_size: 2  # 每个进程的 micro-batch 大小
   gradient_accumulation_steps: 2  # 每个优化器步累积的 micro-batch 数
-  gradient_checkpoint_every_n_layers: 2  # 每隔几层启用一次 context gradient checkpoint；1 表示逐层 
+  gradient_checkpoint_every_n_layers: 1  # 每隔几层启用一次 context gradient checkpoint；1 表示逐层 
   epochs: 1  # 训练轮数
   max_grad_norm: 1.0  # 梯度裁剪最大范数
   seed: 42  # 随机种子
@@ -29,8 +29,8 @@ data:
     eval_persistent_workers: true
   task:
     train_stage: mix # two_stage、only_qa、only_recon 或 mix
-    recon_schedule: [1, 0.1]
-    qa_schedule: [0.5, 1]
+    recon_schedule: [1.0, 0.5]
+    qa_schedule: [1.0, 1.0]
     recon_schedule_curve: cosine
     max_qa_sample_per_context: 8
     # sortish bucket 相对 batch size 的倍数

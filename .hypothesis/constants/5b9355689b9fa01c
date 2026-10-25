@@ -1,4 +1,0 @@
-# file: /data/lz/MemoryQwen/utils/checkpoint.py
-# hypothesis_version: 6.151.9
-
-['.pt.tmp', 'best.pt', 'best_f1', 'best_step', 'config', 'cpu', 'last.pt', 'model', 'numpy', 'optimizer', 'python', 'rng', 'scheduler', 'step', 'step-*.pt', 'swanlab_run_id', 'torch', 'torch_cuda', 'world_size']

@@ -19,7 +19,7 @@ memory:
   # Question-conditioned readout
   readout_mode: memory_question
   readout_length: 16
-  question_resampler_info_source: hidden  # 仅 memory_question 使用
+  question_resampler_info_source: embedding  # 仅 memory_question 使用
   readout_keep_question_tokens: true  # 仅 memory_question 使用
   question_resampler_hidden_size: 512  # question resampler 隐藏维度
   question_resampler_layers: 2  # question resampler 层数

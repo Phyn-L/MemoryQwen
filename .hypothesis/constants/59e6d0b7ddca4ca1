@@ -1,4 +1,0 @@
-# file: /data/lz/MemoryQwen/utils/optimizer.py
-# hypothesis_version: 6.151.9
-
-[0.0, 'adamw', 'bias', 'layernorm', 'norm', 'params', 'weight_decay']
