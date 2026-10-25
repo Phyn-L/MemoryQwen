@@ -2,8 +2,8 @@ _base_:
 - ../h200_train_baseline.yaml
 
 memory:
-  question_resampler_info_source: hidden
+  readout_length: 32
 
 logging:
   swanlab_project: MemoryQwen_Ablation
-  swanlab_run_name: question_resampler_source_hidden
+  swanlab_run_name: readout_length_32_embedding

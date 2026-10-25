@@ -1,0 +1,9 @@
+_base_:
+- ../h200_train_baseline.yaml
+
+memory:
+  readout_length: 8
+
+logging:
+  swanlab_project: MemoryQwen_Ablation
+  swanlab_run_name: readout_length_8_hidden

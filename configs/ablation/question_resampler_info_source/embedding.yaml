@@ -1,9 +1,0 @@
-_base_:
-- ../h200_train_baseline.yaml
-
-memory:
-  question_resampler_info_source: embedding
-
-logging:
-  swanlab_project: MemoryQwen_Ablation
-  swanlab_run_name: question_resampler_source_embedding

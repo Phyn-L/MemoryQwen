@@ -11,13 +11,13 @@ memory:
 
   # Question-conditioned readout
   readout_mode: memory_question
-  readout_length: 16
-  question_resampler_info_source: embedding
+  readout_length: 32
+  question_resampler_info_source: hidden
   readout_keep_question_tokens: true
   question_resampler_hidden_size: 512
   question_resampler_layers: 4
   question_resampler_heads: 4
-  question_resampler_ffn_ratio: 2
+  question_resampler_ffn_ratio: 4
   question_resampler_use_self_attention: true
 training:
   batch_size: 8
@@ -34,6 +34,7 @@ data:
     recon_schedule_curve: cosine
 evaluation:
   autoregressive_every: 2500  # 自回归验证与 checkpoint 的训练步间隔
+  ctx_batch_size: 32
   qa_batch_size: 24  # QA 验证批大小
 logging:
   log_every: 25  # 训练日志记录间隔（步）

@@ -6,4 +6,4 @@ memory:
 
 logging:
   swanlab_project: MemoryQwen_Ablation
-  swanlab_run_name: readout_length_32
+  swanlab_run_name: readout_length_32_hidden
