@@ -332,6 +332,8 @@ class EvaluationConfig:
     autoregressive_every: int = 4000
     max_new_tokens: int = 128
     qa_batch_size: int = 4
+    # Context batch size used by validation and evaluation loaders.
+    ctx_batch_size: int = 2
     # Teacher-forced reconstruction score on the unique contexts referenced by the
     # selected QA sample. One memory-prefixed forward per context, no decoding.
     recon_teacherforce: bool = True
@@ -625,6 +627,8 @@ class TrainConfig:
             raise ValueError("evaluation.autoregressive_every must be positive")
         if self.evaluation.qa_batch_size <= 0:
             raise ValueError("evaluation.qa_batch_size must be positive")
+        if self.evaluation.ctx_batch_size <= 0:
+            raise ValueError("evaluation.ctx_batch_size must be positive")
         if self.evaluation.max_eval_contexts_per_dataset <= 0:
             raise ValueError(
                 "evaluation.max_eval_contexts_per_dataset must be positive"

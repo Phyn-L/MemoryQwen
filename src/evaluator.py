@@ -206,7 +206,7 @@ class Evaluator:
                 max_qa_sample_per_context=max_qa_sample_per_context,
                 rank=rank,
                 world=world,
-                batch_size=source.batch_size,
+                batch_size=self.cfg.evaluation.ctx_batch_size,
             )
             pre_windowed = True
         total = (
@@ -531,7 +531,7 @@ class Evaluator:
                 seed=seed,
                 rank=rank,
                 world=world,
-                batch_size=loader.batch_size,
+                batch_size=self.cfg.evaluation.ctx_batch_size,
                 max_new_tokens=getattr(
                     getattr(self.cfg, "evaluation", None),
                     "max_new_tokens",
@@ -555,7 +555,7 @@ class Evaluator:
                 selection=row_loader.evaluation_selection,
                 rank=_distributed_rank(),
                 world=_distributed_world_size(),
-                batch_size=row_loader.batch_size,
+                batch_size=self.cfg.evaluation.ctx_batch_size,
                 max_new_tokens=getattr(
                     getattr(self.cfg, "evaluation", None),
                     "max_new_tokens",

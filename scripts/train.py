@@ -36,6 +36,7 @@ from src.training.helpers import (
 from src.training.loop import run_training_loop
 from src.training.resume import micro_batch_skip, optimizer_steps, resume_plan
 from src.training.stages import sample_task_masks, training_stage
+from utils.reporting import eval_log_payloads as _eval_log_payloads
 
 # Compatibility exports for callers importing scripts.train helpers.
 # for epoch in range(start_epoch, total_epochs):
@@ -56,6 +57,7 @@ from src.training.stages import sample_task_masks, training_stage
 
 
 # Public compatibility aliases for existing tests and launch helpers.
+eval_log_payloads = _eval_log_payloads
 should_evaluate = should_evaluate
 step_postfix = step_postfix
 sample_task_masks = sample_task_masks

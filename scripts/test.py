@@ -80,7 +80,7 @@ def main():
         "--bs",
         type=int,
         help="Contexts per batch for the evaluation loader (default: the checkpoint config's "
-        "training.batch_size). Evaluation runs under torch.no_grad(), so this is not "
+        "evaluation.ctx_batch_size). Evaluation runs under torch.no_grad(), so this is not "
         "bounded by the training memory -- but every QA pair of a batch's contexts travels "
         "with it (sample_qa=False), so the QA rows and the [rows, tokens, vocab] logits "
         "grow with this number. It does not change the metrics.",
@@ -113,7 +113,7 @@ def main():
                 parser.error("Test YAML supports only test and machine sections")
             allowed = {
                 "split",
-                "batch_size",
+                "ctx_batch_size",
                 "qa_batch_size",
                 "max_new_tokens",
                 "max_samples",
@@ -144,7 +144,7 @@ def main():
         if value is not None and value < 1:
             raise SystemExit(f"{name} must be >= 1, got {value}")
     if args.batch_size is not None:
-        cfg.training.batch_size = args.batch_size
+        cfg.evaluation.ctx_batch_size = args.batch_size
     if args.qa_batch_size is not None:
         cfg.evaluation.qa_batch_size = args.qa_batch_size
     if args.max_new_tokens is not None:
@@ -198,7 +198,7 @@ def main():
     )
     loader = DataLoader(
         ds,
-        batch_size=cfg.training.batch_size,
+        batch_size=cfg.evaluation.ctx_batch_size,
         shuffle=False,
         collate_fn=make_collate(cfg, tokenizer, sample_qa=False),
         num_workers=cfg.data.eval_num_workers,
@@ -225,7 +225,7 @@ def main():
         seed=cfg.training.seed,
         rank=rank,
         world=world,
-        batch_size=cfg.training.batch_size,
+        batch_size=cfg.evaluation.ctx_batch_size,
         max_new_tokens=cfg.evaluation.max_new_tokens,
         **loader_options,
     )
@@ -238,7 +238,7 @@ def main():
         max_qa_sample_per_context=cfg.data.max_qa_sample_per_context,
         rank=rank,
         world=world,
-        batch_size=cfg.training.batch_size,
+        batch_size=cfg.evaluation.ctx_batch_size,
         max_new_tokens=cfg.evaluation.max_new_tokens,
         **loader_options,
     )
@@ -256,7 +256,7 @@ def main():
         ranks = 1 if accelerator is None else accelerator.num_processes
         print(
             f"evaluating {ds.__class__.__name__} split={args.split} "
-            f"contexts/batch={cfg.training.batch_size} qa_group={cfg.evaluation.qa_batch_size} "
+            f"contexts/batch={cfg.evaluation.ctx_batch_size} qa_group={cfg.evaluation.qa_batch_size} "
             f"max_new_tokens={cfg.evaluation.max_new_tokens} "
             f"batches/rank={len(loader)} ranks={ranks}"
         )

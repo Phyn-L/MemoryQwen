@@ -113,7 +113,7 @@ def prepare_training_data(cfg, tokenizer, model, accelerator, device, resume, co
     )
     validation_loader = DataLoader(
         validation_dataset,
-        batch_size=cfg.training.batch_size,
+        batch_size=cfg.evaluation.ctx_batch_size,
         shuffle=False,
         collate_fn=validation_collate,
         num_workers=cfg.data.eval_num_workers,
@@ -144,7 +144,7 @@ def prepare_training_data(cfg, tokenizer, model, accelerator, device, resume, co
         seed=cfg.training.seed,
         rank=_process_index(accelerator),
         world=_world_size(accelerator),
-        batch_size=cfg.training.batch_size,
+        batch_size=cfg.evaluation.ctx_batch_size,
         max_new_tokens=cfg.evaluation.max_new_tokens,
         **loader_options,
     )
@@ -157,7 +157,7 @@ def prepare_training_data(cfg, tokenizer, model, accelerator, device, resume, co
         max_qa_sample_per_context=cfg.data.max_qa_sample_per_context,
         rank=_process_index(accelerator),
         world=_world_size(accelerator),
-        batch_size=cfg.training.batch_size,
+        batch_size=cfg.evaluation.ctx_batch_size,
         max_new_tokens=cfg.evaluation.max_new_tokens,
         **loader_options,
     )
