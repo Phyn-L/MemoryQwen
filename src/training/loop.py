@@ -14,8 +14,8 @@ from rich.progress import (
     TimeRemainingColumn,
 )
 
+from src.evaluation.eval_schedule import should_evaluate, step_postfix
 from src.losses import scheduled_task_weights, supervision_objectives
-from src.training.evaluation import should_evaluate, step_postfix
 from src.training.stages import sample_task_masks, training_stage
 from utils.progress import StepSpeedColumn
 from utils.reporting import eval_log_payloads, format_evaluation_report

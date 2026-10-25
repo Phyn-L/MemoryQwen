@@ -9,7 +9,6 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from utils.config import TrainConfig
-from utils.icl_config import load_icl_defaults
 from utils.launcher import command
 from utils.machines import MACHINES
 from utils.model_paths import relocate_saved_paths, resolve_model_path
@@ -98,28 +97,6 @@ def test_stale_checkpoint_model_path_resolves_by_name(tmp_path, monkeypatch):
     assert raw['model']['name_or_path'].endswith('revision-old')
 
 
-def test_icl_yaml_cli_precedence_and_dataset_names(tmp_path):
-    model = tmp_path / 'model'
-    model.mkdir()
-    (model / 'config.json').write_text('{}')
-    module = script('evaluation/test_icl_suite')
-    args = module.parse_args(['--config', str(ROOT / 'configs/icl_zeroshot.yaml'),
-                              '--machine', 'h200', '--model', str(model), '--bs', '7',
-                              '--datasets', 'hotpotqa(distractor)'])
-    assert args.batch_size == 7 and args.num_shots == 0
-    assert args.datasets == ['hotpotqa(distractor)'] and args.max_new_tokens == 32
-    assert args.data_root == MACHINES['h200']['DATA_ROOT']
-    # The file itself comes from src/eval_data.py; only the layout module may build it.
-    assert module.slug('hotpotqa(distractor)') == 'hotpotqa_distractor'
-    assert args.model == str(model)
-    with pytest.raises(SystemExit):
-        # Old aggregated names are gone, and a bad batch size is still rejected.
-        module.parse_args(['--config', str(ROOT / 'configs/icl_zeroshot.yaml'),
-                           '--datasets', 'hotpotqa'])
-    with pytest.raises(SystemExit):
-        module.parse_args(['--config', str(ROOT / 'configs/icl_zeroshot.yaml'), '--bs', '0'])
-
-
 def test_launch_uses_current_interpreter_and_gpu_count(monkeypatch):
     monkeypatch.delenv('NUM_PROCESSES', raising=False)
     args = ['--config', 'path with spaces/train.yaml', '--machine', 'h200']
@@ -135,23 +112,3 @@ def test_launch_uses_current_interpreter_and_gpu_count(monkeypatch):
 def test_presets_are_valid():
     cfg = TrainConfig.from_file(ROOT / 'configs/train_baseline.yaml')
     cfg.validate()
-    for p in ROOT.glob('configs/icl_zeroshot.yaml'):
-        assert load_icl_defaults(p)['batch_size'] > 0
-
-
-def test_unknown_icl_sections_fail(tmp_path):
-    p = tmp_path / 'bad.yaml'
-    p.write_text('infernce: {}\n')
-    with pytest.raises(ValueError, match='Unknown'):
-        load_icl_defaults(p)
-
-
-def test_icl_machine_defaults_preserve_explicit_model(monkeypatch):
-    module = script('evaluation/test_icl_suite')
-    monkeypatch.setattr(module, 'resolve_model_path', lambda name, machine: name)
-    args = module.parse_args(['--machine', 'h200'])
-    assert args.model.startswith(MACHINES['h200']['MODEL_ROOT'] + '/')
-    assert args.data_root == MACHINES['h200']['DATA_ROOT']
-    explicit = module.DEFAULT_MODEL
-    args = module.parse_args(['--machine', 'h200', '--model', explicit])
-    assert args.model == explicit

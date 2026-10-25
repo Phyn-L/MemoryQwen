@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from src.cache_utils import tokenizer_fingerprint
-from src.data import ConversationDataset
+from src.data import ContextDataset
 
 
 class _Tokenizer:
@@ -57,7 +57,7 @@ def test_filtered_conversation_dataset_is_cached_and_invalidated(tmp_path: Path)
     cache = tmp_path / "cache"
     tokenizer = _Tokenizer()
 
-    first = ConversationDataset(
+    first = ContextDataset(
         source,
         tokenizer=tokenizer,
         max_context_tokens=4,
@@ -68,7 +68,7 @@ def test_filtered_conversation_dataset_is_cached_and_invalidated(tmp_path: Path)
     assert len(first) == 1
     assert len(files_after_first) == 1
 
-    second = ConversationDataset(
+    second = ContextDataset(
         source,
         tokenizer=tokenizer,
         max_context_tokens=4,
@@ -82,7 +82,7 @@ def test_filtered_conversation_dataset_is_cached_and_invalidated(tmp_path: Path)
         source.read_text(encoding="utf-8") + json.dumps(_row("four five six")) + "\n",
         encoding="utf-8",
     )
-    third = ConversationDataset(
+    third = ContextDataset(
         source,
         tokenizer=tokenizer,
         max_context_tokens=4,
@@ -103,7 +103,7 @@ def test_batched_tokenizer_filter_respects_max_samples(tmp_path: Path):
         encoding="utf-8",
     )
 
-    dataset = ConversationDataset(
+    dataset = ContextDataset(
         source,
         tokenizer=_Tokenizer(),
         max_context_tokens=4,
@@ -130,7 +130,7 @@ def test_question_and_answer_lengths_are_filtered_before_caching(tmp_path: Path)
     ]
     source.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
 
-    dataset = ConversationDataset(
+    dataset = ContextDataset(
         source,
         tokenizer=_Tokenizer(),
         max_context_tokens=4,
@@ -162,7 +162,7 @@ def test_the_serial_and_parallel_filters_keep_the_same_rows(tmp_path: Path):
     )
 
     def load(workers):
-        return ConversationDataset(
+        return ContextDataset(
             source,
             tokenizer=_Tokenizer(),
             max_context_tokens=4,
@@ -179,7 +179,7 @@ def test_the_serial_and_parallel_filters_keep_the_same_rows(tmp_path: Path):
 def test_the_process_pool_filter_keeps_the_same_rows_in_the_same_order(tmp_path):
     """The loader's parallel filter and the cache build share one driver; order must hold.
 
-    ``ConversationDataset(num_workers=2)`` sends chunks through a process pool, and the dataset
+    ``ContextDataset(num_workers=2)`` sends chunks through a process pool, and the dataset
     order decides which context a batch belongs to, so the accepted rows must come back exactly
     as the serial path returns them.
     """
@@ -195,7 +195,7 @@ def test_the_process_pool_filter_keeps_the_same_rows_in_the_same_order(tmp_path)
     )
 
     def contexts(num_workers):
-        dataset = ConversationDataset(
+        dataset = ContextDataset(
             path, tokenizer=_Tokenizer(), max_context_tokens=64, cache_dir=None,
             num_workers=num_workers,
         )

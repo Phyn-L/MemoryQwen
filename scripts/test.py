@@ -9,13 +9,9 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
-from src.evaluator import Evaluator
+from src.data_pipeline import make_collate, make_context_dataset
+from src.evaluation import Evaluator, evaluation_window_loader
 from src.model import load_model
-from src.pipeline import (
-    evaluation_window_loader,
-    make_collate,
-    make_context_dataset,
-)
 from utils.checkpoint import CheckpointManager
 from utils.config import TrainConfig
 from utils.machines import machine_names
@@ -90,8 +86,7 @@ def main():
         type=int,
         help="Upper bound on the tokens the autoregressive pass decodes per answer (default: "
         "evaluation.max_new_tokens from the checkpoint config, 32 in the shipped configs). "
-        "Keep it at 32 to stay comparable with scripts/evaluation/test_icl_suite.py, which uses "
-        "--squad-max-new-tokens 32.",
+        "The shipped evaluation configuration uses 32 tokens.",
     )
     parser.add_argument(
         "--qa-batch-size",

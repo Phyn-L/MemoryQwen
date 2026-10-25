@@ -5,23 +5,19 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS = {'train': 'train.py', 'test': 'test.py', 'icl': 'evaluation/test_icl_suite.py'}
+SCRIPTS = {'train': 'train.py', 'test': 'test.py'}
 
 
 def command(mode, args, device_count):
     script = str(ROOT / 'scripts' / SCRIPTS[mode])
-    if mode == 'icl':
-        args = ['--worker', *args]
     if any(arg in ('-h', '--help') for arg in args):
         return [sys.executable, script, *args]
     count = int(os.environ.get('NUM_PROCESSES', str(max(1, device_count))))
     if count < 1 or (count > 1 and count > device_count):
         raise ValueError(f'NUM_PROCESSES={count}, but only {device_count} CUDA devices are visible')
-    if mode == 'icl' and device_count == 0:
-        raise RuntimeError('ICL inference requires a visible CUDA GPU')
     if count == 1:
         return [sys.executable, script, *args]
-    if mode != 'icl':
+    if count > 1:
         import importlib.util
         if importlib.util.find_spec('accelerate') is None:
             raise RuntimeError('Multi-GPU train/test requires accelerate in the active Python environment')
@@ -35,8 +31,6 @@ def main():
     mode, args = parser.parse_known_args()
     if mode.mode == 'train':
         os.environ.setdefault('PYTORCH_CUDA_ALLOC_CONF', 'expandable_segments:True')
-    if mode.mode == 'icl' and not any(a == '--config' or a.startswith('--config=') for a in args):
-        args = ['--config', 'configs/icl_zeroshot.yaml', *args]
     if any(a in ('-h', '--help') for a in args):
         count = 0
     else:

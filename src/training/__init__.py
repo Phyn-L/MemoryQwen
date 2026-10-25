@@ -1,5 +1,6 @@
 """Training loop utilities split from the command-line training entrypoint."""
-from .evaluation import should_evaluate, step_postfix
+from src.evaluation.eval_schedule import should_evaluate, step_postfix
+
 from .helpers import (
     _configure_run_paths,
     _gradient_norm,

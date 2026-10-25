@@ -483,7 +483,7 @@ def read_context_lengths(dataset, tokenizer):
     return lengths[: len(dataset)]
 
 
-class ConversationDataset(Dataset):
+class ContextDataset(Dataset):
     """Materialized conversation dataset backed by a filtered JSONL cache."""
 
     CACHE_VERSION = 5
@@ -504,9 +504,9 @@ class ConversationDataset(Dataset):
                  num_workers=0, pre_filtered: bool = False):
         """``pre_filtered`` says the file was already built with *these* filter options.
 
-        It is set by ``pipeline.make_context_dataset`` for ``cache/train.jsonl`` /
+        It is set by ``data_pipeline.make_context_dataset`` for ``cache/train.jsonl`` /
         ``cache/validation.jsonl`` when ``scripts/data/build_cache.py``'s fingerprint for this
-        config still matches (see ``pipeline.uses_filtered_cache``). Without it the loader
+        config still matches (see ``data_pipeline.uses_filtered_cache``). Without it the loader
         re-tokenizes every row of a file that was produced by that same filter and writes a
         second copy under ``data_cache_dir()`` -- minutes of I/O and a duplicate ``.jsonl``.
         """

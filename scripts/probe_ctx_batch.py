@@ -14,8 +14,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from scripts.test import evaluation_config
+from src.data_pipeline import make_collate, make_context_dataset
 from src.model import load_model
-from src.pipeline import make_collate, make_context_dataset
 from utils.checkpoint import CheckpointManager
 from utils.machines import machine_names
 

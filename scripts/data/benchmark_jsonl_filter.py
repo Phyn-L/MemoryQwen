@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure JSONL parsing and tokenizer filtering costs independently.
 
-The benchmark follows the filtering path used by ``src.data.ConversationDataset``:
+The benchmark follows the filtering path used by ``src.data.ContextDataset``:
 each non-empty JSONL line is decoded, its context and conversation schema are
 validated, and the context is tokenized before the long-context filter is applied.
 Only the timers are separate; the source file is still read once, so the result

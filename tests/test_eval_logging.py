@@ -180,7 +180,7 @@ def test_eval_report_keeps_global_counts_and_wraps_metadata_to_table_width():
 
 
 def test_window_progress_total_counts_only_batches_intersecting_rank_rows():
-    from src.evaluator import _window_batch_count, row_window
+    from src.evaluation.eval_facade import _window_batch_count, row_window
 
     assert _window_batch_count(row_window(1280, 0, 8), 24) == 7
     assert _window_batch_count(row_window(1280, 1, 8), 24) == 8
@@ -193,7 +193,7 @@ def test_eval_progress_only_main_rank_writes_to_terminal(monkeypatch):
 
     from rich.console import Console
 
-    from src import evaluator
+    from src.evaluation import eval_facade as evaluator
 
     for rank, enabled in ((0, True), (1, True), (1, False), (0, False)):
         output = io.StringIO()
@@ -218,7 +218,7 @@ def test_the_evaluator_has_the_teacher_forced_reconstruction_path():
     The autoregressive Recon pass it replaces decoded ``max_context_tokens`` tokens per
     context, which is why the training loop used to skip Recon entirely.
     """
-    from src.evaluator import Evaluator
+    from src.evaluation import Evaluator
 
     assert hasattr(Evaluator, "recon_teacher_forced")
     assert hasattr(Evaluator, "compare_reader_tasks")

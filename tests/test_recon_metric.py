@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.evaluator import Evaluator
+from src.evaluation import Evaluator
 from src.model import ContextMemoryModel
 from utils.config import TrainConfig
 

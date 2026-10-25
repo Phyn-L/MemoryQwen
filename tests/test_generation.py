@@ -292,13 +292,11 @@ def test_no_evaluation_decode_site_asks_for_sampling():
     """A source guard: adding a sampling flag to a decode call fails here."""
     sources = [
         REPO / "src" / "model.py",
-        REPO / "scripts" / "evaluation" / "test_icl_suite.py",
         REPO / "scripts" / "test.py",
-        REPO / "src" / "evaluator.py",
+        REPO / "src" / "evaluation" / "eval_qa.py",
     ]
     text = "\n".join(path.read_text(encoding="utf-8") for path in sources)
     assert "argmax" in text, "the prefix decoder picks the argmax token"
-    assert "do_sample=False" in text, "the HF generate call must say so explicitly"
     for banned in ("do_sample=True", "temperature=", "top_p=", "top_k=", "num_beams="):
         assert banned not in text, f"{banned} must not appear in a decode path"
 

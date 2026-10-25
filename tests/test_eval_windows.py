@@ -4,8 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.data import ConversationDataset
-from src.pipeline import (
+from src.data import ContextDataset
+from src.evaluation.eval_sampling import (
     evaluation_row_index,
     evaluation_window_loader,
     select_evaluation_samples,
@@ -41,7 +41,7 @@ class _Encoded:
 
 
 class _Tokenizer:
-    """Just enough tokenizer for the filter in ``ConversationDataset``.
+    """Just enough tokenizer for the filter in ``ContextDataset``.
 
     Flat ids for a single string, a list of them for a batch -- the real contract; a
     batch-shaped answer for a single string made the length rule read ``len([[tokens]]) == 1``.
@@ -97,7 +97,7 @@ def test_the_windowed_loader_fetches_only_the_window(tmp_path: Path):
         + "\n",
         encoding="utf-8",
     )
-    dataset = ConversationDataset(
+    dataset = ContextDataset(
         source, tokenizer=_Tokenizer(), max_context_tokens=64, allow_empty=True,
     )
     assert evaluation_row_index(dataset) == [0, 1, 3, 6, 7]
@@ -233,7 +233,7 @@ def test_evaluator_scores_every_dataset_without_a_combined_cap():
     from torch.utils.data import DataLoader
 
     from src.data import ContextRecord, ConversationMessage
-    from src.evaluator import Evaluator
+    from src.evaluation import Evaluator
     from utils.config import TrainConfig
 
     records = [
@@ -309,7 +309,7 @@ def test_compare_reader_tasks_reuses_the_sampled_contexts_for_recon():
     from torch.utils.data import DataLoader
 
     from src.data import ContextRecord, ConversationMessage
-    from src.evaluator import Evaluator
+    from src.evaluation import Evaluator
     from utils.config import TrainConfig
 
     records = [

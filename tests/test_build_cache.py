@@ -341,8 +341,8 @@ def test_quiet_and_no_progress_do_not_create_a_bar(tmp_path, monkeypatch):
 
 def test_the_loader_reads_a_fresh_cache_without_filtering_again(tmp_path):
     """A matching cache file must not be re-tokenized (that was minutes of duplicate work)."""
-    from src.data import ConversationDataset
-    from src.pipeline import uses_filtered_cache
+    from src.data import ContextDataset
+    from src.data_pipeline import uses_filtered_cache
 
     _meta(tmp_path, "train", [_row(f"context {i} " + "word " * i, [f"q{i}"], index=i)
                              for i in range(5)])
@@ -358,11 +358,11 @@ def test_the_loader_reads_a_fresh_cache_without_filtering_again(tmp_path):
     assert uses_filtered_cache(full(config), "train", tokenizer)
 
     cache_dir = tmp_path / "loader-cache"
-    dataset = ConversationDataset(
+    dataset = ContextDataset(
         config.cache_file("train"), tokenizer=tokenizer, max_context_tokens=8,
         cache_dir=cache_dir, pre_filtered=True,
     )
-    filtered = ConversationDataset(
+    filtered = ContextDataset(
         config.meta_file("train"), tokenizer=tokenizer, max_context_tokens=8,
         cache_dir=None,
     )
@@ -370,7 +370,7 @@ def test_the_loader_reads_a_fresh_cache_without_filtering_again(tmp_path):
     assert not list(cache_dir.glob("*")), "no second filtered copy is written"
 
     # The sample cap still applies to the direct read (and stops reading early).
-    capped = ConversationDataset(
+    capped = ContextDataset(
         config.cache_file("train"), tokenizer=tokenizer, max_context_tokens=8,
         cache_dir=None, max_samples=2, pre_filtered=True,
     )
@@ -379,7 +379,7 @@ def test_the_loader_reads_a_fresh_cache_without_filtering_again(tmp_path):
 
 
 def test_a_stale_or_overridden_file_is_still_filtered(tmp_path):
-    from src.pipeline import uses_filtered_cache
+    from src.data_pipeline import uses_filtered_cache
 
     def full(data_config):
         return SimpleNamespace(data=data_config)
@@ -409,7 +409,7 @@ def test_a_stale_or_overridden_file_is_still_filtered(tmp_path):
 
 def test_the_loader_preprocessing_cache_lives_with_the_data(tmp_path):
     """Loader-derived caches are not scattered into `outputs/`; they sit under the data root."""
-    from src.pipeline import data_cache_dir
+    from src.data_pipeline import data_cache_dir
 
     config = _config(tmp_path)
     assert data_cache_dir(SimpleNamespace(data=config)) == tmp_path / "1qa" / "cache" / "loader"
@@ -422,7 +422,7 @@ def test_the_loader_preprocessing_cache_lives_with_the_data(tmp_path):
 
 def test_a_filtered_row_cache_is_written_under_the_data_root(tmp_path):
     """The one case that still writes a JSONL: a file that needs the loader filter."""
-    from src.pipeline import make_context_dataset
+    from src.data_pipeline import make_context_dataset
 
     meta = _meta(tmp_path, "train", [_row(f"context {i} " + "word " * i, [f"q{i}"], index=i)
                                     for i in range(4)])
@@ -439,16 +439,16 @@ def test_a_filtered_row_cache_is_written_under_the_data_root(tmp_path):
 def test_a_large_cache_read_draws_a_progress_bar(tmp_path, monkeypatch):
     """The up-front parse of the built cache is the step that used to be silent."""
     import src.data as data_module
-    from src.data import ConversationDataset
+    from src.data import ContextDataset
 
     made: list[_Bar] = []
     monkeypatch.setattr(
         data_module, "Progress", lambda *args, **kwargs: _RichProgress(made, *args, **kwargs)
     )
     source = _meta(tmp_path, "train", [_row("short context", ["q1", "q2"], index=0)])
-    monkeypatch.setattr(ConversationDataset, "READ_BAR_MIN_BYTES", 1)
+    monkeypatch.setattr(ContextDataset, "READ_BAR_MIN_BYTES", 1)
 
-    dataset = ConversationDataset(source, tokenizer=_Tokenizer(), cache_dir=None, pre_filtered=True)
+    dataset = ContextDataset(source, tokenizer=_Tokenizer(), cache_dir=None, pre_filtered=True)
     assert len(dataset) == 1
     bar, = made
     assert bar.kwargs["total"] == source.stat().st_size
@@ -461,16 +461,16 @@ def test_a_large_cache_read_draws_a_progress_bar(tmp_path, monkeypatch):
 def test_a_capped_read_stays_silent_and_stops_early(tmp_path, monkeypatch):
     """`--max-samples` reads only a prefix, so it neither needs nor draws the bar."""
     import src.data as data_module
-    from src.data import ConversationDataset
+    from src.data import ContextDataset
 
     made: list[_Bar] = []
     monkeypatch.setattr(
         data_module, "Progress", lambda *args, **kwargs: _RichProgress(made, *args, **kwargs)
     )
     source = _meta(tmp_path, "train", [_row(f"context {i}", [f"q{i}"], index=i) for i in range(5)])
-    monkeypatch.setattr(ConversationDataset, "READ_BAR_MIN_BYTES", 1)
+    monkeypatch.setattr(ContextDataset, "READ_BAR_MIN_BYTES", 1)
 
-    dataset = ConversationDataset(
+    dataset = ContextDataset(
         source, tokenizer=_Tokenizer(), cache_dir=None, pre_filtered=True, max_samples=2
     )
     assert len(dataset) == 2
@@ -478,10 +478,10 @@ def test_a_capped_read_stays_silent_and_stops_early(tmp_path, monkeypatch):
 
 
 def _context_dataset(cache_path, tokenizer, config):
-    """A `ConversationDataset` over a built cache, i.e. what the sampler really receives."""
-    from src.data import ConversationDataset
+    """A `ContextDataset` over a built cache, i.e. what the sampler really receives."""
+    from src.data import ContextDataset
 
-    return ConversationDataset(
+    return ContextDataset(
         cache_path, tokenizer=tokenizer, max_context_tokens=config.max_context_tokens,
         cache_dir=None, pre_filtered=True,
     )

@@ -9,10 +9,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from src.exp_config import configure_run_paths, new_run_name
 from src.model import load_model
-from src.pipeline import (
-    new_run_name,
-)
 from utils import CheckpointManager, build_optimizer, build_scheduler, seed_everything
 from utils.config import TrainConfig, dtype_from_name
 from utils.machines import machine_names
@@ -24,11 +22,8 @@ from utils.tracking import init_tracking
 
 CONSOLE = Console()
 
+from src.evaluation.eval_schedule import should_evaluate, step_postfix
 from src.training.data import prepare_training_data
-from src.training.evaluation import should_evaluate, step_postfix
-from src.training.helpers import (
-    _configure_run_paths as _configure_run_paths_impl,
-)
 from src.training.helpers import (
     format_trainable_parameter_table,
     trainable_parameter_report,
@@ -80,7 +75,7 @@ training_stage = training_stage
 
 
 def _configure_run_paths(cfg, accelerator, resume):
-    return _configure_run_paths_impl(cfg, accelerator, resume, run_name_factory=new_run_name)
+    return configure_run_paths(cfg, accelerator, resume, run_name_factory=new_run_name)
 
 
 def compact_parameter_count(count):

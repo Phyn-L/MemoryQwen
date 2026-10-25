@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from pathlib import Path
 
 import torch
 from rich.table import Table
 
-from src.pipeline import model_run_label, new_run_name
-from utils.config import TrainConfig
+from src.exp_config import configure_run_paths
 from utils.reporting import THREE_LINE, render_rich, table_panel
 
 
@@ -122,26 +120,4 @@ def _gradient_norm(parameters) -> torch.Tensor:
         return torch.tensor(0.0)
     return torch.linalg.vector_norm(torch.stack(norms))
 
-def _configure_run_paths(cfg: TrainConfig, accelerator, resume: str | None, run_name_factory=new_run_name) -> None:
-    if resume:
-        run_dir = Path(resume).resolve().parent
-        if cfg.data.train_stage == "two_stage" and run_dir.name in {"recon", "qa"}:
-            run_dir = run_dir.parent
-        cfg.checkpoint.output_dir = str(run_dir)
-        cfg.logging.swanlab_run_name = cfg.logging.swanlab_run_name or run_dir.name
-        cfg.logging.swanlab_log_dir = cfg.checkpoint.output_dir
-        return
-    is_main = accelerator is None or accelerator.is_main_process
-    run_name = run_name_factory(cfg.model.name_or_path) if is_main else None
-    num_processes = accelerator.num_processes if accelerator is not None else 1
-    if num_processes > 1:
-        names = [run_name]
-        torch.distributed.broadcast_object_list(names, src=0)
-        run_name = names[0]
-    cfg.logging.swanlab_run_name = cfg.logging.swanlab_run_name or run_name
-    cfg.checkpoint.output_dir = str(
-        Path(cfg.checkpoint.output_dir)
-        / model_run_label(cfg.model.name_or_path)
-        / run_name
-    )
-    cfg.logging.swanlab_log_dir = cfg.checkpoint.output_dir
+_configure_run_paths = configure_run_paths
