@@ -5,8 +5,8 @@ model:
   attn_implementation: sdpa  # 注意力实现
   context_gradient_checkpointing: true  # 是否对 context 前向启用梯度检查点
   trainable_dtype: float32  # 可训练参数的数据类型
-  lora_rank: 8  # LoRA 秩
-  lora_alpha: 16.0  # LoRA 缩放系数
+  lora_rank: 16  # LoRA 秩
+  lora_alpha: 32.0  # LoRA 缩放系数
   lora_dropout: 0.0  # LoRA dropout 概率
   target_modules:  # 注入 LoRA 的模块名称
   - q_proj

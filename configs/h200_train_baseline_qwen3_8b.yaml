@@ -7,7 +7,7 @@ memory:
   context_layer_indices: [-1,-2,-3,-4]
   memory_resampler_layers: 8
   memory_resampler_heads: 4
-  memory_resampler_hidden_size: 1024
+  memory_resampler_hidden_size: 768
   memory_resampler_ffn_ratio: 4
 
   # Question-conditioned readout
@@ -24,7 +24,7 @@ memory:
 training:
   batch_size: 4
   gradient_accumulation_steps: 1
-  gradient_checkpoint_every_n_layers: 2
+  gradient_checkpoint_every_n_layers: 1
 data:
   loader:
     train_num_workers: 4
