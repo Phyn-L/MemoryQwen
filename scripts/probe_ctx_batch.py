@@ -60,6 +60,10 @@ def _probe(model, dataset, collate, device, batch_size, num_workers):
         num_workers=num_workers,
     )
     saw_batch = False
+    peak = 0.0
+    max_tokens = 0
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
     try:
         with torch.no_grad():
             for batch in loader:
@@ -68,16 +72,17 @@ def _probe(model, dataset, collate, device, batch_size, num_workers):
                 embedding = model.qwen.get_input_embeddings()
                 model.encode_context_prefix(embedding(context_ids), context_mask)
                 saw_batch = True
-                del context_ids, context_mask, batch
+                max_tokens = max(max_tokens, int(context_ids.size(1)))
                 if device.type == "cuda":
                     torch.cuda.synchronize(device)
-                    torch.cuda.reset_peak_memory_stats(device)
-        return saw_batch, None
+                    peak = max(peak, torch.cuda.max_memory_allocated(device) / 2**30)
+                del context_ids, context_mask, batch
+        return (saw_batch, None, peak, max_tokens)
     except torch.cuda.OutOfMemoryError as error:
         if device.type == "cuda":
             torch.cuda.empty_cache()
         gc.collect()
-        return False, str(error).splitlines()[0]
+        return False, str(error).splitlines()[0], peak, max_tokens
     finally:
         del loader
         gc.collect()
@@ -98,17 +103,22 @@ def main():
     while low + 1 < high:
         candidate = (low + high) // 2
         torch.cuda.empty_cache()
-        ok, error = _probe(model, dataset, collate, device, candidate, args.num_workers)
-        peak = torch.cuda.max_memory_allocated(device) / 2**30
+        ok, error, peak, max_tokens = _probe(
+            model, dataset, collate, device, candidate, args.num_workers
+        )
         if ok:
             low = candidate
-            print(f"ctx_batch_size={candidate}: OK, peak_allocated={peak:.2f} GiB")
+            print(
+                f"ctx_batch_size={candidate}: OK, peak_allocated={peak:.2f} GiB, "
+                f"padded_context_tokens={max_tokens}"
+            )
         else:
             high = candidate
             print(f"ctx_batch_size={candidate}: OOM ({error})")
     if low < args.min_batch_size:
         raise SystemExit("minimum ctx_batch_size does not fit in available GPU memory")
     print(f"recommended ctx_batch_size: {low}")
+    print(f"tested max_context_tokens: {cfg.data.max_context_tokens}")
     print("Use a smaller value for headroom when context lengths vary across datasets.")
 
 
