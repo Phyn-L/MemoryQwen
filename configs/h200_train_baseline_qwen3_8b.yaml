@@ -1,14 +1,26 @@
-# 实验层：h200（8xH200）上的 baseline。只写与 harness/train_baseline 不同的部分。
 _base_:
 - train_baseline.yaml
 - models/qwen3-8b.yaml
+
 memory:
   memory_length: 128
   context_layer_indices: [-1,-2,-3,-4]
   memory_resampler_layers: 8
-  memory_resampler_heads: 8
+  memory_resampler_heads: 4
   memory_resampler_hidden_size: 1024
   memory_resampler_ffn_ratio: 4
+
+  # Question-conditioned readout
+  readout_mode: memory_question
+  readout_length: 32
+  question_resampler_info_source: hidden
+  readout_keep_question_tokens: true
+  question_resampler_hidden_size: 512
+  question_resampler_layers: 4
+  question_resampler_heads: 4
+  question_resampler_ffn_ratio: 4
+  question_resampler_use_self_attention: true
+
 training:
   batch_size: 4
   gradient_accumulation_steps: 1
@@ -18,18 +30,15 @@ data:
     train_num_workers: 4
     train_persistent_workers: false
   task:
-    # 训练任务类型：mix、qa 或 recon
     train_stage: mix
-    recon_schedule: [0.5, 0.090909]
-    qa_schedule: [0.5, 0.909091]
+    recon_schedule: [1.0, 0.8]
+    qa_schedule: [1.0, 1.0]
     recon_schedule_curve: cosine
 evaluation:
   autoregressive_every: 2500  # 自回归验证与 checkpoint 的训练步间隔
-  qa_batch_size: 128  # QA 验证批大小
+  qa_batch_size: 24  # QA 验证批大小
 logging:
   log_every: 25  # 训练日志记录间隔（步）
   swanlab_mode: offline
-optimizer:
-  lr: 2.0e-5
 scheduler:
   warmup_steps: 2500  # 学习率预热步数
