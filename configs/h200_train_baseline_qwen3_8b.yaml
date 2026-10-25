@@ -45,5 +45,5 @@ scheduler:
   warmup_steps: 2500  # 学习率预热步数
 optimizer:
   name: adamw
-  lr: 5e-5
+  lr: 5.0e-5
   weight_decay: 0.01
