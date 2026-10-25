@@ -3,7 +3,7 @@
 The corpus has three artifact groups with one row per context and its QA pairs:
 one line per context with all of its QA pairs, no filtering beyond dropping structurally empty
 samples, MS MARCO contexts built from the selected passages only, and the per-dataset
-evaluation files under the directory names ``src/eval_data.py`` owns.
+evaluation files under the directory names ``src/evaluation/eval_data.py`` owns.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from scripts.data.build_1qa import (  # noqa: E402
     convert_rows,
     write_corpus,
 )
-from src.eval_data import meta_file, split_file, train_file, validation_file  # noqa: E402
+from src.evaluation.eval_data import meta_file, split_file, train_file, validation_file  # noqa: E402
 
 
 def _write_jsonl(path: Path, rows) -> Path:

@@ -1,4 +1,4 @@
-"""Question formatting shared by memory QA and the ICL baseline."""
+"""Question formatting shared by training and memory-model evaluation."""
 
 
 def format_question(question: str, dataset: str, metadata: dict) -> str:

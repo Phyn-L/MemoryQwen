@@ -1,7 +1,7 @@
 """Regression tests for the multi-checkpoint evaluation orchestrator.
 
 It drives ``scripts/test.py`` once per (checkpoint, dataset); the dataset's file comes from
-``src/eval_data.py``, which is what keeps this suite on the same data as the training pipeline.
+``src/evaluation/eval_data.py``, which is what keeps this suite on the same data as the training pipeline.
 """
 
 from __future__ import annotations

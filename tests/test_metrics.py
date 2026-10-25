@@ -1,6 +1,6 @@
 """Metric-stack contract.
 
-The evaluator and the ICL baseline must produce the *same* number for the same prediction.
+The evaluator must produce the *same* number for the same prediction.
 They previously differed in the normalizer (articles kept vs dropped) and in the reduction
 over several gold answers (first reference vs max over all). Both are now single-sourced,
 and this file pins that down:
@@ -9,8 +9,7 @@ and this file pins that down:
    accumulators into a list, so a key missing from that tuple -- or ordered differently on
    different ranks -- would silently mix values between metrics.
 2. There is exactly one normalizer, and it is the official SQuAD one.
-3. ``best_reference_metrics`` is the metric-wise max over references and agrees with
-   ``src.icl_baseline.example_metrics``, which is the number the baseline reports.
+3. ``best_reference_metrics`` is the metric-wise max over references.
 """
 from __future__ import annotations
 
@@ -19,26 +18,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.metrics import (  # noqa: E402
+from src.evaluation.eval_metrics import (  # noqa: E402
     METRIC_KEYS,
     best_reference_metrics,
     normalize_answer,
     qa_metrics,
 )
-
-SAMPLES = [
-    ("a cat", ["cat"]),
-    ("the cat", ["a cat"]),
-    ("cat", ["cat"]),
-    ("Paris", ["paris"]),
-    ("hello, world!", ["hello world"]),
-    ("", [""]),
-    ("", ["answer"]),
-    ("answer", [""]),
-    ("New York City", ["new york city", "NYC"]),
-    ("one two three four", ["one two three"]),
-    ("x y z", ["z y x"]),
-]
 
 
 def test_metric_keys_match_what_the_evaluator_produces():
@@ -69,17 +54,6 @@ def test_best_reference_metrics_is_the_metric_wise_max():
 
 def test_empty_reference_list_is_treated_as_one_empty_answer():
     assert best_reference_metrics("cat", []) == qa_metrics("cat", "")
-
-
-def test_official_metrics_match_the_icl_baseline_stack():
-    """The baseline's own per-example metrics must equal ours, key for key."""
-    from src.icl_baseline import example_metrics
-
-    for prediction, references in SAMPLES:
-        baseline = example_metrics(prediction, references)
-        ours = best_reference_metrics(prediction, references)
-        for key in METRIC_KEYS:
-            assert baseline[key] == ours[key], (prediction, references, key)
 
 
 def test_unigram_precision_is_gone():

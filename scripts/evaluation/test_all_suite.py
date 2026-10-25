@@ -1,9 +1,8 @@
 """Run the memory-side evaluator over checkpoints x datasets and write one summary.
 
 For every checkpoint and every dataset this orchestrator runs ``scripts/test.py`` on that
-dataset's own file (``src/eval_data.py`` decides where the file lives) and collects the
-per-dataset report into a single ``summary.csv``. It is the memory half of the reader
-comparison whose baseline half is ``scripts/evaluation/test_icl_suite.py``.
+dataset's own file (``src.evaluation.eval_data`` decides where the file lives) and collects the
+per-dataset report into a single ``summary.csv``.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from src.eval_data import DEFAULT_DATASETS, report_name, resolve, slug
+from src.evaluation.eval_data import DEFAULT_DATASETS, report_name, resolve, slug
 from utils.machines import machine_names
 from utils.model_paths import machine_paths
 

@@ -6,8 +6,8 @@ This entry point writes only the **raw, unfiltered** corpus under ``--root`` (de
 
 * ``meta/meta_<split>.json`` -- the merged split, one line per context with **all** of its QA
   pairs (JSON Lines content; ``scripts/data/build_cache.py`` filters it);
-* ``meta/<split>/<slug>.json`` -- the same rows per dataset (``src/eval_data.py`` owns those
-  directory names, so builder and readers cannot disagree);
+* ``meta/<split>/<slug>.json`` -- the same rows per dataset
+  (``src/evaluation/eval_data.py`` owns those directory names);
 * ``meta/build.manifest.json`` -- context/QA counts per dataset and split, plus which datasets
   have no such split at all.
 
@@ -54,8 +54,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.eval_data import DATASETS as EVAL_DATASETS  # noqa: E402
-from src.eval_data import SPLIT_DIRS, slug  # noqa: E402
+from src.evaluation.eval_data import DATASETS as EVAL_DATASETS  # noqa: E402
+from src.evaluation.eval_data import SPLIT_DIRS, slug  # noqa: E402
 
 DEFAULT_CACHE = Path("/data/lz/hf_cache")
 DEFAULT_ROOT = Path("contexts/1qa")

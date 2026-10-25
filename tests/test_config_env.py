@@ -121,7 +121,7 @@ TRAINING_CONFIGS = [
     for path in (
         sorted((REPO / "configs").glob("*.yaml"))
     )
-    if path.name not in {"test.yaml", "icl_zeroshot.yaml", *BASE_ONLY}
+    if path.name not in {"test.yaml", *BASE_ONLY}
     and not path.name.startswith("_")
 ]
 
@@ -196,14 +196,8 @@ def test_the_same_config_files_resolve_to_another_machine():
 
 def test_no_shipped_config_points_at_the_deprecated_aggregated_tree():
     """`<root>/aggregated` is the old corpus; the training configs must not resolve to it."""
-    for config in TRAINING_CONFIGS + [REPO / "configs/icl_zeroshot.yaml"]:
+    for config in TRAINING_CONFIGS:
         assert "aggregated" not in config.read_text(encoding="utf-8"), config
-
-
-def test_the_icl_baseline_defaults_follow_the_same_variables():
-    """The baseline script's own defaults must not be a second hardcoded copy."""
-    source = (REPO / "scripts" / "evaluation" / "test_icl_suite.py").read_text(encoding="utf-8")
-    assert "${MODEL_ROOT:-" in source and "${DATA_ROOT:-" in source
 
 
 def test_env_local_is_gitignored_so_machine_settings_cannot_be_committed():

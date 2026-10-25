@@ -1,11 +1,7 @@
 """Answer-level QA metrics: one implementation, one normalizer, one reduction.
 
-The training-time evaluator and the few-shot ICL baseline must produce the *same*
-number for the same prediction, otherwise comparing them is meaningless. They used to
-carry independent copies that differed in two ways -- the string normalizer (articles
-kept vs the official SQuAD normalizer) and the reduction over multiple gold answers
-(first reference vs max over all references). Both differences are now gone: the
-arithmetic, the normalizer and the multi-reference reduction all live here.
+The evaluator uses the official SQuAD normalizer and the metric-wise maximum over
+multiple gold answers. Both rules live here so evaluation paths cannot drift apart.
 
 The normalizer is the official SQuAD one (lowercase, punctuation stripped, articles
 dropped). It is exposed as the ``normalize`` argument rather than hard-coded, so a future
@@ -13,7 +9,7 @@ variant can be introduced explicitly instead of by editing the metric bodies.
 
 The scored set is ``em``, ``f1`` and ``rouge_l`` (see ``METRIC_KEYS``); ``f1`` is the
 official SQuAD token-level F1, so a number from here is directly comparable with published
-SQuAD results and with ``icl_baseline``.
+SQuAD results and with published SQuAD results.
 """
 
 import re
@@ -33,7 +29,7 @@ from collections.abc import Sequence
 # line with ``f1`` on this task while being the only metric that a truncated answer can
 # game, so it added a number without adding a signal. ``f1`` (the harmonic mean of the
 # same overlap) already covers that overlap and stays comparable to the SQuAD
-# literature. The real BLEU lives in ``icl_baseline.corpus_bleu``.
+# literature.
 METRIC_KEYS: tuple[str, ...] = ("em", "f1", "rouge_l")
 
 
@@ -49,13 +45,11 @@ def answer_line(text) -> str:
     """The answer span of a raw generation: its first non-empty line, stripped.
 
     A SQuAD answer is a phrase, but instruction-tuned models like to keep talking
-    (``"Paris\nExplanation: city in France"``). The ICL baseline always scored only the first
-    line while the evaluator scored the whole completion, so the *same* generation could be
-    ``em=1`` for one harness and ``em=0`` for the other -- sharing the normalizer and the
-    reduction did not make the numbers comparable on its own. Both call this now.
+    (``"Paris\nExplanation: city in France"``). Scoring the first non-empty line keeps the
+    answer span independent of trailing text.
 
     The first *non-empty* line, not ``splitlines()[0]``: a leading blank line is formatting,
-    not an empty answer, and both harnesses must treat it identically.
+    not an empty answer,
     """
     for line in str(text).splitlines():
         if line.strip():
@@ -118,8 +112,7 @@ def best_reference_metrics(prediction: str, references: Sequence[str]) -> dict[s
 
     SQuAD ships several annotator answers per question and a prediction counts as correct
     if it matches *any* of them; taking the max per metric (rather than one reference's
-    score) is what the published numbers do. Both the training evaluator and the ICL
-    baseline call this, so neither the normalizer nor the reduction can drift apart again.
+    score) is what the published numbers do.
     """
     references = tuple(references) or ("",)
     scored = [qa_metrics(prediction, reference) for reference in references]

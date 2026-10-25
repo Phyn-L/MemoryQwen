@@ -1,10 +1,8 @@
 """Every gold answer must survive the dataset and be used by the evaluator.
 
-The evaluator used to score against the first reference only, while the ICL baseline took
-the max over all of them. On SQuAD that is a systematic gap: most answered QA pairs carry
-three or more references (the counts per file are in
-`contexts/1qa/1qa-clean-splits.manifest.json`), so the evaluator was stricter than the
-baseline it is compared against.
+The evaluator scores against every reference. On SQuAD that matters because many answered QA
+pairs carry three or more references (the counts per file are in
+`contexts/1qa/1qa-clean-splits.manifest.json`).
 
 `first_token_em` had the same kind of quiet strictness: it compared raw token ids, so a
 correct word encoded with a leading space (` cat`, what the model generates) never matched
@@ -20,8 +18,8 @@ from types import SimpleNamespace
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.data import _messages_from_row  # noqa: E402
-from src.evaluator import Evaluator  # noqa: E402
-from src.metrics import best_reference_metrics  # noqa: E402
+from src.evaluation import Evaluator  # noqa: E402
+from src.evaluation.eval_metrics import best_reference_metrics  # noqa: E402
 
 
 def test_messages_keep_every_non_empty_gold_answer():
@@ -148,7 +146,7 @@ def test_multi_reference_reduction_is_a_max_not_the_first_reference():
 
 def test_conversation_dataset_offset_cache_keeps_every_reference(tmp_path):
     """The JSONL offset cache must preserve every answer reference."""
-    from src.data import ConversationDataset
+    from src.data import ContextDataset
 
     class _Tokenizer:
         name_or_path = "reference-test-tokenizer"
@@ -181,13 +179,13 @@ def test_conversation_dataset_offset_cache_keeps_every_reference(tmp_path):
     cache_dir = tmp_path / "cache"
     tokenizer = _Tokenizer()
 
-    built = ConversationDataset(
+    built = ContextDataset(
         source,
         tokenizer=tokenizer,
         max_context_tokens=64,
         cache_dir=cache_dir,
     )
-    reloaded = ConversationDataset(
+    reloaded = ContextDataset(
         source,
         tokenizer=tokenizer,
         max_context_tokens=64,

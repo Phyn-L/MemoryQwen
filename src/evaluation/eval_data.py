@@ -1,10 +1,7 @@
 """Where a dataset's evaluation file lives in the layout ``scripts/data/`` builds.
 
-One module decides this, so the memory-side orchestrator
-(``scripts/evaluation/test_all_suite.py``) and the ICL baseline
-(``scripts/evaluation/test_icl_suite.py``) cannot disagree about the paths again. They used to
-read ``<root>/<dataset>/{train,validation,test}.jsonl``, the layout of the deprecated
-``aggregated`` corpus, while the training pipeline moved to the 1QA build::
+The evaluation orchestrator (``scripts/evaluation/test_all_suite.py``) and the single-checkpoint
+entry point (``scripts/test.py``) resolve files from the 1QA build::
 
     <root>/1qa/meta/<split>/<slug>.json      # the dataset's own raw rows
     <root>/1qa/meta/meta_<split>.json        # the same rows for every dataset, merged

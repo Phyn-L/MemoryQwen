@@ -11,7 +11,7 @@
 - 原始语料构建：`python scripts/data/build_1qa.py`。
 - 过滤缓存构建：`python scripts/data/build_cache.py --config configs/train_baseline.yaml`；仅补长度文件可追加 `--lengths-only`。
 - 单 checkpoint 评测：`python scripts/test.py --checkpoint <path> --split validation`；默认恢复 checkpoint 内的配置。
-- 评测套件：`bash scripts/evaluation/test_all_suite.sh`；ICL 对照入口为 `scripts/evaluation/test_icl_suite.py`。
+- 评测套件：`bash scripts/evaluation/test_all_suite.sh`。
 - 测试：`PYTHONPATH=. python -m pytest -q`；静态检查：`python -m ruff check .` 和 `git diff --check`。
 
 训练入口由 `utils.launcher` 使用 `torch.distributed.run` 启动多进程，训练进程通过 Hugging Face Accelerate 管理 DDP/NCCL、梯度累积和 loader 准备。单卡运行时仍使用同一入口，但不会创建多进程组。
@@ -25,8 +25,8 @@
 | `src/model.py`                                                 | Qwen memory 模型、context 编码、QA/Recon、生成与 checkpointing |
 | `src/resampler.py`                                             | Context memory 压缩与 question readout                         |
 | `src/data.py`、`src/cache_build.py`                            | 数据加载、单一过滤实现、缓存指纹与长度 sidecar                 |
-| `src/eval_data.py`                                             | 评测数据集名称与划分路径的唯一解析入口                         |
-| `src/pipeline.py`、`src/evaluator.py`                          | loader、评测抽样、多卡评测与指标汇总                           |
+| `src/evaluation/eval_data.py`                                             | 评测数据集名称与划分路径的唯一解析入口                         |
+| `src/data_pipeline.py`、`src/evaluation/`                     | 数据装配、评测抽样、多卡评测与指标汇总                         |
 | `src/losses.py`                                                | QA、Recon 训练目标与评估统计                                   |
 | `utils/config.py`、`utils/machines.py`                         | YAML 继承、环境变量展开、配置校验、机器路径                    |
 | `utils/checkpoint.py`                                          | checkpoint 保存、加载与 best 更新                              |
@@ -59,7 +59,7 @@ Conversation 数据有独立的 `memory.conversation` 重压缩配置；不再�
 
 训练启动会补建缺失或过期的过滤缓存；只有指纹匹配才跳过 loader 再过滤。构建器和 loader 共用 `filter_rows_batch`，不要维护两套规则。sortish 优先复用长度 sidecar；当前长度测量保持串行。`train_max_samples`、`validation_max_samples` 是 loader 上限，不是缓存构建上限。
 
-训练/评测 QA 共用 `src/qa_prompt.py::format_question`。RACE 的 question 文本为 `question\nOptions:\n<option 1>\n<option 2>...`，回答目标是完整选项文本；该格式不追加 `Answer:`。ICL 评测由 `inference.prompt_mode` 选择 `instruct` 或 `raw`，默认 `instruct`。`instruct` 使用 system 指令和可选 demonstrations；`raw` 只在 user 消息中放 `context + 空行 + question`，不使用 system 指令和 demonstrations。两者默认都通过模型原生 chat template 渲染；raw 要求 `num_shots=0`。
+训练/评测 QA 共用 `src/qa_prompt.py::format_question`。RACE 的 question 文本为 `question\nOptions:\n<option 1>\n<option 2>...`，回答目标是完整选项文本；该格式不追加 `Answer:`。
 
 ## 模型、训练与评测
 

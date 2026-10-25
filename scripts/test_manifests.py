@@ -1,4 +1,4 @@
-"""Evaluate a MemoryQwen checkpoint on the shared ICL sample manifests."""
+"""Evaluate a MemoryQwen checkpoint on the shared sample manifests."""
 from __future__ import annotations
 
 import argparse
