@@ -48,7 +48,8 @@ evaluation:
   autoregressive_every: 2500
   max_eval_contexts_per_dataset: 512
   max_new_tokens: 64
-  qa_batch_size: 16
+  ctx_batch_size: 32
+  qa_batch_size: 8
   recon_teacherforce: true
   recon_autoregressive: false
 optimizer:

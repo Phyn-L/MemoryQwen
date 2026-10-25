@@ -36,7 +36,8 @@ data:
     recon_schedule_curve: cosine
 evaluation:
   autoregressive_every: 2500  # 自回归验证与 checkpoint 的训练步间隔
-  qa_batch_size: 24  # QA 验证批大小
+  ctx_batch_size: 512
+  qa_batch_size: 8  # QA 验证批大小
 logging:
   log_every: 25  # 训练日志记录间隔（步）
   swanlab_mode: offline
