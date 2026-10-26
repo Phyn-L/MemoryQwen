@@ -8,18 +8,12 @@ by the evaluator, not also registered here.
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-spec = importlib.util.spec_from_file_location(
-    "_train_script", REPO / "scripts/train.py"
-)
-train = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(train)
-from utils.reporting import format_evaluation_report
+from utils.reporting import eval_log_payloads, format_evaluation_report  # noqa: E402
 
 ANSWER_METRIC_KEYS = ("em", "f1", "rouge_l")
 
@@ -35,7 +29,7 @@ def test_generated_answer_metrics_and_dataset_metrics_are_logged():
             "dataset/hotpotqa(distractor)/f1": 0.5,
         }
     )
-    payloads = dict(train.eval_log_payloads({"qa_task": metrics, "recon_task": metrics}))
+    payloads = dict(eval_log_payloads({"qa_task": metrics, "recon_task": metrics}))
     for section in ("eval_qa", "eval_recon"):
         payload = payloads[section]
         assert payload["squad_EM"] == 0.8
@@ -65,7 +59,7 @@ def test_teacher_forced_reconstruction_metrics_are_logged():
         "dataset/squad/contexts": 256,
         "dataset/hotpotqa(distractor)/recon_ce": 1.4,
     }
-    (section, payload), = train.eval_log_payloads({"recon_task": metrics})
+    (section, payload), = eval_log_payloads({"recon_task": metrics})
     assert section == "eval_recon"
     assert payload["recon_ce"] == 1.25
     assert payload["recon_ppl"] == 3.49
@@ -77,17 +71,17 @@ def test_teacher_forced_reconstruction_metrics_are_logged():
 
 
 def test_evaluation_payloads_cover_exactly_what_was_returned():
-    assert train.eval_log_payloads() == []
+    assert eval_log_payloads() == []
     values = {"f1": 0.5, "recon_token_accuracy": 0.9, "dataset/squad/count": 3}
-    assert train.eval_log_payloads({"qa_task": values}) == [
+    assert eval_log_payloads({"qa_task": values}) == [
         ("eval_qa", {"f1": 0.5, "recon_token_accuracy": 0.9})
     ]
     # Non-scalars and tasks that returned nothing produce no payload.
-    assert train.eval_log_payloads({"qa_task": {"records": [1, 2]}}) == []
+    assert eval_log_payloads({"qa_task": {"records": [1, 2]}}) == []
 
 
 def test_autoregressive_reconstruction_uses_the_reconstruction_section():
-    assert train.eval_log_payloads(
+    assert eval_log_payloads(
         {"recon_autoregressive": {"recon_token_accuracy": 0.75}}
     ) == [("eval_recon", {"recon_token_accuracy": 0.75})]
 

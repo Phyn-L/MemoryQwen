@@ -9,8 +9,16 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from src.exp_config import configure_run_paths, new_run_name
+from src.exp_config import configure_run_paths
 from src.model import load_model
+from src.training.data import prepare_training_data
+from src.training.distributed import ddp_kwargs_for_stage
+from src.training.helpers import (
+    format_trainable_parameter_table,
+    trainable_parameter_report,
+)
+from src.training.loop import run_training_loop
+from src.training.resume import micro_batch_skip, optimizer_steps, resume_plan
 from utils import CheckpointManager, build_optimizer, build_scheduler, seed_everything
 from utils.config import TrainConfig, dtype_from_name
 from utils.machines import machine_names
@@ -21,71 +29,6 @@ from utils.reporting import (
 from utils.tracking import init_tracking
 
 CONSOLE = Console()
-
-from src.evaluation.eval_schedule import should_evaluate, step_postfix
-from src.training.data import prepare_training_data
-from src.training.helpers import (
-    format_trainable_parameter_table,
-    trainable_parameter_report,
-)
-from src.training.loop import run_training_loop
-from src.training.resume import micro_batch_skip, optimizer_steps, resume_plan
-from src.training.stages import sample_task_masks, training_stage
-from utils.reporting import eval_log_payloads as _eval_log_payloads
-
-# Compatibility exports for callers importing scripts.train helpers.
-# for epoch in range(start_epoch, total_epochs):
-# sampler.set_start_batch(skip_micro_batches)
-# skip_first_batches(train_loader, skip_micro_batches)
-# skip_first_batches(train_loader, skip_micro_batches)
-# step % cfg.logging.log_every == 0
-# for epoch in range(start_epoch, total_epochs):
-# if step >= total_steps:
-# should_evaluate(step, every, total_steps)
-# should_evaluate(step, every, total_steps)
-# step_postfix(logged, micro_batches_in_step)
-# status=" · ".join(
-# metrics is not None
-  # "train/lr" "grad_norm/total" "data/qa_probability" "data/recon_probability"
-# eval_log_payloads
-# world_size=
-
-
-# Public compatibility aliases for existing tests and launch helpers.
-eval_log_payloads = _eval_log_payloads
-should_evaluate = should_evaluate
-step_postfix = step_postfix
-sample_task_masks = sample_task_masks
-training_stage = training_stage
-
-# The implementation below is in src/training/loop.py; it retains the same optimizer-step semantics.
-# for epoch in range(start_epoch, total_epochs):
-# sampler.set_start_batch(skip_micro_batches)
-# skip_first_batches(train_loader, skip_micro_batches)
-# step % cfg.logging.log_every == 0
-# for epoch in range(start_epoch, total_epochs):
-# if step >= total_steps:
-# scheduler.step()
-# should_evaluate(step, every, total_steps)
-# should_evaluate(step, every, total_steps)
-# step_postfix(logged, micro_batches_in_step)
-# metrics is not None
-# "loss/ppl" "loss/qa_ppl" "loss/recon_ppl"
-# "data/qa_probability" "data/recon_probability"
-
-
-def _configure_run_paths(cfg, accelerator, resume):
-    return configure_run_paths(cfg, accelerator, resume, run_name_factory=new_run_name)
-
-
-def compact_parameter_count(count):
-    from src.training.helpers import compact_parameter_count as _count
-    return _count(count)
-
-
-def trainable_parameter_groups(parameters):
-    from src.training.helpers import trainable_parameter_groups as _groups
-    return _groups(parameters)
 
 
 def main() -> None:
@@ -127,7 +70,7 @@ def main() -> None:
 
     accelerator = None
     try:
-        from accelerate import Accelerator, DistributedDataParallelKwargs
+        from accelerate import Accelerator
 
         configured_dtype = dtype_from_name(cfg.model.torch_dtype)
         mixed_precision = {
@@ -135,15 +78,10 @@ def main() -> None:
             torch.float16: "fp16",
             torch.bfloat16: "bf16",
         }[configured_dtype]
-        ddp_kwargs = (
-            [DistributedDataParallelKwargs(find_unused_parameters=True)]
-            if cfg.data.train_stage == "two_stage"
-            else None
-        )
         accelerator = Accelerator(
             gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
             mixed_precision=mixed_precision if torch.cuda.is_available() else "no",
-            kwargs_handlers=ddp_kwargs,
+            kwargs_handlers=ddp_kwargs_for_stage(cfg.data.train_stage),
         )
         device = accelerator.device
     except ImportError as error:
@@ -156,7 +94,9 @@ def main() -> None:
     else:
         trainable = []
 
-    data = prepare_training_data(cfg, tokenizer, model, accelerator, device, args.resume, _configure_run_paths, CONSOLE)
+    data = prepare_training_data(
+        cfg, tokenizer, model, accelerator, device, args.resume, configure_run_paths, CONSOLE
+    )
     train_collate = data["train_collate"]
     sampler = data["sampler"]
     train_loader = data["train_loader"]

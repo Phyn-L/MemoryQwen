@@ -16,7 +16,6 @@ Four behaviours a single-epoch run depends on, and that are easy to lose in a re
 """
 from __future__ import annotations
 
-import importlib.util
 import math
 import sys
 from pathlib import Path
@@ -26,23 +25,21 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from src.evaluation.eval_schedule import should_evaluate, step_postfix  # noqa: E402
 from utils.config import LoggingConfig, TrainConfig  # noqa: E402
 
 TRAIN_PY = REPO / "scripts" / "train.py"
+LOOP_PY = REPO / "src" / "training" / "loop.py"
 CONFIG = REPO / "configs/train_baseline.yaml"
 STEPS_PER_EPOCH = 7890
 
 
 def _train_source() -> str:
+    return LOOP_PY.read_text(encoding="utf-8")
+
+
+def _main_source() -> str:
     return TRAIN_PY.read_text(encoding="utf-8")
-
-
-def _train_module():
-    spec = importlib.util.spec_from_file_location("_schedule_train_script", TRAIN_PY)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["_schedule_train_script"] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def test_log_every_defaults_to_the_historical_resolution_and_is_validated():
@@ -57,18 +54,17 @@ def test_log_every_defaults_to_the_historical_resolution_and_is_validated():
 
 def test_the_last_step_is_always_evaluated():
     """500 over 7,890 fires last at 7,500 (95%), 1000 at 7,000 (89%): the end must be scored."""
-    train = _train_module()
-    assert train.should_evaluate(500, 500, STEPS_PER_EPOCH)
-    assert not train.should_evaluate(501, 500, STEPS_PER_EPOCH)
-    assert train.should_evaluate(STEPS_PER_EPOCH, 500, STEPS_PER_EPOCH)
-    assert train.should_evaluate(STEPS_PER_EPOCH, 1000, STEPS_PER_EPOCH)
+    assert should_evaluate(500, 500, STEPS_PER_EPOCH)
+    assert not should_evaluate(501, 500, STEPS_PER_EPOCH)
+    assert should_evaluate(STEPS_PER_EPOCH, 500, STEPS_PER_EPOCH)
+    assert should_evaluate(STEPS_PER_EPOCH, 1000, STEPS_PER_EPOCH)
     # ... and not one step earlier, or every step would end up evaluating.
-    assert not train.should_evaluate(STEPS_PER_EPOCH - 1, 1000, STEPS_PER_EPOCH)
+    assert not should_evaluate(STEPS_PER_EPOCH - 1, 1000, STEPS_PER_EPOCH)
 
 
 def test_the_loop_takes_its_cadences_from_the_config():
     source = _train_source()
-    assert "step % cfg.logging.log_every == 0" in source or "(step + 1) % cfg.logging.log_every == 0" in source
+    assert "(step + 1) % cfg.logging.log_every == 0" in source
     assert "step % 10 == 0" not in source, "the loss-logging cadence must come from the config"
     assert source.count("should_evaluate(") >= 2, "autoregressive evaluation must use the final-step rule"
     assert "teacher_metrics = evaluator.teacher_forced" not in source
@@ -76,7 +72,7 @@ def test_the_loop_takes_its_cadences_from_the_config():
 
 
 def test_the_loop_echoes_the_resolved_schedule():
-    source = _train_source()
+    source = _main_source()
     assert 'title="Training Schedule"' in source
     for field in (
         '"train"',
@@ -145,7 +141,7 @@ def test_the_scheduler_is_not_wrapped_by_accelerate():
     four loop steps. The scheduler therefore stays unwrapped and the loop steps it.
     """
     source = _train_source()
-    prepared = _parenthesised_call(source, "accelerator.prepare(")
+    prepared = _parenthesised_call(_main_source(), "accelerator.prepare(")
     assert "scheduler" not in prepared, (
         "passing the scheduler to accelerator.prepare() compresses the LR schedule by the "
         f"rank count; prepared call was: {prepared}"
@@ -199,10 +195,9 @@ def test_the_progress_line_carries_loss_qa_recon_and_ppl_at_once():
     The loop used to set `{loss, ppl}` per micro-batch and then `{loss}` at every optimizer
     step, so with the default accumulation of 1 the perplexity was wiped on every step.
     """
-    module = _train_module()
     # Sums over a two-micro-batch group (what `group_terms` holds at the boundary).
     terms = {"loss": 24.0, "qa_loss": 20.0, "recon_loss": 4.0}
-    postfix = module.step_postfix(terms, 2)
+    postfix = step_postfix(terms, 2)
     assert postfix["loss"] == "12.0000"
     assert postfix["qa"] == "10.0000"
     assert postfix["recon"] == "2.0000"
@@ -211,8 +206,8 @@ def test_the_progress_line_carries_loss_qa_recon_and_ppl_at_once():
 
     # A single-micro-batch view is the running mean of the group, and the perplexity of a
     # large QA loss is clamped instead of overflowing.
-    assert module.step_postfix(terms, 1)["loss"] == "24.0000"
-    assert module.step_postfix({"loss": 1.0, "qa_loss": 1e6}, 1)["ppl"] == f"{math.exp(20.0):.2f}"
+    assert step_postfix(terms, 1)["loss"] == "24.0000"
+    assert step_postfix({"loss": 1.0, "qa_loss": 1e6}, 1)["ppl"] == f"{math.exp(20.0):.2f}"
 
 
 def test_the_loop_does_not_overwrite_the_postfix_with_loss_only():

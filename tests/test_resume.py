@@ -9,7 +9,6 @@ A/B into a different experiment.
 """
 from __future__ import annotations
 
-import importlib.util
 import sys
 import tempfile
 from pathlib import Path
@@ -21,19 +20,19 @@ from torch.utils.data import DataLoader, Dataset
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
-
-from src.data.sortish_sampler import SortishSampler
-from utils.checkpoint import CheckpointManager  # noqa: E402
-
 TRAIN_PY = REPO / "scripts" / "train.py"
 
-
-def _train_module():
-    spec = importlib.util.spec_from_file_location("_resume_train_script", TRAIN_PY)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["_resume_train_script"] = module
-    spec.loader.exec_module(module)
-    return module
+from src.data.sortish_sampler import SortishSampler
+from src.exp_config import configure_run_paths
+from src.training.helpers import (
+    compact_parameter_count,
+    format_trainable_parameter_table,
+    trainable_parameter_groups,
+    trainable_parameter_report,
+)
+from src.training.resume import resume_plan
+from src.training.stages import training_stage
+from utils.checkpoint import CheckpointManager  # noqa: E402
 
 
 class _Tiny(nn.Module):
@@ -86,22 +85,21 @@ def test_sampler_offset_skips_dataset_reads_and_collation(monkeypatch):
 
 
 def test_startup_report_lists_trainable_tensors_and_resolves_checkpoint_interval():
-    module = _train_module()
     model = nn.Sequential(nn.Linear(3, 2), nn.Linear(2, 1))
     model[0].weight.requires_grad_(False)
 
-    parameters, total = module.trainable_parameter_report(model)
+    parameters, total = trainable_parameter_report(model)
     assert [name for name, _, _ in parameters] == ["0.bias", "1.weight", "1.bias"]
     assert total == sum(count for _, _, count in parameters)
-    assert module.trainable_parameter_groups(parameters) == [
+    assert trainable_parameter_groups(parameters) == [
         ("0", 1, 2),
         ("1", 2, 3),
     ]
-    assert module.compact_parameter_count(1_234_567) == "1.2 M"
-    table = module.format_trainable_parameter_table(parameters)
+    assert compact_parameter_count(1_234_567) == "1.2 M"
+    table = format_trainable_parameter_table(parameters)
     assert "Name" in table and "Type" in table and "Params" in table
     assert "Trainable params" in table and "5" in table
-    resampler_table = module.format_trainable_parameter_table(
+    resampler_table = format_trainable_parameter_table(
         [("resampler.latents", (4, 8), 32)]
     )
     assert "question_resampler" in resampler_table
@@ -130,7 +128,7 @@ def test_resume_keeps_sharded_tail_and_never_loads_skipped_batches(monkeypatch, 
 
 
 def test_resume_plan_covers_the_three_cases():
-    plan = _train_module().resume_plan
+    plan = resume_plan
     assert plan(0, 3945, 1) == (0, 0), "fresh run: epoch 0, nothing skipped"
     assert plan(1, 3945, 1) == (0, 1), "resume mid-epoch: start there, skip what was consumed"
     assert plan(2243, 2630, 1) == (0, 2243), "the 14:31 crash point"
@@ -144,11 +142,10 @@ def test_resume_plan_covers_the_three_cases():
 def test_two_stage_resume_at_recon_boundary_continues_in_qa_stage(tmp_path):
     from utils.config import TrainConfig
 
-    train = _train_module()
     cfg = TrainConfig.from_dict({"data": {"train_stage": "two_stage"}})
     resume = tmp_path / "run" / "recon" / "last.pt"
     cfg.checkpoint.output_dir = str(tmp_path / "configured-output")
-    train._configure_run_paths(cfg, None, str(resume))
+    configure_run_paths(cfg, None, str(resume))
     assert Path(cfg.checkpoint.output_dir) == tmp_path / "run"
 
     model = _Tiny()
@@ -165,9 +162,9 @@ def test_two_stage_resume_at_recon_boundary_continues_in_qa_stage(tmp_path):
     step, _ = CheckpointManager(resume.parent).load(
         resume, resumed, resumed_optimizer, resumed_scheduler
     )
-    start_epoch, skipped_batches = train.resume_plan(step, 4, 4)
+    start_epoch, skipped_batches = resume_plan(step, 4, 4)
     assert (start_epoch, skipped_batches) == (2, 0)
-    assert train.training_stage("two_stage", start_epoch, 2) == "qa"
+    assert training_stage("two_stage", start_epoch, 2) == "qa"
 
 
 def test_a_periodic_save_refreshes_last_pt_and_records_the_rank_count():
@@ -218,17 +215,16 @@ def test_a_fresh_run_nests_its_directory_under_the_configured_output_dir():
     """
     from utils.config import TrainConfig
 
-    train = _train_module()
     config = TrainConfig.from_file(REPO / "configs/train_baseline.yaml")
     output_root = Path(config.checkpoint.output_dir)
-    train._configure_run_paths(config, None, None)
+    configure_run_paths(config, None, None)
     assert Path(config.checkpoint.output_dir).parent == output_root / "Qwen1.7B"
     assert config.logging.swanlab_run_name in config.checkpoint.output_dir
     assert config.logging.swanlab_log_dir == config.checkpoint.output_dir
 
     # Resuming keeps the checkpoint's own directory instead of making a new one.
     resumed = TrainConfig.from_file(REPO / "configs/train_baseline.yaml")
-    train._configure_run_paths(resumed, None, "outputs/ab_h200_on/Qwen1.7B_x/step-400.pt")
+    configure_run_paths(resumed, None, "outputs/ab_h200_on/Qwen1.7B_x/step-400.pt")
     # Resolve()d on purpose: continuing a run must land in the same absolute directory the
     # checkpoint came from, not in a path relative to wherever the launcher happens to be.
     assert Path(resumed.checkpoint.output_dir).resolve() == Path(
@@ -240,13 +236,13 @@ def test_a_fresh_run_nests_its_directory_under_the_configured_output_dir():
 def test_dashboard_name_does_not_replace_timestamped_directory():
     from utils.config import TrainConfig
 
-    train = _train_module()
     config = TrainConfig()
     config.model.name_or_path = "/models/Qwen3-8B"
     config.logging.swanlab_run_name = "reader-off"
     config.logging.swanlab_log_dir = "/old/logs"
-    train.new_run_name = lambda _: "Qwen8B_20261015_123456"
-    train._configure_run_paths(config, None, None)
+    configure_run_paths(
+        config, None, None, run_name_factory=lambda _: "Qwen8B_20261015_123456"
+    )
     assert config.checkpoint.output_dir == "outputs/Qwen8B/Qwen8B_20261015_123456"
     assert config.logging.swanlab_log_dir == config.checkpoint.output_dir
     assert config.logging.swanlab_run_name == "reader-off"
@@ -254,19 +250,20 @@ def test_dashboard_name_does_not_replace_timestamped_directory():
 
 def test_the_training_loop_honours_the_resumed_position_and_the_step_budget():
     source = TRAIN_PY.read_text(encoding="utf-8")
+    loop_source = (REPO / "src/training/loop.py").read_text(encoding="utf-8")
     compact = "".join(source.split())
     assert "resume_plan(step,steps_per_epoch,total_epochs)" in compact
     assert "micro_batch_skip(step,steps_per_epoch,accumulation)" in compact
-    assert "for epoch in range(start_epoch, total_epochs)" in source
+    assert "for epoch in range(start_epoch, total_epochs)" in loop_source
     # Optimizer steps are what resume plans with; the loop indexes micro-batches.
-    assert "skip_first_batches(train_loader, skip_micro_batches)" in source
-    assert "sampler.set_start_batch(skip_micro_batches)" in source
-    assert "batch_index < skip_micro_batches" not in source
+    assert "skip_first_batches(train_loader, skip_micro_batches)" in loop_source
+    assert "sampler.set_start_batch(skip_micro_batches)" in loop_source
+    assert "batch_index < skip_micro_batches" not in loop_source
     assert "steps_per_epoch=optimizer_steps(micro_batches_per_rank,accumulation)" in compact
-    assert "if step >= total_steps:" in source, (
+    assert "if step >= total_steps:" in loop_source, (
         "without this a resumed run adds a whole extra epoch on top of the loaded step"
     )
-    assert "world_size=" in source, "the rank count must be saved for the resume warning"
+    assert "world_size=" in loop_source, "the rank count must be saved for the resume warning"
 
 
 if __name__ == "__main__":

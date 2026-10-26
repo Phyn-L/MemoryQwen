@@ -9,7 +9,6 @@ indexes micro-batches).
 """
 from __future__ import annotations
 
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -18,12 +17,9 @@ import torch
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from src.training.resume import micro_batch_skip, optimizer_steps  # noqa: E402
+from src.training.stages import sample_task_masks  # noqa: E402
 from utils.config import LossConfig, TrainConfig  # noqa: E402
-
-spec = importlib.util.spec_from_file_location("_accum_train_script", REPO / "scripts" / "train.py")
-train = importlib.util.module_from_spec(spec)
-sys.modules["_accum_train_script"] = train
-spec.loader.exec_module(train)
 
 
 def _gradients(model, batches, accumulation):
@@ -66,17 +62,17 @@ def test_a_group_shorter_than_the_accumulation_steps_is_still_an_average():
 
 
 def test_optimizer_steps_round_up_and_skip_whole_groups():
-    assert train.optimizer_steps(8, 1) == 8
-    assert train.optimizer_steps(8, 4) == 2
-    assert train.optimizer_steps(9, 4) == 3, "a partial last group still steps"
-    assert train.optimizer_steps(0, 4) == 0
+    assert optimizer_steps(8, 1) == 8
+    assert optimizer_steps(8, 4) == 2
+    assert optimizer_steps(9, 4) == 3, "a partial last group still steps"
+    assert optimizer_steps(0, 4) == 0
 
     # 3 optimizer steps per epoch with 4 micro-batches each: resuming at step 5 means
     # epoch 1 has already consumed 2 groups = 8 micro-batches.
-    assert train.micro_batch_skip(5, 3, 4) == 8
-    assert train.micro_batch_skip(3, 3, 4) == 0
-    assert train.micro_batch_skip(0, 3, 4) == 0
-    assert train.micro_batch_skip(5, 0, 4) == 0
+    assert micro_batch_skip(5, 3, 4) == 8
+    assert micro_batch_skip(3, 3, 4) == 0
+    assert micro_batch_skip(0, 3, 4) == 0
+    assert micro_batch_skip(5, 0, 4) == 0
 
 
 def test_the_config_validates_the_accumulation_and_defaults_to_one_step_per_batch():
@@ -123,20 +119,20 @@ def test_the_objective_weights_are_scheduled_per_optimizer_step():
 def test_independent_task_sampling_keeps_every_context_and_allows_both_tasks():
     qa_contexts = torch.tensor([0, 0, 1, 1, 2, 2])
     recon_contexts = torch.tensor([0, 1, 2])
-    qa_rows, recon_rows = train.sample_task_masks(
+    qa_rows, recon_rows = sample_task_masks(
         qa_contexts, recon_contexts, 0.4, 0.3, seed=7, num_contexts=3
     )
     assert torch.all(qa_rows | recon_rows[qa_contexts])
     assert torch.equal(
         qa_rows,
-        train.sample_task_masks(
+        sample_task_masks(
             qa_contexts, recon_contexts, 0.4, 0.3, seed=7, num_contexts=3
         )[0],
     )
 
 
 def test_task_sampling_falls_back_when_both_probabilities_are_zero():
-    qa_rows, recon_rows = train.sample_task_masks(
+    qa_rows, recon_rows = sample_task_masks(
         torch.arange(4), torch.arange(4), 0.0, 0.0, seed=1, num_contexts=4
     )
     assert torch.all(qa_rows | recon_rows)
