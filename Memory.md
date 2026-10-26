@@ -24,9 +24,9 @@
 | `configs/`                                                     | 共享 harness、模型定义和训练配置预设                           |
 | `src/model.py`                                                 | Qwen memory 模型、context 编码、QA/Recon、生成与 checkpointing |
 | `src/resampler.py`                                             | Context memory 压缩与 question readout                         |
-| `src/data.py`、`src/cache_build.py`                            | 数据加载、单一过滤实现、缓存指纹与长度 sidecar                 |
+| `src/data/`                                                  | 数据记录、预处理、ContextDataset、采样、collate 与缓存         |
 | `src/evaluation/eval_data.py`                                             | 评测数据集名称与划分路径的唯一解析入口                         |
-| `src/data_pipeline.py`、`src/evaluation/`                     | 数据装配、评测抽样、多卡评测与指标汇总                         |
+| `src/data/pipeline.py`、`src/evaluation/`                     | 数据装配、评测抽样、多卡评测与指标汇总                         |
 | `src/losses.py`                                                | QA、Recon 训练目标与评估统计                                   |
 | `utils/config.py`、`utils/machines.py`                         | YAML 继承、环境变量展开、配置校验、机器路径                    |
 | `utils/checkpoint.py`                                          | checkpoint 保存、加载与 best 更新                              |
@@ -55,11 +55,11 @@ DataLoader 的运行参数按用途分开配置：`data.loader.train_num_workers
 
 `build_1qa.py` 不做训练长度过滤和条数截断，只丢弃结构上无效的 context/QA；MS MARCO 只使用 `is_selected=1` 的 passage。context 不借用其他行文本。数据缺失划分或该划分无可用行时按 `test → validation → train` 回退，并记录实际来源。
 
-Conversation 数据有独立的 `memory.conversation` 重压缩配置；不再配置 `max_conversation_tokens`。`data.max_question_tokens` 仍用于普通 QA 问题长度过滤，同时当前 `src/data.py` 还会对满足条件的短单轮 prompt 调用 `_trim_prompt_parts`，因此不要把它描述为已全局删除。`data.filter_qa_pair_answers` 默认关闭；开启后，来自 `qa_pairs` 的数据行只要有任一 QA 的问题或答案超出配置 token 长度、或为空，就会整行过滤。关闭时这类 QA-pair 行不会因问题/答案长度检查被过滤，后续 collate 仍按长度配置截断。
+Conversation 数据有独立的 `memory.conversation` 重压缩配置；不再配置 `max_conversation_tokens`。`data.max_question_tokens` 仍用于普通 QA 问题长度过滤，同时当前 `src/data/` 还会对满足条件的短单轮 prompt 调用 `_trim_prompt_parts`，因此不要把它描述为已全局删除。`data.filter_qa_pair_answers` 默认关闭；开启后，来自 `qa_pairs` 的数据行只要有任一 QA 的问题或答案超出配置 token 长度、或为空，就会整行过滤。关闭时这类 QA-pair 行不会因问题/答案长度检查被过滤，后续 collate 仍按长度配置截断。
 
 训练启动会补建缺失或过期的过滤缓存；只有指纹匹配才跳过 loader 再过滤。构建器和 loader 共用 `filter_rows_batch`，不要维护两套规则。sortish 优先复用长度 sidecar；当前长度测量保持串行。`train_max_samples`、`validation_max_samples` 是 loader 上限，不是缓存构建上限。
 
-训练/评测 QA 共用 `src/qa_prompt.py::format_question`。RACE 的 question 文本为 `question\nOptions:\n<option 1>\n<option 2>...`，回答目标是完整选项文本；该格式不追加 `Answer:`。
+训练/评测 QA 共用 `src/data/records.py::format_question`。RACE 的 question 文本为 `question\nOptions:\n<option 1>\n<option 2>...`，回答目标是完整选项文本；该格式不追加 `Answer:`。
 
 ## 模型、训练与评测
 

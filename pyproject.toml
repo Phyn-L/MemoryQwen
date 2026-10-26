@@ -22,7 +22,7 @@ addopts = "-q"
 markers = ["gpu: requires a CUDA device with free memory"]
 filterwarnings = [
   # The row-filter pools fork a parent that may already hold tokenizer/torch threads
-  # (src/cache_build.py, src/data.py::filter_row_chunks). Deliberate: the pools are short
+  # (src/data/cache.py, src/data/preprocessing.py::filter_row_chunks). Deliberate: the pools are short
   # lived, their output is verified byte-identical to the serial path, and the loader path has
   # done this since before the cache build existed. `multiprocessing.set_start_method
   # ("forkserver")` is the mitigation if a hang ever shows up.
