@@ -15,13 +15,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.data import (
-    ContextRecord,
-    _messages_from_row,
-    _trim_prompt_parts,
-    _user_prefix_text,
-    collate_context_records,
-)
+from src.data.chat_prompt import _user_prefix_text
+from src.data.collate import _trim_prompt_parts, collate_context_records
+from src.data.records import ContextRecord, _messages_from_row
 
 
 def test_trim_prompt_accepts_a_header_newline_merged_with_question():

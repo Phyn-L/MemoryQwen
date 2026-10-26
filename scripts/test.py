@@ -9,7 +9,7 @@ import torch
 import yaml
 from torch.utils.data import DataLoader
 
-from src.data_pipeline import make_collate, make_context_dataset
+from src.data.pipeline import make_collate, make_context_dataset
 from src.evaluation import Evaluator, evaluation_window_loader
 from src.model import load_model
 from utils.checkpoint import CheckpointManager

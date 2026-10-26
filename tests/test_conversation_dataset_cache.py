@@ -1,8 +1,8 @@
 import json
 from pathlib import Path
 
-from src.cache_utils import tokenizer_fingerprint
-from src.data import ContextDataset
+from src.data.cache import tokenizer_fingerprint
+from src.data.dataset import ContextDataset
 
 
 class _Tokenizer:

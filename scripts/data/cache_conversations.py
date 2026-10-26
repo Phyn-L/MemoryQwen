@@ -18,8 +18,8 @@ if str(ROOT) not in sys.path:
 
 from transformers import AutoTokenizer
 
-from src.data import SortishSampler
-from src.data_pipeline import data_cache_dir, make_context_dataset, resolve_split_limit
+from src.data.pipeline import data_cache_dir, make_context_dataset, resolve_split_limit
+from src.data.sortish_sampler import SortishSampler
 from utils.config import TrainConfig
 
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Filter the raw 1QA meta splits into the cache a training run reads.
 
-The rules live in ``src/cache_build.py``; this is the command line around them.
+The rules live in ``src/data/cache.py``; this is the command line around them.
 
 Usage::
 
@@ -28,7 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from src.cache_build import (  # noqa: E402
+from src.data.cache import (  # noqa: E402
     CACHE_SPLITS,
     DEFAULT_BUILD_WORKERS,
     build,

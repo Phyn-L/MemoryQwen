@@ -1765,7 +1765,7 @@ def load_model(cfg):
     # One tokenizer, and a pad token even for checkpoints whose config has none.
     tok = AutoTokenizer.from_pretrained(cfg.model.name_or_path, local_files_only=True)
     tok.pad_token = tok.pad_token or tok.eos_token
-    from .data import split_chat_prompt
+    from .data.chat_prompt import split_chat_prompt
 
     recon_prompt = tok.apply_chat_template(
         [{"role": "user", "content": ""}],

@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from src.data import ContextRecord, collate_context_records, split_chat_prompt
+from src.data.chat_prompt import split_chat_prompt
+from src.data.collate import collate_context_records
+from src.data.records import ContextRecord
 
 QWEN3_TOKENIZER = Path(
     "/data/lz/hf_cache/hub/models--Qwen--Qwen3-1.7B/snapshots/"

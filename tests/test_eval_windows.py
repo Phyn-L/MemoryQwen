@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.data import ContextDataset
+from src.data.dataset import ContextDataset
 from src.evaluation.eval_sampling import (
     evaluation_row_index,
     evaluation_window_loader,
@@ -197,7 +197,7 @@ def test_per_dataset_random_samples_are_seeded_and_independent_of_world_size():
 
 
 def test_rank_sharding_keeps_conversation_turn_history():
-    from src.data import ContextRecord, ConversationMessage
+    from src.data.records import ContextRecord, ConversationMessage
 
     record = ContextRecord(
         "context",
@@ -232,7 +232,7 @@ def test_evaluator_scores_every_dataset_without_a_combined_cap():
     import torch
     from torch.utils.data import DataLoader
 
-    from src.data import ContextRecord, ConversationMessage
+    from src.data.records import ContextRecord, ConversationMessage
     from src.evaluation import Evaluator
     from utils.config import TrainConfig
 
@@ -308,7 +308,7 @@ def test_compare_reader_tasks_reuses_the_sampled_contexts_for_recon():
     import torch
     from torch.utils.data import DataLoader
 
-    from src.data import ContextRecord, ConversationMessage
+    from src.data.records import ContextRecord, ConversationMessage
     from src.evaluation import Evaluator
     from utils.config import TrainConfig
 

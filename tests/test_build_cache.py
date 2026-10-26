@@ -1,7 +1,7 @@
 """The filtered cache: raw meta splits in, ``cache/{train,validation}.jsonl`` out.
 
-``src/cache_build.py`` is what turns the unfiltered ``meta/meta_<split>.json`` into the files a
-run reads. Its job is to apply *exactly* the loader's filter (``data.filter_rows_batch``) and to
+``src/data/cache.py`` is what turns the unfiltered ``meta/meta_<split>.json`` into the files a
+run reads. Its job is to apply *exactly* the loader's filter (``data.preprocessing.filter_rows_batch``) and to
 know when its output is stale; both are things a silent change would corrupt (a training run
 would quietly see more or fewer rows than its config says).
 """
@@ -17,7 +17,7 @@ import pytest
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from src.cache_build import (  # noqa: E402
+from src.data.cache import (  # noqa: E402
     build,
     cache_fingerprint,
     cache_is_fresh,
@@ -245,7 +245,7 @@ def test_parallel_filtering_is_byte_identical_to_serial(tmp_path):
 
 def test_chunks_are_bounded_by_rows_and_bytes(tmp_path):
     """A pool task must not carry an unbounded amount of text (long passages are large)."""
-    from src.cache_build import _iter_chunks
+    from src.data.cache import _iter_chunks
 
     path = tmp_path / "meta_train.json"
     path.write_text(
@@ -302,7 +302,7 @@ class _RichProgress:
 
 
 def test_the_progress_bar_accounts_for_the_file_and_reports_the_counts(tmp_path, monkeypatch):
-    import src.cache_build as cache_build
+    import src.data.cache as cache_build
 
     made: list[_Bar] = []
     monkeypatch.setattr(cache_build, "tqdm", lambda **kwargs: made.append(_Bar(**kwargs)) or made[-1])
@@ -323,7 +323,7 @@ def test_the_progress_bar_accounts_for_the_file_and_reports_the_counts(tmp_path,
 
 
 def test_quiet_and_no_progress_do_not_create_a_bar(tmp_path, monkeypatch):
-    import src.cache_build as cache_build
+    import src.data.cache as cache_build
 
     made: list[_Bar] = []
     monkeypatch.setattr(cache_build, "tqdm", lambda **kwargs: made.append(_Bar(**kwargs)) or made[-1])
@@ -341,8 +341,8 @@ def test_quiet_and_no_progress_do_not_create_a_bar(tmp_path, monkeypatch):
 
 def test_the_loader_reads_a_fresh_cache_without_filtering_again(tmp_path):
     """A matching cache file must not be re-tokenized (that was minutes of duplicate work)."""
-    from src.data import ContextDataset
-    from src.data_pipeline import uses_filtered_cache
+    from src.data.dataset import ContextDataset
+    from src.data.pipeline import uses_filtered_cache
 
     _meta(tmp_path, "train", [_row(f"context {i} " + "word " * i, [f"q{i}"], index=i)
                              for i in range(5)])
@@ -379,7 +379,7 @@ def test_the_loader_reads_a_fresh_cache_without_filtering_again(tmp_path):
 
 
 def test_a_stale_or_overridden_file_is_still_filtered(tmp_path):
-    from src.data_pipeline import uses_filtered_cache
+    from src.data.pipeline import uses_filtered_cache
 
     def full(data_config):
         return SimpleNamespace(data=data_config)
@@ -409,7 +409,7 @@ def test_a_stale_or_overridden_file_is_still_filtered(tmp_path):
 
 def test_the_loader_preprocessing_cache_lives_with_the_data(tmp_path):
     """Loader-derived caches are not scattered into `outputs/`; they sit under the data root."""
-    from src.data_pipeline import data_cache_dir
+    from src.data.pipeline import data_cache_dir
 
     config = _config(tmp_path)
     assert data_cache_dir(SimpleNamespace(data=config)) == tmp_path / "1qa" / "cache" / "loader"
@@ -422,7 +422,7 @@ def test_the_loader_preprocessing_cache_lives_with_the_data(tmp_path):
 
 def test_a_filtered_row_cache_is_written_under_the_data_root(tmp_path):
     """The one case that still writes a JSONL: a file that needs the loader filter."""
-    from src.data_pipeline import make_context_dataset
+    from src.data.pipeline import make_context_dataset
 
     meta = _meta(tmp_path, "train", [_row(f"context {i} " + "word " * i, [f"q{i}"], index=i)
                                     for i in range(4)])
@@ -438,8 +438,8 @@ def test_a_filtered_row_cache_is_written_under_the_data_root(tmp_path):
 
 def test_a_large_cache_read_draws_a_progress_bar(tmp_path, monkeypatch):
     """The up-front parse of the built cache is the step that used to be silent."""
-    import src.data as data_module
-    from src.data import ContextDataset
+    import src.data.dataset as data_module
+    from src.data.dataset import ContextDataset
 
     made: list[_Bar] = []
     monkeypatch.setattr(
@@ -460,8 +460,8 @@ def test_a_large_cache_read_draws_a_progress_bar(tmp_path, monkeypatch):
 
 def test_a_capped_read_stays_silent_and_stops_early(tmp_path, monkeypatch):
     """`--max-samples` reads only a prefix, so it neither needs nor draws the bar."""
-    import src.data as data_module
-    from src.data import ContextDataset
+    import src.data.dataset as data_module
+    from src.data.dataset import ContextDataset
 
     made: list[_Bar] = []
     monkeypatch.setattr(
@@ -479,7 +479,7 @@ def test_a_capped_read_stays_silent_and_stops_early(tmp_path, monkeypatch):
 
 def _context_dataset(cache_path, tokenizer, config):
     """A `ContextDataset` over a built cache, i.e. what the sampler really receives."""
-    from src.data import ContextDataset
+    from src.data.dataset import ContextDataset
 
     return ContextDataset(
         cache_path, tokenizer=tokenizer, max_context_tokens=config.max_context_tokens,
@@ -489,7 +489,7 @@ def _context_dataset(cache_path, tokenizer, config):
 
 # --------------------------------------------------------------- context length sidecar
 def test_the_filter_hands_back_the_lengths_it_measured(tmp_path):
-    from src.data import filter_options, filter_rows_batch
+    from src.data.preprocessing import filter_options, filter_rows_batch
 
     rows = [
         _row("short context", ["q"], index=0),
@@ -502,7 +502,7 @@ def test_the_filter_hands_back_the_lengths_it_measured(tmp_path):
     assert [row["id"] for row in accepted] == ["squad:train:0", "squad:train:2"]
     assert lengths == [2, 3]
     # The accepted rows all fit the cap, so the truncated count *is* the true length.
-    from src.data import context_lengths
+    from src.data.preprocessing import context_lengths
 
     assert context_lengths([row["context"] for row in accepted], _Tokenizer()) == lengths
 
@@ -513,7 +513,7 @@ def test_the_filter_hands_back_the_lengths_it_measured(tmp_path):
 
 
 def test_answer_length_filter_for_qa_pairs_is_evaluation_only():
-    from src.data import filter_options, filter_rows_batch
+    from src.data.preprocessing import filter_options, filter_rows_batch
 
     row = _row("short context", ["q"], index=0)
     row["qa_pairs"][0]["answer"] = "one two three five"
@@ -526,7 +526,7 @@ def test_answer_length_filter_for_qa_pairs_is_evaluation_only():
 
 
 def test_parallel_and_serial_lengths_agree(tmp_path):
-    from src.data import filter_options, filter_row_chunks
+    from src.data.preprocessing import filter_options, filter_row_chunks
 
     rows = [_row(f"context {i} " + "word " * i, ["q"], index=i) for i in range(30)]
     options = filter_options(64, True, True, 64, 8)
@@ -547,7 +547,8 @@ def test_parallel_and_serial_lengths_agree(tmp_path):
 def test_the_cache_build_records_lengths_next_to_the_file(tmp_path):
     import json as _json
 
-    from src.data import context_lengths, context_lengths_path, read_context_lengths
+    from src.data.cache import context_lengths_path, read_context_lengths
+    from src.data.preprocessing import context_lengths
 
     _meta(tmp_path, "train", [_row(f"context {i} " + "word " * i, [f"q{i}"], index=i)
                              for i in range(6)])
@@ -577,7 +578,7 @@ def test_the_cache_build_records_lengths_next_to_the_file(tmp_path):
 def test_a_stale_or_mismatched_sidecar_is_ignored(tmp_path):
     import json as _json
 
-    from src.data import context_lengths_path, read_context_lengths
+    from src.data.cache import context_lengths_path, read_context_lengths
 
     _meta(tmp_path, "train", [_row("short context", ["q"], index=0)])
     config = _config(tmp_path)
@@ -619,8 +620,9 @@ def test_a_stale_or_mismatched_sidecar_is_ignored(tmp_path):
 
 def test_the_sortish_sampler_reuses_the_recorded_lengths(tmp_path, monkeypatch):
     """The whole point: no `Preparing sortish lengths` pass when the build recorded them."""
-    import src.data as data_module
-    from src.data import SortishSampler, context_lengths_path
+    import src.data.sortish_sampler as data_module
+    from src.data.cache import context_lengths_path
+    from src.data.sortish_sampler import SortishSampler
 
     _meta(tmp_path, "train", [_row(f"context {i} " + "word " * i, [f"q{i}"], index=i)
                              for i in range(5)])
@@ -647,8 +649,7 @@ def test_the_sortish_sampler_reuses_the_recorded_lengths(tmp_path, monkeypatch):
 
 
 def test_lengths_can_be_backfilled_for_an_existing_cache(tmp_path):
-    from src.cache_build import ensure_cache, write_lengths_for_cache
-    from src.data import context_lengths_path
+    from src.data.cache import ensure_cache, context_lengths_path, write_lengths_for_cache
 
     _meta(tmp_path, "train", [_row(f"context {i} " + "word " * i, [f"q{i}"], index=i)
                              for i in range(4)])

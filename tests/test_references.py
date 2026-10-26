@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.data import _messages_from_row  # noqa: E402
+from src.data.records import _messages_from_row  # noqa: E402
 from src.evaluation import Evaluator  # noqa: E402
 from src.evaluation.eval_metrics import best_reference_metrics  # noqa: E402
 
@@ -146,7 +146,7 @@ def test_multi_reference_reduction_is_a_max_not_the_first_reference():
 
 def test_conversation_dataset_offset_cache_keeps_every_reference(tmp_path):
     """The JSONL offset cache must preserve every answer reference."""
-    from src.data import ContextDataset
+    from src.data.dataset import ContextDataset
 
     class _Tokenizer:
         name_or_path = "reference-test-tokenizer"

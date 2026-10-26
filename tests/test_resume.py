@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader, Dataset
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from src.data import SortishSampler
+from src.data.sortish_sampler import SortishSampler
 from utils.checkpoint import CheckpointManager  # noqa: E402
 
 TRAIN_PY = REPO / "scripts" / "train.py"
