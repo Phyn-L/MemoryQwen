@@ -1,0 +1,15 @@
+_base_:
+- ../h200_train_baseline.yaml
+
+checkpoint:
+  output_dir: outputs/Qwen1.7B/ablation/task_schedule/two_stage
+
+logging:
+  swanlab_project: MemoryQwen_Ablation
+  swanlab_run_name: two_stage
+
+data:
+  task:
+    train_stage: two_stage
+    recon_schedule: [1.0, 1.0]
+    qa_schedule: [1.0, 1.0]

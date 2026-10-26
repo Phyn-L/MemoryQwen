@@ -1,0 +1,13 @@
+_base_:
+- ../h200_train_baseline.yaml
+
+checkpoint:
+  output_dir: outputs/Qwen1.7B/ablation/readout/readout_learned_prefix_l16
+
+logging:
+  swanlab_project: MemoryQwen_Ablation
+  swanlab_run_name: readout_learned_prefix_l16
+
+memory:
+  readout_mode: learned_prefix
+  readout_length: 16

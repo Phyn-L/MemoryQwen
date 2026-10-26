@@ -1,0 +1,14 @@
+_base_:
+- ../h200_train_baseline.yaml
+
+checkpoint:
+  output_dir: outputs/Qwen1.7B/ablation/resampler_lora/lora_off_memory_l8
+
+logging:
+  swanlab_project: MemoryQwen_Ablation
+  swanlab_run_name: lora_off_memory_l8
+
+model:
+  target_modules: []
+memory:
+  memory_resampler_layers: 8

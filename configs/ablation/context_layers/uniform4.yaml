@@ -1,0 +1,12 @@
+_base_:
+- ../h200_train_baseline.yaml
+
+checkpoint:
+  output_dir: outputs/Qwen1.7B/ablation/context_layers/uniform4
+
+logging:
+  swanlab_project: MemoryQwen_Ablation
+  swanlab_run_name: uniform4
+
+memory:
+  context_layer_indices: [0, 9, 18, 27]

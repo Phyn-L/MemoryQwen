@@ -1,9 +1,0 @@
-_base_:
-- ../h200_train_baseline.yaml
-
-memory:
-  context_layer_indices: [0, 1, -2, -1]
-
-logging:
-  swanlab_project: MemoryQwen_Ablation
-  swanlab_run_name: context_layer_first2last2

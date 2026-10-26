@@ -172,8 +172,16 @@ def main() -> None:
         2 if cfg.data.train_stage == "two_stage" else 1
     )
     total_steps = max(1, steps_per_epoch * total_epochs)
+    stage_steps = max(1, steps_per_epoch * cfg.training.epochs)
     optimizer = build_optimizer(model, cfg.optimizer)
-    scheduler = build_scheduler(optimizer, cfg.scheduler, total_steps)
+    scheduler = (
+        {
+            "recon": build_scheduler(optimizer, cfg.scheduler, stage_steps),
+            "qa": build_scheduler(optimizer, cfg.scheduler, stage_steps),
+        }
+        if cfg.data.train_stage == "two_stage"
+        else build_scheduler(optimizer, cfg.scheduler, total_steps)
+    )
     output_dir = Path(cfg.checkpoint.output_dir)
     managers = (
         {

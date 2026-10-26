@@ -1,0 +1,14 @@
+_base_:
+- ../h200_train_baseline.yaml
+
+checkpoint:
+  output_dir: outputs/Qwen1.7B/ablation/readout/readout_l16_embedding
+
+logging:
+  swanlab_project: MemoryQwen_Ablation
+  swanlab_run_name: readout_l16_embedding
+
+memory:
+  readout_mode: memory_question
+  readout_length: 16
+  question_resampler_info_source: embedding

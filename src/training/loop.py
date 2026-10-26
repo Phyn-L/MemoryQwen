@@ -57,6 +57,7 @@ def run_training_loop(
     progress.start()
     for epoch in range(start_epoch, total_epochs):
         stage = training_stage(cfg.data.train_stage, epoch, cfg.training.epochs)
+        active_scheduler = scheduler[stage] if isinstance(scheduler, dict) else scheduler
         manager = managers[stage]
         stage_offset = (
             (0 if stage == "recon" else steps_per_epoch * cfg.training.epochs)
@@ -103,37 +104,45 @@ def run_training_loop(
                     else model
                 )
                 embedding = base_model.qwen.get_input_embeddings()
-                recon_batch = {
-                    "context_indices": ids["recon_context_indices"],
-                    "context_embeds": embedding(ids["recon_target_ids"]),
-                    "context_mask": ids["recon_target_mask"],
-                    "labels": ids["recon_labels"],
-                }
+                is_two_stage = cfg.data.train_stage == "two_stage"
+                run_qa = not is_two_stage or stage == "qa"
+                run_recon = not is_two_stage or stage == "recon"
+                qa_input_ids = ids["qa_input_ids"] if run_qa else ids["qa_input_ids"][:0]
+                qa_input_mask = ids["qa_input_mask"] if run_qa else ids["qa_input_mask"][:0]
+                qa_target_ids = ids["qa_target_ids"] if run_qa else ids["qa_target_ids"][:0]
+                qa_target_mask = ids["qa_target_mask"] if run_qa else ids["qa_target_mask"][:0]
+                qa_labels = ids["qa_labels"] if run_qa else ids["qa_labels"][:0]
+                qa_context_indices = ids["qa_context_indices"] if run_qa else ids["qa_context_indices"][:0]
+                recon_batch = None
+                if run_recon:
+                    recon_batch = {
+                        "context_indices": ids["recon_context_indices"],
+                        "context_embeds": embedding(ids["recon_target_ids"]),
+                        "context_mask": ids["recon_target_mask"],
+                        "labels": ids["recon_labels"],
+                    }
                 output = model(
                     embedding(ids["context_ids"]),
                     ids["context_mask"],
-                    embedding(ids["qa_input_ids"]),
-                    ids["qa_input_mask"],
-                    embedding(ids["qa_target_ids"]),
-                    ids["qa_target_mask"],
-                    ids["qa_labels"],
-                    ids["qa_context_indices"],
+                    embedding(qa_input_ids), qa_input_mask,
+                    embedding(qa_target_ids), qa_target_mask, qa_labels,
+                    qa_context_indices,
                     loss_config=cfg.loss,
                     loss_only=True,
                     recon_batch=recon_batch,
-                    question_prefix_embeds=embedding(ids["qa_prefix_ids"]),
-                    question_prefix_mask=ids["qa_prefix_mask"],
-                    question_readout_mask=ids["qa_readout_mask"],
-                    answer_prefix_embeds=embedding(ids["qa_answer_prefix_ids"]),
-                    answer_prefix_mask=ids["qa_answer_prefix_mask"],
+                    question_prefix_embeds=embedding(ids["qa_prefix_ids"]) if run_qa else None,
+                    question_prefix_mask=ids["qa_prefix_mask"] if run_qa else None,
+                    question_readout_mask=ids["qa_readout_mask"] if run_qa else None,
+                    answer_prefix_embeds=embedding(ids["qa_answer_prefix_ids"]) if run_qa else None,
+                    answer_prefix_mask=ids["qa_answer_prefix_mask"] if run_qa else None,
                 )
                 task_ids = torch.cat(
                     [
                         torch.ones(
-                            ids["qa_input_ids"].size(0), dtype=torch.long, device=device
+                            qa_input_ids.size(0), dtype=torch.long, device=device
                         ),
                         torch.zeros(
-                            ids["recon_target_ids"].size(0),
+                            (ids["recon_target_ids"].size(0) if run_recon else 0),
                             dtype=torch.long,
                             device=device,
                         ),
@@ -223,7 +232,7 @@ def run_training_loop(
                     cfg.training.max_grad_norm,
                 )
                 optimizer.step()
-                scheduler.step()
+                active_scheduler.step()
                 optimizer.zero_grad(set_to_none=True)
                 step += 1
                 # Every logged scalar is the mean over the micro-batches of this step, which
@@ -243,7 +252,7 @@ def run_training_loop(
                     status=" · ".join(
                         [
                             *(f"{name} {value}" for name, value in postfix.items()),
-                            f"lr {scheduler.get_last_lr()[0]:.2e}",
+                            f"lr {active_scheduler.get_last_lr()[0]:.2e}",
                         ]
                     ),
                 )
@@ -257,7 +266,7 @@ def run_training_loop(
                         "loss/total": logged["loss"],
                         "loss/qa": logged["qa_loss"],
                         "loss/recon": logged["recon_loss"],
-                        "train/lr": float(scheduler.get_last_lr()[0]),
+                        "train/lr": float(active_scheduler.get_last_lr()[0]),
                         "loss/ppl": float(math.exp(min(logged["qa_loss"], 20.0))),
                         "loss/qa_ppl": float(math.exp(min(logged["qa_loss"], 20.0))),
                         "loss/recon_ppl": float(

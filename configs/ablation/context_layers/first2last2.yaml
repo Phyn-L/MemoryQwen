@@ -1,0 +1,12 @@
+_base_:
+- ../h200_train_baseline.yaml
+
+checkpoint:
+  output_dir: outputs/Qwen1.7B/ablation/context_layers/first2last2
+
+logging:
+  swanlab_project: MemoryQwen_Ablation
+  swanlab_run_name: first2last2
+
+memory:
+  context_layer_indices: [0, 1, -2, -1]

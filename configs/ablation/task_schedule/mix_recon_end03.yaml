@@ -1,0 +1,15 @@
+_base_:
+- ../h200_train_baseline.yaml
+
+checkpoint:
+  output_dir: outputs/Qwen1.7B/ablation/task_schedule/mix_recon_end03
+
+logging:
+  swanlab_project: MemoryQwen_Ablation
+  swanlab_run_name: mix_recon_end03
+
+data:
+  task:
+    train_stage: mix
+    recon_schedule: [1.0, 0.3]
+    qa_schedule: [1.0, 1.0]

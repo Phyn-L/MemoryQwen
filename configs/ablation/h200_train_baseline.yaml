@@ -3,15 +3,14 @@ _base_:
 memory:
   memory_length: 128
   context_layer_indices: [-1,-2,-3,-4]
-  memory_resampler_layers: 8
-  memory_resampler_heads: 4
   memory_resampler_hidden_size: 512
+  memory_resampler_layers: 4
+  memory_resampler_heads: 4
   memory_resampler_ffn_ratio: 4
   memory_resampler_use_self_attention: true
 
-  # Question-conditioned readout
   readout_mode: memory_question
-  readout_length: 32
+  readout_length: 16
   question_resampler_info_source: hidden
   readout_keep_question_tokens: true
   question_resampler_hidden_size: 512
@@ -40,6 +39,9 @@ logging:
   log_every: 25  # 训练日志记录间隔（步）
   swanlab_mode: offline
   swanlab_project: MemoryQwen_Ablation
-  swanlab_run_name: ablation_baseline
+  swanlab_run_name: baseline
 scheduler:
   warmup_steps: 2500  # 学习率预热步数
+
+checkpoint:
+  output_dir: outputs/Qwen1.7B/ablation/baseline

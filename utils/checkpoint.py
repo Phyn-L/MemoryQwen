@@ -71,7 +71,11 @@ class CheckpointManager:
         state = {
             "model": trainable,
             "optimizer": optimizer.state_dict(),
-            "scheduler": scheduler.state_dict(),
+            "scheduler": (
+                {name: value.state_dict() for name, value in scheduler.items()}
+                if isinstance(scheduler, dict)
+                else scheduler.state_dict()
+            ),
             "step": step,
             "config": config,
             "swanlab_run_id": swanlab_run_id,
@@ -186,7 +190,13 @@ class CheckpointManager:
         if optimizer is not None and state.get("optimizer") is not None:
             optimizer.load_state_dict(state["optimizer"])
         if scheduler is not None and state.get("scheduler") is not None:
-            scheduler.load_state_dict(state["scheduler"])
+            saved_scheduler = state["scheduler"]
+            if isinstance(scheduler, dict):
+                for name, value in scheduler.items():
+                    if name in saved_scheduler:
+                        value.load_state_dict(saved_scheduler[name])
+            else:
+                scheduler.load_state_dict(saved_scheduler)
         if restore_rng and state.get("rng"):
             _restore_rng_state(state["rng"])
         self.best_f1 = state.get("best_f1")

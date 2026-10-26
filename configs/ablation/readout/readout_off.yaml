@@ -1,0 +1,13 @@
+_base_:
+- ../h200_train_baseline.yaml
+
+checkpoint:
+  output_dir: outputs/Qwen1.7B/ablation/readout/readout_off
+
+logging:
+  swanlab_project: MemoryQwen_Ablation
+  swanlab_run_name: readout_off
+
+memory:
+  readout_mode: "off"
+  readout_length: 0
