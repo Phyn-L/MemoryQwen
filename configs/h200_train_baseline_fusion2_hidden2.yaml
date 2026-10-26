@@ -21,7 +21,7 @@ memory:
 training:
   batch_size: 8
   gradient_accumulation_steps: 1
-  gradient_checkpoint_every_n_layers: 0
+  gradient_checkpoint_every_n_layers: 2
 data:
   loader:
     train_num_workers: 4
