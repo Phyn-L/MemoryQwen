@@ -127,7 +127,7 @@ def main() -> None:
 
     accelerator = None
     try:
-        from accelerate import Accelerator
+        from accelerate import Accelerator, DistributedDataParallelKwargs
 
         configured_dtype = dtype_from_name(cfg.model.torch_dtype)
         mixed_precision = {
@@ -135,9 +135,15 @@ def main() -> None:
             torch.float16: "fp16",
             torch.bfloat16: "bf16",
         }[configured_dtype]
+        ddp_kwargs = (
+            [DistributedDataParallelKwargs(find_unused_parameters=True)]
+            if cfg.data.train_stage == "two_stage"
+            else None
+        )
         accelerator = Accelerator(
             gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
             mixed_precision=mixed_precision if torch.cuda.is_available() else "no",
+            kwargs_handlers=ddp_kwargs,
         )
         device = accelerator.device
     except ImportError as error:
