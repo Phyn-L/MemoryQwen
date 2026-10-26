@@ -84,7 +84,6 @@ def run_training_loop(
             epoch_loader.set_epoch(epoch)
         for batch_index, batch in enumerate(epoch_loader, start=batch_offset):
             if step >= total_steps:
-                finished = True
                 break
             # Accumulation: `accumulate` defers the DDP gradient all-reduce to the step
             # that closes the group (and tracks `sync_gradients`); without accelerate the
@@ -406,7 +405,7 @@ def run_training_loop(
                         )
             if metrics is not None:
                 progress.start()
-        if finished:
+        if step >= total_steps:
             break
         stage_finished = cfg.data.train_stage == "two_stage" and (
             (stage == "recon" and epoch + 1 == cfg.training.epochs)
