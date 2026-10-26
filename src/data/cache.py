@@ -1,52 +1,110 @@
-"""Filter a raw 1QA meta split into the cache a training run actually reads.
-
-``scripts/data/build_1qa.py`` writes raw, unfiltered splits (``meta/meta_<split>.json``: one
-line per context with every QA pair). This module applies the *config's* filter rules --
-``data.limits.{max_context_tokens,max_question_tokens,max_answer_tokens}``,
-``filter_long_context``, ``filter_no_qa`` and the
-``train_datasets``/``validation_datasets`` selection -- and writes ``cache/train.jsonl`` and
-``cache/validation.jsonl`` plus ``cache/build.json`` (the fingerprint used to detect staleness).
-
-The filter is the *same* function the loader uses (``filter_rows_batch``), so a row that
-survives here is exactly a row the loader would keep: one rule set, not a build-time copy of
-it. Rows keep **all** of their QA pairs; per-epoch turn sampling
-(``data.max_qa_sample_per_context``)
-still happens in the collate.
-
-``scripts/data/build_cache.py`` is the CLI, and ``scripts/train.py`` calls :func:`ensure_cache`
-so a run never trains on a cache that this config did not produce.
-"""
+"""Cache fingerprints, locking, sidecars, and filtered cache construction."""
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from tqdm.auto import tqdm
 
-from .cache_utils import compute_fingerprint, file_lock, tokenizer_fingerprint
-from .data import (
-    CONTEXT_LENGTHS_VERSION,
-    context_lengths,
-    context_lengths_path,
-    filter_options,
-    filter_row_chunks,
-    progress_enabled,
-)
+from .preprocessing import context_lengths, filter_options, filter_row_chunks, progress_enabled
 
+
+def compute_fingerprint(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), default=list).encode()
+    ).hexdigest()
+
+def tokenizer_fingerprint(tokenizer) -> str | None:
+    """Identify tokenization behavior independently of the model repository path."""
+    if tokenizer is None:
+        return None
+    payload: dict[str, Any] = {
+        "class": tokenizer.__class__.__name__,
+        "vocab_size": getattr(tokenizer, "vocab_size", None),
+    }
+    backend = getattr(tokenizer, "backend_tokenizer", None)
+    if backend is not None:
+        payload["backend"] = hashlib.sha256(
+            backend.to_str().encode()
+        ).hexdigest()
+    else:
+        # Slow/custom tokenizers have no serialized backend. Keep the fallback
+        # conservative so unrelated implementations do not share a cache.
+        payload["name"] = str(
+            getattr(tokenizer, "name_or_path", tokenizer.__class__.__name__)
+        )
+    return compute_fingerprint(payload)
+
+@contextmanager
+def file_lock(path: Path) -> Iterator[None]:
+    """Serialize cache writers that share a cache directory."""
+    with path.open("w") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+#: Sidecar ``scripts/data/build_cache.py`` writes: the context token lengths of the filtered
+#: rows, for free (the filter already measured them). Versioned so a stale file is ignored.
+CONTEXT_LENGTHS_VERSION = 1
+
+def context_lengths_path(source) -> Path:
+    """``train.jsonl`` -> ``train.jsonl.lengths.json``."""
+    return Path(str(source) + ".lengths.json")
+
+def read_context_lengths(dataset, tokenizer):
+    """The recorded context lengths for this dataset, or ``None`` when it has to be measured.
+
+    Validated against the file it describes (size + mtime), the tokenizer and the context limit,
+    and required to cover every row of the dataset; anything else falls back to measuring.
+    """
+    source = getattr(dataset, "source_path", None)
+    if source is None:
+        return None
+    path = context_lengths_path(source)
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("version") != CONTEXT_LENGTHS_VERSION:
+        return None
+    stat = Path(source).stat()
+    if payload.get("size") != stat.st_size or payload.get("mtime_ns") != stat.st_mtime_ns:
+        return None
+    if payload.get("tokenizer") != tokenizer_fingerprint(tokenizer):
+        return None
+    lengths = payload.get("lengths")
+    if not isinstance(lengths, list) or not lengths or len(lengths) < len(dataset):
+        return None
+    if any(not isinstance(value, int) or value <= 0 for value in lengths):
+        return None
+    metadata = getattr(dataset, "cache_metadata", {}) or {}
+    limit = metadata.get("max_context_tokens")
+    if limit is not None and payload.get("max_context_tokens") != limit:
+        return None
+    return lengths[: len(dataset)]
 CACHE_SPLITS = ("train", "validation")
+
 DEFAULT_BATCH_SIZE = 512
+
 #: Filtering is tokenization-bound (the loader-side filter is the same code), so the build runs
 #: it in a process pool by default. Every rank of a run shares one build (file lock), so this is
 #: one pool, not one per rank. The pool forks, which Python deprecates for a parent that already
 #: holds threads (the HF tokenizer does); it is safe here because the workers only run the pure
 #: filter and their output is verified identical to the serial path (see tests/test_build_cache).
 DEFAULT_BUILD_WORKERS = max(1, min(8, os.cpu_count() or 1))
+
 #: Cap on how much text one pool task carries: a row of long passages is large, and a 512-row
 #: task would otherwise be tens of megabytes to pickle.
 DEFAULT_MAX_CHUNK_BYTES = 8 * 1024 * 1024
-
 
 def _iter_rows(path: Path) -> Iterator[tuple[int, dict]]:
     """Yield ``(line_bytes, row)`` so the chunker can bound a task by payload size."""
@@ -54,7 +112,6 @@ def _iter_rows(path: Path) -> Iterator[tuple[int, dict]]:
         for line in handle:
             if line.strip():
                 yield len(line), json.loads(line)
-
 
 def _iter_chunks(
     path: Path, selected: set[str] | None, max_rows: int, max_bytes: int, on_progress=None,
@@ -88,7 +145,6 @@ def _iter_chunks(
     if chunk:
         yield read, chunk
 
-
 def _selected_datasets(data_config, split: str) -> set[str] | None:
     """The dataset selection of one split; ``None`` means every dataset."""
     selection = data_config.train_datasets if split == "train" else data_config.validation_datasets
@@ -96,13 +152,11 @@ def _selected_datasets(data_config, split: str) -> set[str] | None:
         return None
     return {str(name) for name in selection}
 
-
 def _row_dataset(row: dict) -> str:
     dataset = row.get("dataset")
     if not dataset:
         raise ValueError(f"meta row {row.get('id')!r} is missing its dataset field")
     return str(dataset)
-
 
 def fingerprint_payload(data_config, split: str, source: Path, tokenizer) -> dict:
     """Everything that changes the filtered output, before hashing.
@@ -131,11 +185,9 @@ def fingerprint_payload(data_config, split: str, source: Path, tokenizer) -> dic
         ),
     }
 
-
 def cache_fingerprint(data_config, split: str, source: Path, tokenizer) -> str:
     """Hash of :func:`fingerprint_payload`; the staleness check compares these."""
     return compute_fingerprint(fingerprint_payload(data_config, split, source, tokenizer))
-
 
 def filter_split(
     data_config, split: str, source: Path, tokenizer, batch_size: int = DEFAULT_BATCH_SIZE,
@@ -248,7 +300,6 @@ def filter_split(
         )
     return info
 
-
 def write_manifest(data_config, infos: Iterable[dict]) -> Path:
     """Record what each cache file was built from, for the staleness check.
 
@@ -269,7 +320,6 @@ def write_manifest(data_config, infos: Iterable[dict]) -> Path:
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     return manifest_path
-
 
 def write_context_lengths(cache_path, tokenizer, data_config, lengths, quiet=False):
     """Record the context token lengths next to a cache file; returns the file or ``None``.
@@ -297,17 +347,13 @@ def write_context_lengths(cache_path, tokenizer, data_config, lengths, quiet=Fal
         print(f"[cache] recorded {len(lengths)} context lengths -> {path}", flush=True)
     return path
 
-
 def lengths_are_fresh(data_config, tokenizer, split: str) -> bool:
     """True when ``cache/<split>.jsonl`` already has a usable lengths sidecar."""
-    from .data import read_context_lengths
-
     cache_path = Path(data_config.cache_file(split))
     if not cache_path.is_file() or not context_lengths_path(cache_path).is_file():
         return False
     dataset = _LengthProbe(cache_path, data_config)
     return read_context_lengths(dataset, tokenizer) is not None
-
 
 class _LengthProbe:
     """The two attributes :func:`read_context_lengths` inspects (no rows are read)."""
@@ -320,7 +366,6 @@ class _LengthProbe:
         # Only used to check that the sidecar covers the file; the count itself is not read,
         # so any value >= the recorded length is fine.
         return 1
-
 
 def write_lengths_for_cache(
     data_config, tokenizer, split: str, quiet: bool = False, batch_size: int = 1024,
@@ -358,7 +403,6 @@ def write_lengths_for_cache(
         return None
     return write_context_lengths(cache_path, tokenizer, data_config, lengths, quiet=quiet)
 
-
 def _bar_update(bar):
     if bar is None:
         return None
@@ -367,7 +411,6 @@ def _bar_update(bar):
         bar.update(count)
 
     return update
-
 
 def build(
     data_config, tokenizer, splits: Iterable[str] = CACHE_SPLITS, quiet: bool = False,
@@ -389,7 +432,6 @@ def build(
         write_manifest(data_config, infos)
     return {"splits": {info["split"]: info for info in infos}}
 
-
 def cache_is_fresh(data_config, split: str, tokenizer) -> bool:
     """True when ``cache/<split>.jsonl`` was built from this config and the current meta file."""
     cache_path = Path(data_config.cache_file(split))
@@ -404,7 +446,6 @@ def cache_is_fresh(data_config, split: str, tokenizer) -> bool:
     return recorded.get("fingerprint") == cache_fingerprint(
         data_config, split, source, tokenizer
     )
-
 
 def ensure_cache(data_config, tokenizer, splits: Iterable[str] = CACHE_SPLITS,
                  quiet: bool = False, num_workers: int | None = None,

@@ -1,11 +1,12 @@
-"""Shared data loading and batch assembly for training and evaluation entry points."""
-
+"""Config-driven assembly of datasets and collate callables."""
 from __future__ import annotations
 
 from pathlib import Path
 
-from .cache_build import cache_is_fresh
-from .data import ContextDataset, collate_fn, progress_enabled
+from .cache import cache_is_fresh
+from .collate import collate_fn
+from .dataset import ContextDataset
+from .preprocessing import progress_enabled
 
 
 def data_cache_dir(cfg) -> Path:
@@ -27,7 +28,6 @@ def resolve_split_limit(cfg, split: str) -> int | None:
         limit = cfg.data.max_samples
     return limit
 
-
 def uses_filtered_cache(cfg, split: str, tokenizer) -> bool:
     """True when this split's file is the *fresh* output of ``build_cache.py``.
 
@@ -41,7 +41,6 @@ def uses_filtered_cache(cfg, split: str, tokenizer) -> bool:
     if Path(cfg.data.split_file(split)) != Path(cfg.data.cache_file(split)):
         return False
     return cache_is_fresh(cfg.data, split, tokenizer)
-
 
 def make_context_dataset(
     cfg,
@@ -84,7 +83,6 @@ def make_context_dataset(
         pre_filtered=pre_filtered,
     )
 
-
 def make_collate(cfg, tokenizer, sample_qa: bool, training=False):
     """Keyword-only collate: positional drift would change the target format silently.
 
@@ -93,7 +91,6 @@ def make_collate(cfg, tokenizer, sample_qa: bool, training=False):
     global RNG, which depended on the DataLoader worker layout.
     """
     return Collate(cfg, tokenizer, sample_qa=sample_qa, training=training)
-
 
 class Collate:
     """One collate callable per loader, with an epoch the caller can advance."""
@@ -129,7 +126,6 @@ class Collate:
             train_stage=train_stage if self.training else "only_qa",
             epoch=self.epoch,
         )
-
 
 __all__ = [
     "Collate",
