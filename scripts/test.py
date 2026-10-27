@@ -94,6 +94,11 @@ def main():
         help="QA rows per autoregressive generation group.",
     )
     parser.add_argument(
+        "--qa-only",
+        action="store_true",
+        help="Evaluate only the autoregressive QA task.",
+    )
+    parser.add_argument(
         "--allow-missing-trainable",
         action="store_true",
         help="Load a checkpoint that does not cover every trainable tensor instead of failing.",
@@ -224,19 +229,21 @@ def main():
         max_new_tokens=cfg.evaluation.max_new_tokens,
         **loader_options,
     )
-    recon_row_loader, recon_base = evaluation_window_loader(
-        ds,
-        make_collate(cfg, tokenizer, sample_qa=False),
-        budget=cfg.evaluation.max_eval_contexts_per_dataset,
-        unit="selected_contexts",
-        selection=row_loader.evaluation_selection,
-        max_qa_sample_per_context=cfg.data.max_qa_sample_per_context,
-        rank=rank,
-        world=world,
-        batch_size=cfg.evaluation.ctx_batch_size,
-        max_new_tokens=cfg.evaluation.max_new_tokens,
-        **loader_options,
-    )
+    recon_row_loader = recon_base = None
+    if not args.qa_only:
+        recon_row_loader, recon_base = evaluation_window_loader(
+            ds,
+            make_collate(cfg, tokenizer, sample_qa=False),
+            budget=cfg.evaluation.max_eval_contexts_per_dataset,
+            unit="selected_contexts",
+            selection=row_loader.evaluation_selection,
+            max_qa_sample_per_context=cfg.data.max_qa_sample_per_context,
+            rank=rank,
+            world=world,
+            batch_size=cfg.evaluation.ctx_batch_size,
+            max_new_tokens=cfg.evaluation.max_new_tokens,
+            **loader_options,
+        )
     if accelerator is not None:
         loader = accelerator.prepare(loader)
     is_main = accelerator is None or accelerator.is_main_process
@@ -271,6 +278,7 @@ def main():
         row_base=row_base,
         recon_row_loader=recon_row_loader,
         recon_base=recon_base,
+        include_recon=not args.qa_only,
         pre_windowed=True,
     )
     if is_main:

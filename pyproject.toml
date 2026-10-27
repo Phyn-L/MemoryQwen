@@ -10,6 +10,7 @@ dependencies = ["torch>=2.2", "transformers==5.16.1", "pyyaml>=6.0", "tqdm>=4.66
 
 [project.optional-dependencies]
 train = ["accelerate>=0.30", "rich>=13", "swanlab>=0.10.2,<0.11", "peft>=0.12"]
+demo = ["ipywidgets>=8.1", "jupyter>=1.0"]
 
 [tool.setuptools.packages.find]
 where = ["."]
