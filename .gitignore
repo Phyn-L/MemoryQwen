@@ -7,7 +7,7 @@ __pycache__/
 outputs/
 output/
 contexts/
-texts/
+tests/
 demo/
 .aim/
 wandb/
