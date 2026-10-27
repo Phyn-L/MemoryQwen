@@ -28,7 +28,7 @@ data:
     train_persistent_workers: false
   task:
     train_stage: mix
-    recon_schedule: [1.0, 0.5]
+    recon_schedule: [1.0, 0.8]
     qa_schedule: [1.0, 1.0]
     recon_schedule_curve: cosine
 evaluation:

@@ -9,6 +9,7 @@ output/
 contexts/
 tests/
 demo/
+tmp/
 .aim/
 wandb/
 *.pt
