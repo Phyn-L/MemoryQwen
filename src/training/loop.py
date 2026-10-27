@@ -27,7 +27,7 @@ from .helpers import _gradient_norm, accumulation_context
 CONSOLE = Console()
 
 
-def _oom_debug_record(step, phase, ids, device, path):
+def _oom_debug_record(step, phase, ids, records, device, path):
     """Append one bounded training-step snapshot for the late-run OOM investigation."""
     if not (36030 <= step <= 36714) or not torch.cuda.is_available():
         return
@@ -42,7 +42,8 @@ def _oom_debug_record(step, phase, ids, device, path):
             if isinstance(value, torch.Tensor)
             and name in {
                 "context_ids", "context_mask", "qa_input_ids", "qa_input_mask",
-                "qa_target_ids", "qa_target_mask", "qa_labels",
+                "qa_prefix_ids", "qa_prefix_mask", "qa_answer_prefix_ids",
+                "qa_answer_prefix_mask", "qa_target_ids", "qa_target_mask", "qa_labels",
                 "recon_target_ids", "recon_target_mask", "recon_labels",
                 "qa_context_indices", "recon_context_indices",
             }
@@ -50,6 +51,19 @@ def _oom_debug_record(step, phase, ids, device, path):
         "context_lengths": ids["context_mask"].sum(dim=1).detach().cpu().tolist(),
         "qa_rows": int(ids["qa_input_ids"].size(0)),
         "recon_rows": int(ids["recon_target_ids"].size(0)),
+        "records": [
+            {
+                "context_id": str(record.context_id),
+                "dataset": str(record.dataset),
+                "question": record.question,
+                "answer": record.answer,
+                "messages": [
+                    {"role": message.role, "content": message.content}
+                    for message in record.messages
+                ],
+            }
+            for record in records
+        ],
         "memory_allocated": int(torch.cuda.memory_allocated(device)),
         "memory_reserved": int(torch.cuda.memory_reserved(device)),
         "max_memory_allocated": int(torch.cuda.max_memory_allocated(device)),
@@ -161,7 +175,9 @@ def run_training_loop(
                     )
                     debug_file.parent.mkdir(parents=True, exist_ok=True)
                     torch.cuda.reset_peak_memory_stats(device)
-                    _oom_debug_record(step, "before_forward", ids, device, debug_file)
+                    _oom_debug_record(
+                        step, "before_forward", ids, batch["records"], device, debug_file
+                    )
                 output = model(
                     embedding(ids["context_ids"]),
                     ids["context_mask"],
@@ -178,7 +194,9 @@ def run_training_loop(
                     answer_prefix_mask=ids["qa_answer_prefix_mask"] if run_qa else None,
                 )
                 if 36030 <= step <= 36714 and torch.cuda.is_available():
-                    _oom_debug_record(step, "after_forward", ids, device, debug_file)
+                    _oom_debug_record(
+                        step, "after_forward", ids, batch["records"], device, debug_file
+                    )
                 task_ids = torch.cat(
                     [
                         torch.ones(
@@ -240,7 +258,9 @@ def run_training_loop(
                     # the manual path has to do it here so the group is a true average.
                     (total / accumulation).backward()
                 if 36030 <= step <= 36714 and torch.cuda.is_available():
-                    _oom_debug_record(step, "after_backward", ids, device, debug_file)
+                    _oom_debug_record(
+                        step, "after_backward", ids, batch["records"], device, debug_file
+                    )
                 boundary = (
                     accelerator.sync_gradients if accelerator is not None else sync_now
                 )
