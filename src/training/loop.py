@@ -376,6 +376,11 @@ def run_training_loop(
                             max_new_tokens=cfg.evaluation.max_new_tokens,
                         )
                     )
+                # Autoregressive evaluation builds variable-size KV caches.  Release the
+                # cached CUDA blocks before the next training batch so repeated evaluations
+                # cannot turn allocator fragmentation into a late-run OOM.
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
             if run and is_main:
                 for section, payload in eval_log_payloads(metrics):
                     for key in payload:

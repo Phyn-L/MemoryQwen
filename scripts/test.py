@@ -98,6 +98,7 @@ def main():
         action="store_true",
         help="Evaluate only the autoregressive QA task.",
     )
+    parser.add_argument("--qa-batch-sizes", help="JSON mapping from dataset names to QA batch sizes.")
     parser.add_argument(
         "--allow-missing-trainable",
         action="store_true",
@@ -122,6 +123,7 @@ def main():
                 parser.error("Unknown test YAML fields")
             parser.set_defaults(**raw["test"], machine=raw.get("machine"))
     args = parser.parse_args()
+    qa_batch_sizes = json.loads(args.qa_batch_sizes) if args.qa_batch_sizes else None
     if args.split not in ("validation", "test"):
         parser.error("split must be validation or test")
     if args.max_samples is not None and args.max_samples <= 0:
@@ -279,6 +281,7 @@ def main():
         recon_row_loader=recon_row_loader,
         recon_base=recon_base,
         include_recon=not args.qa_only,
+        qa_batch_sizes=qa_batch_sizes,
         pre_windowed=True,
     )
     if is_main:

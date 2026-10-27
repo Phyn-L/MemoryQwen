@@ -54,12 +54,11 @@ def manifest_rows(manifest: dict) -> list[dict]:
     return rows
 
 
-def materialize_manifest(path: Path, output_dir: Path, dataset: str) -> Path:
+def materialize_manifest(path: Path, output_dir: Path) -> Path:
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    manifest = {**manifest, "datasets": {dataset: manifest["datasets"][dataset]}}
     rows = manifest_rows(manifest)
     digest = hashlib.sha256(path.read_bytes()).hexdigest()[:12]
-    target = output_dir / f"{path.stem}_{dataset}_{digest}.jsonl"
+    target = output_dir / f"{path.stem}_{digest}.jsonl"
     if not target.exists():
         target.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
     return target
@@ -119,25 +118,20 @@ def main() -> None:
         manifest_path = Path(manifest_arg).expanduser().resolve()
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         seed = int(manifest["seed"])
-        for dataset in manifest["datasets"]:
-            data_file = materialize_manifest(manifest_path, input_dir, dataset)
-            report_file = root / f"{manifest_path.stem}_{dataset}.report.json"
-            console.print(f"[bold]Evaluating seed={seed} dataset={dataset}[/bold] ({manifest_path})")
-            command = [
-                torchrun, "--standalone", f"--nproc-per-node={args.gpus}",
-                "-m", "scripts.test",
-                "--checkpoint", str(checkpoint), "--split", "test",
-                "--data-file", str(data_file), "--max-context-tokens", str(manifest["max_context_tokens"]),
-                "--max-contexts-per-dataset", str(manifest["max_contexts"]),
-                "--batch-size", str(args.context_batch_size), "--qa-batch-size",
-                str(args.qa_batch_size or qa_batch_size(dataset)), "--qa-only",
-                "--max-new-tokens", str(args.max_new_tokens), "--report-file", str(report_file),
-            ]
-            env = dict(os.environ)
-            env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
-            env.setdefault("TOKENIZERS_PARALLELISM", "false")
-            subprocess.run(command, cwd=Path(__file__).resolve().parent.parent, env=env, check=True)
-            print_summary(json.loads(report_file.read_text(encoding="utf-8")), manifest_path, console)
+        data_file = materialize_manifest(manifest_path, input_dir)
+        report_file = root / f"{manifest_path.stem}.report.json"
+        batch_sizes = {dataset: args.qa_batch_size or qa_batch_size(dataset) for dataset in manifest["datasets"]}
+        console.print(f"[bold]Evaluating seed={seed}[/bold] ({manifest_path})")
+        command = [torchrun, "--standalone", f"--nproc-per-node={args.gpus}", "-m", "scripts.test",
+                   "--checkpoint", str(checkpoint), "--split", "test", "--data-file", str(data_file),
+                   "--max-context-tokens", str(manifest["max_context_tokens"]), "--max-contexts-per-dataset", str(manifest["max_contexts"]),
+                   "--batch-size", str(args.context_batch_size), "--qa-batch-size", str(args.qa_batch_size or 8),
+                   "--qa-batch-sizes", json.dumps(batch_sizes), "--qa-only", "--max-new-tokens", str(args.max_new_tokens), "--report-file", str(report_file)]
+        env = dict(os.environ)
+        env["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
+        env.setdefault("TOKENIZERS_PARALLELISM", "false")
+        subprocess.run(command, cwd=Path(__file__).resolve().parent.parent, env=env, check=True)
+        print_summary(json.loads(report_file.read_text(encoding="utf-8")), manifest_path, console)
 
 
 if __name__ == "__main__":

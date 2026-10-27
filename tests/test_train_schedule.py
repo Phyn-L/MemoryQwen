@@ -108,9 +108,9 @@ def test_the_loop_echoes_the_resolved_schedule():
     assert 'if memory.readout_length > 0 and memory.readout_mode != "off"' in source
 
 
-def test_the_allocator_cache_is_not_manually_flushed_after_an_evaluation():
+def test_the_allocator_cache_is_flushed_after_an_evaluation():
     source = _train_source()
-    assert "torch.cuda.empty_cache()" not in source
+    assert "torch.cuda.empty_cache()" in source
     # It must be tied to an evaluation having happened, not run every step.
     assert "metrics is not None" in source
 

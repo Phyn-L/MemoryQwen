@@ -60,6 +60,7 @@ def autoregressive(
     row_loader=None,
     row_base=0,
     pre_windowed=False,
+    qa_batch_sizes=None,
 ):
     """Headline evaluation: every answer token is produced by the model itself."""
     was_training = model.training
@@ -157,24 +158,28 @@ def autoregressive(
             question_mask = ids["qa_input_mask"][rows_slice]
             question_prefix_ids = ids["qa_prefix_ids"][rows_slice]
             question_prefix_mask = ids["qa_prefix_mask"][rows_slice]
-        generated = model.generate_answers_with_prefix(
-            prefix,
-            q,
-            question_ids,
-            question_mask,
-            evaluator.tokenizer,
-            max_new_tokens,
-            group_by_context=True,
-            max_rows_per_group=max(1, evaluator.cfg.evaluation.qa_batch_size),
-            task_id=task_id,
-            question_prefix_ids=question_prefix_ids,
-            question_prefix_mask=question_prefix_mask,
-            answer_prefix_ids=ids["qa_answer_prefix_ids"][rows_slice],
-            answer_prefix_mask=ids["qa_answer_prefix_mask"][rows_slice],
-            question_readout_mask=(
-                ids["qa_readout_mask"][rows_slice] if task_id == TASK_QA else None
-            ),
-        )
+        selected_rows = ids["qa_answer_prefix_ids"][rows_slice]
+        generated = [None] * (end_row - start_row)
+        by_dataset = {}
+        for index, record in enumerate(records):
+            by_dataset.setdefault(str(record.dataset), []).append(index)
+        for name, indices in by_dataset.items():
+            selected = torch.tensor(indices, dtype=torch.long, device=device)
+            batch_generated = model.generate_answers_with_prefix(
+                prefix, q[selected], question_ids[selected], question_mask[selected],
+                evaluator.tokenizer, max_new_tokens, group_by_context=True,
+                max_rows_per_group=max(1, (qa_batch_sizes or {}).get(
+                    name, evaluator.cfg.evaluation.qa_batch_size
+                )), task_id=task_id,
+                question_prefix_ids=question_prefix_ids[selected],
+                question_prefix_mask=question_prefix_mask[selected],
+                answer_prefix_ids=selected_rows[selected],
+                answer_prefix_mask=ids["qa_answer_prefix_mask"][rows_slice][selected],
+                question_readout_mask=(ids["qa_readout_mask"][rows_slice][selected]
+                                       if task_id == TASK_QA else None),
+            )
+            for slot, index in enumerate(indices):
+                generated[index] = batch_generated[slot]
         for i, record in enumerate(records):
             row = generated[i].tolist()
             prediction = answer_line(

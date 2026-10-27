@@ -21,6 +21,7 @@ def compare_reader_tasks(
     recon_row_loader=None,
     recon_base=0,
     pre_windowed=False,
+    qa_batch_sizes=None,
 ):
     """Evaluate one deterministic QA sample with both QA and Recon readers."""
     if max_contexts_per_dataset is not None and row_loader is None:
@@ -72,6 +73,7 @@ def compare_reader_tasks(
             row_loader=row_loader,
             row_base=row_base,
             pre_windowed=pre_windowed,
+            qa_batch_sizes=qa_batch_sizes,
         )
     }
     if not include_recon:

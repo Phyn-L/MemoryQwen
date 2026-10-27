@@ -76,6 +76,7 @@ class Evaluator:
         row_loader=None,
         row_base=0,
         pre_windowed=False,
+        qa_batch_sizes=None,
     ):
         return _autoregressive(
             self,
@@ -88,6 +89,7 @@ class Evaluator:
             row_loader=row_loader,
             row_base=row_base,
             pre_windowed=pre_windowed,
+            qa_batch_sizes=qa_batch_sizes,
         )
 
     def _evaluation_window(self, captioned, total, row_loader, loader, world, rank):
@@ -124,6 +126,7 @@ class Evaluator:
         recon_row_loader=None,
         recon_base=0,
         pre_windowed=False,
+        qa_batch_sizes=None,
     ):
         return _compare_reader_tasks(
             self,
@@ -139,6 +142,7 @@ class Evaluator:
             recon_row_loader=recon_row_loader,
             recon_base=recon_base,
             pre_windowed=pre_windowed,
+            qa_batch_sizes=qa_batch_sizes,
         )
 
 
