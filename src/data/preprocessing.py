@@ -69,11 +69,21 @@ def filter_rows_batch(rows, tokenizer, options, lengths_out: list[int] | None = 
                 [t.answer for t in turns], add_special_tokens=False, truncation=True,
                 max_length=max_answer_tokens + 1,
             ).input_ids
-            if any(
-                not 0 < len(q) <= max_question_tokens
-                or not 0 < len(a) <= max_answer_tokens
-                for q, a in zip(qids, aids, strict=True)
-            ) and (filter_qa_pair_answers or not raw.get("qa_pairs")):
+            invalid_questions = [not 0 < len(q) <= max_question_tokens for q in qids]
+            invalid_pairs = [
+                invalid_question or not 0 < len(a) <= max_answer_tokens
+                for invalid_question, a in zip(invalid_questions, aids, strict=True)
+            ]
+            if raw.get("dataset") == "race" and raw.get("qa_pairs"):
+                if any(invalid_questions):
+                    raw = dict(raw)
+                    raw["qa_pairs"] = [
+                        pair for pair, invalid in zip(raw["qa_pairs"], invalid_questions, strict=True)
+                        if not invalid
+                    ]
+                    if not raw["qa_pairs"]:
+                        continue
+            elif any(invalid_pairs) and (filter_qa_pair_answers or not raw.get("qa_pairs")):
                 continue
         accepted.append(raw)
         if lengths_out is not None:

@@ -143,6 +143,41 @@ def test_question_and_answer_lengths_are_filtered_before_caching(tmp_path: Path)
     assert len(dataset) == 1
 
 
+def test_race_filters_long_questions_but_keeps_context_and_other_qa(tmp_path: Path):
+    source = tmp_path / "race.jsonl"
+    source.write_text(
+        json.dumps({
+            "dataset": "race",
+            "context": "short context",
+            "qa_pairs": [
+                {
+                    "question": "short",
+                    "answer": "answer",
+                    "metadata": {"options": ["a", "b", "c", "d"]},
+                },
+                {
+                    "question": "one two three four",
+                    "answer": "answer",
+                    "metadata": {"options": ["a", "b", "c", "d"]},
+                },
+            ],
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    dataset = ContextDataset(
+        source,
+        tokenizer=_Tokenizer(),
+        max_context_tokens=4,
+        max_question_tokens=6,
+        max_answer_tokens=3,
+    )
+
+    assert len(dataset) == 1
+    assert len(dataset[0].turns()) == 1
+    assert dataset[0].turns()[0].question.startswith("short\nOptions:")
+
+
 def test_the_serial_and_parallel_filters_keep_the_same_rows(tmp_path: Path):
     """One filter implementation, two drivers: the rows must be identical.
 

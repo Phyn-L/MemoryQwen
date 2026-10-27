@@ -44,12 +44,6 @@ def main() -> None:
     )
     parser.add_argument("--resume")
     parser.add_argument(
-        "--skip-to-step",
-        type=int,
-        default=None,
-        help="Debug-only OOM reproduction: resume a checkpoint and seek directly to this step.",
-    )
-    parser.add_argument(
         "--data-root",
         help="Override data.files.root: the tree scripts/data/ writes "
         "(<root>/1qa/1qa-{train,validation,test}.jsonl).",
@@ -70,11 +64,6 @@ def main() -> None:
         parser.error(
             "--resume and checkpoint.init_from/--init-from are mutually exclusive"
         )
-    if args.skip_to_step is not None:
-        if not args.resume:
-            parser.error("--skip-to-step requires --resume and is only for OOM reproduction")
-        if args.skip_to_step < 0:
-            parser.error("--skip-to-step must be non-negative")
     cfg.validate()
     seed_everything(cfg.training.seed, deterministic=cfg.training.deterministic)
     tokenizer, model = load_model(cfg)
@@ -167,23 +156,6 @@ def main() -> None:
                 )
             manager = managers[resume_stage]
         step, saved_run_id = manager.load(args.resume, model, optimizer, scheduler)
-        loaded_step = step
-        if args.skip_to_step is not None:
-            if args.skip_to_step < loaded_step:
-                parser.error(
-                    f"--skip-to-step {args.skip_to_step} is earlier than checkpoint step {loaded_step}"
-                )
-            step = args.skip_to_step
-            if accelerator is None or accelerator.is_main_process:
-                CONSOLE.print(
-                    Panel(
-                        f"Loaded checkpoint step {loaded_step:,}; seeking directly to "
-                        f"step {step:,}. This mode is for OOM reproduction only and "
-                        "must not be used for a training run.",
-                        title="OOM debug seek",
-                        border_style="yellow",
-                    )
-                )
         if not cfg.logging.swanlab_run_id:
             cfg.logging.swanlab_run_id = saved_run_id
         # The sampler is deterministic only for a fixed sharding; a different rank count

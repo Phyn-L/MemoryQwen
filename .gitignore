@@ -14,8 +14,6 @@ tmp/
 wandb/
 *.pt
 *.pth
-*.jsonl
-*.json
 *.safetensors
 .idea/
 .vscode/
