@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import math
+import json
+import os
 
 import torch
 from rich.console import Console
@@ -23,6 +25,37 @@ from utils.reporting import eval_log_payloads, format_evaluation_report
 from .helpers import _gradient_norm, accumulation_context
 
 CONSOLE = Console()
+
+
+def _oom_debug_record(step, phase, ids, device, path):
+    """Append one bounded training-step snapshot for the late-run OOM investigation."""
+    if not (36030 <= step <= 36714) or not torch.cuda.is_available():
+        return
+    torch.cuda.synchronize(device)
+    payload = {
+        "step": int(step),
+        "phase": phase,
+        "rank": int(os.environ.get("RANK", "0")),
+        "shapes": {
+            name: list(value.shape)
+            for name, value in ids.items()
+            if isinstance(value, torch.Tensor)
+            and name in {
+                "context_ids", "context_mask", "qa_input_ids", "qa_input_mask",
+                "qa_target_ids", "qa_target_mask", "qa_labels",
+                "recon_target_ids", "recon_target_mask", "recon_labels",
+                "qa_context_indices", "recon_context_indices",
+            }
+        },
+        "context_lengths": ids["context_mask"].sum(dim=1).detach().cpu().tolist(),
+        "qa_rows": int(ids["qa_input_ids"].size(0)),
+        "recon_rows": int(ids["recon_target_ids"].size(0)),
+        "memory_allocated": int(torch.cuda.memory_allocated(device)),
+        "memory_reserved": int(torch.cuda.memory_reserved(device)),
+        "max_memory_allocated": int(torch.cuda.max_memory_allocated(device)),
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload) + "\n")
 
 def run_training_loop(
     cfg, model, optimizer, scheduler, train_loader, validation_loader, sampler, train_collate,
@@ -121,6 +154,14 @@ def run_training_loop(
                         "context_mask": ids["recon_target_mask"],
                         "labels": ids["recon_labels"],
                     }
+                if 36030 <= step <= 36714 and torch.cuda.is_available():
+                    debug_file = (
+                        __import__("pathlib").Path(cfg.checkpoint.output_dir)
+                        / f"oom_debug_rank{int(os.environ.get('RANK', '0'))}.jsonl"
+                    )
+                    debug_file.parent.mkdir(parents=True, exist_ok=True)
+                    torch.cuda.reset_peak_memory_stats(device)
+                    _oom_debug_record(step, "before_forward", ids, device, debug_file)
                 output = model(
                     embedding(ids["context_ids"]),
                     ids["context_mask"],
@@ -136,6 +177,8 @@ def run_training_loop(
                     answer_prefix_embeds=embedding(ids["qa_answer_prefix_ids"]) if run_qa else None,
                     answer_prefix_mask=ids["qa_answer_prefix_mask"] if run_qa else None,
                 )
+                if 36030 <= step <= 36714 and torch.cuda.is_available():
+                    _oom_debug_record(step, "after_forward", ids, device, debug_file)
                 task_ids = torch.cat(
                     [
                         torch.ones(
@@ -196,6 +239,8 @@ def run_training_loop(
                     # accelerate divides by gradient_accumulation_steps inside backward();
                     # the manual path has to do it here so the group is a true average.
                     (total / accumulation).backward()
+                if 36030 <= step <= 36714 and torch.cuda.is_available():
+                    _oom_debug_record(step, "after_backward", ids, device, debug_file)
                 boundary = (
                     accelerator.sync_gradients if accelerator is not None else sync_now
                 )
