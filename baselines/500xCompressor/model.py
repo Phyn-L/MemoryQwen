@@ -11,6 +11,14 @@ class Compressor500xModel(MemoryBaselineModel):
     def adapt(cls, model):
         model = super().adapt(model)
         model.__class__ = cls
+        final_layer = model.qwen.model.layers[-1]
+        for parent, names in (
+            (final_layer.self_attn, ("q_proj", "o_proj")),
+            (final_layer.mlp, ("gate_proj", "up_proj", "down_proj")),
+        ):
+            for name in names:
+                adapter = getattr(parent, name)
+                setattr(parent, name, adapter.base)
         return model
 
     def encode_context_prefix(self, context_embeds, context_mask, **_kwargs):
