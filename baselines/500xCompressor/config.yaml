@@ -1,0 +1,23 @@
+_base_:
+  - ../../configs/harness.yaml
+  - ../../configs/models/qwen3-1.7b.yaml
+
+training:
+  batch_size: 8
+data:
+  limits:
+    max_context_tokens: 2048
+    max_question_tokens: 96
+    max_answer_tokens: 64
+memory:
+  memory_length: 128
+  readout_mode: "off"
+  readout_length: 0
+model:
+  lora_rank: 512
+  lora_alpha: 32.0
+  lora_dropout: 0.05
+checkpoint:
+  output_dir: outputs/baselines/500xCompressor
+logging:
+  swanlab_run_name: MemoryQwen_Ablation
