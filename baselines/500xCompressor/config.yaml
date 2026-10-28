@@ -5,8 +5,8 @@ model:
   attn_implementation: sdpa
   context_gradient_checkpointing: true
   trainable_dtype: float32
-  lora_rank: 512
-  lora_alpha: 32.0
+  lora_rank: 256
+  lora_alpha: 16.0
   lora_dropout: 0.05
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 memory:
@@ -19,7 +19,7 @@ data:
   max_question_tokens: 96
   max_answer_tokens: 64
   train_stage: mix
-  recon_schedule: [1.0, 0.5]
+  recon_schedule: [1.0, 0.8]
   qa_schedule: [1.0, 1.0]
   recon_schedule_curve: cosine
   max_qa_sample_per_context: 8
@@ -42,7 +42,7 @@ data:
 training:
   batch_size: 8
   gradient_accumulation_steps: 1
-  gradient_checkpoint_every_n_layers: 0
+  gradient_checkpoint_every_n_layers: 1
   epochs: 1
   max_grad_norm: 1.0
   seed: 42
