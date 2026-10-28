@@ -41,8 +41,8 @@ data:
   eval_persistent_workers: true
 training:
   batch_size: 8
-  gradient_accumulation_steps: 2
-  gradient_checkpoint_every_n_layers: 1
+  gradient_accumulation_steps: 1
+  gradient_checkpoint_every_n_layers: 0
   epochs: 1
   max_grad_norm: 1.0
   seed: 42
@@ -71,9 +71,9 @@ evaluation:
 checkpoint:
   output_dir: outputs/baselines/500xCompressor
 logging:
-  swanlab_run_name: MemoryQwen_Ablation
+  swanlab_run_name: 500xCompressor
   swanlab_host: http://10.24.116.90:8000
   swanlab_mode: offline
   swanlab_workspace: phyn
   log_every: 25
-  swanlab_project: MemoryQwen
+  swanlab_project: MemoryQwen_Ablation
