@@ -95,6 +95,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--manifests", nargs="+", default=DEFAULT_MANIFESTS)
+    parser.add_argument("--seed", type=int, nargs="+", help="Evaluate only manifests matching these seeds.")
     parser.add_argument("--output-dir", default=None)
     parser.add_argument("--context-batch-size", "--batch-size", type=int, default=8)
     parser.add_argument("--qa-batch-size", type=int, default=None)
@@ -104,6 +105,16 @@ def main() -> None:
     args = parser.parse_args()
     if args.context_batch_size < 1 or (args.qa_batch_size is not None and args.qa_batch_size < 1) or args.max_new_tokens < 1:
         parser.error("batch sizes and max-new-tokens must be >= 1")
+    manifests = []
+    for manifest_arg in args.manifests:
+        path = Path(manifest_arg).expanduser().resolve()
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        if args.seed is None or int(manifest["seed"]) in args.seed:
+            manifests.append((path, manifest))
+    if args.seed is not None:
+        missing = set(args.seed) - {int(manifest["seed"]) for _, manifest in manifests}
+        if missing:
+            parser.error(f"no manifests found for seeds: {sorted(missing)}")
     checkpoint = Path(args.checkpoint).resolve()
     root = Path(args.output_dir).resolve() if args.output_dir else checkpoint.parent / "manifest_eval"
     root.mkdir(parents=True, exist_ok=True)
@@ -114,9 +125,7 @@ def main() -> None:
     if torchrun is None:
         raise RuntimeError("torchrun is required; activate the MemoryQwen conda environment")
 
-    for manifest_arg in args.manifests:
-        manifest_path = Path(manifest_arg).expanduser().resolve()
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for manifest_path, manifest in manifests:
         seed = int(manifest["seed"])
         data_file = materialize_manifest(manifest_path, input_dir)
         report_file = root / f"{manifest_path.stem}.report.json"
