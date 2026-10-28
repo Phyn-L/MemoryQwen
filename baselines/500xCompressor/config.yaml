@@ -40,7 +40,7 @@ data:
   eval_prefetch_factor: 2
   eval_persistent_workers: true
 training:
-  batch_size: 2
+  batch_size: 4
   gradient_accumulation_steps: 1
   gradient_checkpoint_every_n_layers: 0
   epochs: 1
