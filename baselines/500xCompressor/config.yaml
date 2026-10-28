@@ -23,3 +23,5 @@ checkpoint:
   output_dir: outputs/baselines/500xCompressor
 logging:
   swanlab_run_name: MemoryQwen_Ablation
+  log_every: 25  # 训练日志记录间隔（步）
+  swanlab_mode: offline
