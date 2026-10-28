@@ -1,27 +1,79 @@
-_base_:
-  - ../../configs/harness.yaml
-  - ../../configs/models/qwen3-1.7b.yaml
-
 machine: 4090
-
-training:
-  batch_size: 8
-data:
-  limits:
-    max_context_tokens: 2048
-    max_question_tokens: 96
-    max_answer_tokens: 64
-memory:
-  memory_length: 128
-  readout_mode: "off"
-  readout_length: 0
 model:
+  name_or_path: ${MODEL_ROOT:-/data/lz/hf_cache/hub}/models--Qwen--Qwen3-1.7B/snapshots/70d244cc86ccca08cf5af4e1e306ecf908b1ad5e
+  torch_dtype: bfloat16
+  attn_implementation: sdpa
+  context_gradient_checkpointing: true
+  trainable_dtype: float32
   lora_rank: 512
   lora_alpha: 32.0
   lora_dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+memory:
+  memory_length: 128
+  readout_mode: off
+  readout_length: 0
+data:
+  root: ${DATA_ROOT:-contexts}
+  max_context_tokens: 2048
+  max_question_tokens: 96
+  max_answer_tokens: 64
+  train_stage: mix
+  recon_schedule: [1.0, 0.5]
+  qa_schedule: [1.0, 1.0]
+  recon_schedule_curve: cosine
+  max_qa_sample_per_context: 8
+  sortish_bucket_multiplier: 50
+  train_datasets: all
+  validation_datasets: [squad, msmarcov1.1, msmarcov2.1, hotpotqa(distractor), race, musique, 2wikimultihopqa]
+  filter_long_context: true
+  filter_no_qa: true
+  filter_qa_pair_answers: false
+  append_eos: true
+  question_padding_side: left
+  train_num_workers: 4
+  train_pin_memory: true
+  train_prefetch_factor: 2
+  train_persistent_workers: true
+  eval_num_workers: 2
+  eval_pin_memory: true
+  eval_prefetch_factor: 2
+  eval_persistent_workers: true
+training:
+  batch_size: 8
+  gradient_accumulation_steps: 2
+  gradient_checkpoint_every_n_layers: 1
+  epochs: 1
+  max_grad_norm: 1.0
+  seed: 42
+  deterministic: true
+optimizer:
+  name: adamw
+  lr: 0.0001
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+scheduler:
+  name: cosine
+  warmup_steps: 2500
+loss:
+  qa_weight: 1.0
+  recon_weight: 1.0
+  max_logits_rows: 256
+evaluation:
+  autoregressive_every: 2500
+  max_new_tokens: 64
+  qa_batch_size: 8
+  ctx_batch_size: 32
+  recon_teacherforce: true
+  recon_autoregressive: false
+  max_eval_contexts_per_dataset: 512
 checkpoint:
   output_dir: outputs/baselines/500xCompressor
 logging:
   swanlab_run_name: MemoryQwen_Ablation
-  log_every: 25  # 训练日志记录间隔（步）
+  swanlab_host: http://10.24.116.90:8000
   swanlab_mode: offline
+  swanlab_workspace: phyn
+  log_every: 25
+  swanlab_project: MemoryQwen

@@ -26,6 +26,7 @@ class MemoryBaselineModel(ContextMemoryModel):
             parameter.requires_grad_(False)
         model.ae_task_embedding = model.recon_task_embedding
         del model.recon_task_embedding
+        del model.context_layer_logits
         model.context_resampler = torch.nn.Identity()
         model.resampler = None
         model.memory_length = memory_length
