@@ -10,6 +10,10 @@ python -m baselines.icae.train --config baselines/icae/config.yaml
 python -m baselines.500xCompressor.train --config baselines/500xCompressor/config.yaml
 ```
 
+Both configs select a machine through the same `machine` field as the main project. Set
+`machine: h200` in the chosen baseline config, or override it at launch with `--machine h200`;
+`utils/machines.py` supplies that machine's model and data roots. The default is `4090`.
+
 Set `data.task.train_stage` in the selected config to `mix` or `two_stage`. The shared
 training loop selects the learned reconstruction task embedding for `mix` and the baseline's
 AE marker embedding during the reconstruction phase of `two_stage`.

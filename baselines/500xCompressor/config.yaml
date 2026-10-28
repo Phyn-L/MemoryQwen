@@ -2,6 +2,8 @@ _base_:
   - ../../configs/harness.yaml
   - ../../configs/models/qwen3-1.7b.yaml
 
+machine: 4090
+
 training:
   batch_size: 8
 data:
